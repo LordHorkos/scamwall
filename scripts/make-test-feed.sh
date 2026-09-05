@@ -11,7 +11,25 @@
 # RFC 2606 and resolves to nothing.
 
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+
+# Repository root.
+#
+# `cd "$(git rev-parse ...)"` does NOT guard itself: when git is missing or this
+# is not a repository, the substitution is empty and `cd ""` succeeds without
+# changing directory — and `set -e` does not catch it. This script would then
+# `mkdir -p keys` and write an Ed25519 PRIVATE KEY into whatever directory it
+# was launched from, outside the tree whose .gitignore is what keeps that key
+# out of a public repository. Each prerequisite is asserted separately, and any
+# failure is fatal before anything is created.
+command -v git >/dev/null 2>&1 || {
+  printf 'fatal: git is required and was not found on PATH\n' >&2; exit 2; }
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  printf 'fatal: not inside a git repository\n' >&2; exit 2; }
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$REPO_ROOT" ] || {
+  printf 'fatal: could not determine the repository root\n' >&2; exit 2; }
+cd "$REPO_ROOT" || {
+  printf 'fatal: could not enter repository root: %s\n' "$REPO_ROOT" >&2; exit 2; }
 
 KEY_DIR="keys"
 KEY="$KEY_DIR/feed-signing.ed25519.key"
