@@ -108,12 +108,24 @@ COPY --from=build /out/scamwall /usr/local/bin/scamwall
 # rather than a name.
 USER 65532:65532
 
-# The healthcheck runs entirely offline: it validates configuration, the CA,
-# the feed signature, and that enforcement is absent, without touching the
-# network and without authenticating. A health probe should not have side
-# effects, and it should not need a credential.
-HEALTHCHECK --interval=60s --timeout=10s --start-period=5s --retries=3 \
-  CMD ["/usr/local/bin/scamwall", "doctor", "--offline"]
+# There is deliberately no HEALTHCHECK.
+#
+# Phase 1 is a one-shot task: the container runs `sync --dry-run`, prints a
+# plan, and exits. Docker only probes a RUNNING container, and the first probe
+# fires no earlier than the start period — by which time this container has
+# already exited. A healthcheck here would never report on anything, while
+# implying to a reader that liveness is being monitored. That is worse than
+# having none.
+#
+# `scamwall doctor --offline` remains the right pre-flight check: it validates
+# configuration, the CA, the feed signature, and the absence of enforcement,
+# without touching the network and without a credential. Run it as its own
+# invocation, where its exit status is actually observed:
+#
+#   docker compose -f deploy/compose/compose.yaml run --rm scamwall doctor --offline
+#
+# When Phase 2 introduces a long-running service, a healthcheck becomes
+# meaningful and should be added then.
 
 ENTRYPOINT ["/usr/local/bin/scamwall"]
 CMD ["sync", "--dry-run"]

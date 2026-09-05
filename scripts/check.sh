@@ -11,7 +11,37 @@
 # Exit status: 0 only when every REQUIRED gate actually ran and passed.
 
 set -uo pipefail
-cd "$(git rev-parse --show-toplevel)" || exit 2
+# Repository root.
+#
+# `cd "$(git rev-parse ...)" || exit` does NOT guard this: when git is missing
+# or this is not a repository, the substitution is empty, and `cd ""` succeeds
+# without changing directory. The checker would then run against whatever
+# directory it happened to be launched from and report on the wrong tree. Each
+# prerequisite is therefore asserted separately, and any failure is fatal.
+command -v git >/dev/null 2>&1 || {
+  printf 'fatal: git is required and was not found on PATH\n' >&2; exit 2; }
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  printf 'fatal: not inside a git repository\n' >&2; exit 2; }
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$REPO_ROOT" ] || {
+  printf 'fatal: could not determine the repository root\n' >&2; exit 2; }
+cd "$REPO_ROOT" || {
+  printf 'fatal: could not enter repository root: %s\n' "$REPO_ROOT" >&2; exit 2; }
+
+# Go tools installed with `go install` land in $(go env GOPATH)/bin, which is on
+# PATH for an interactive login shell but not for a non-interactive one. Without
+# this, staticcheck and govulncheck report BLOCKED ("not installed") on a host
+# where they are in fact present — a false blocker, which is exactly the kind of
+# unproven-but-plausible result these gates exist to prevent.
+if command -v go >/dev/null 2>&1; then
+  GOBIN_DIR="$(go env GOBIN)"
+  [ -n "$GOBIN_DIR" ] || GOBIN_DIR="$(go env GOPATH)/bin"
+  case ":$PATH:" in
+    *":$GOBIN_DIR:"*) ;;
+    *) PATH="$PATH:$GOBIN_DIR" ;;
+  esac
+  export PATH
+fi
 
 PASS=0; FAIL=0; BLOCKED=0; OPTIONAL_SKIP=0
 
@@ -92,13 +122,31 @@ require "secret scan (tree)"          bash ./scripts/secret-scan.sh --tree
 require "container security (static)" bash ./scripts/container-security-check.sh --static
 
 echo
-echo "-- container --"
+echo "-- compose definition --"
+# `docker compose config` parses, interpolates and validates the definition
+# entirely client-side; it never contacts the daemon. Gating it behind daemon
+# reachability meant a check that CAN always run was reported as BLOCKED on
+# every host without socket access, which is most of them.
+#
+# --env-file is explicit because Compose resolves a bare `.env` against the
+# current directory, not against the compose file's directory.
+COMPOSE_FILE="deploy/compose/compose.yaml"
+COMPOSE_ENV_FILE="deploy/compose/.env"
+COMPOSE_ENV=()
+[ -f "$COMPOSE_ENV_FILE" ] && COMPOSE_ENV=(--env-file "$COMPOSE_ENV_FILE")
+if have docker; then
+  require "docker compose config" docker \
+    docker compose "${COMPOSE_ENV[@]}" -f "$COMPOSE_FILE" config --quiet
+else
+  blocked "docker compose config" "docker CLI not installed"
+fi
+
+echo
+echo "-- container (needs daemon) --"
 if have docker && docker info >/dev/null 2>&1; then
-  require "docker compose config" docker docker compose -f deploy/compose/compose.yaml config --quiet
-  require "docker build"          docker docker build -f container/Dockerfile -t scamwall:local .
+  require "docker build"                 docker docker build -f container/Dockerfile -t scamwall:local .
   require "container security (runtime)" bash ./scripts/container-security-check.sh --runtime
 else
-  blocked "docker compose config"        "docker daemon not reachable by $(id -un)"
   blocked "docker build"                 "docker daemon not reachable by $(id -un)"
   blocked "container security (runtime)" "docker daemon not reachable by $(id -un)"
 fi
