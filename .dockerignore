@@ -1,0 +1,30 @@
+# Deny everything, then allow only what the build genuinely needs.
+#
+# An allowlist is used deliberately: a denylist silently admits anything the
+# author forgot, and the thing most likely to be forgotten is the thing most
+# dangerous to include. Nothing containing a credential, a key, or
+# installation-specific trust material can reach the build context.
+*
+
+!go.mod
+!go.sum
+!cmd/
+!internal/
+
+# Test fixtures are excluded: the image contains only the binary, and the feed
+# used at run time is supplied as a read-only mount.
+testdata/
+keys/
+secrets/
+certs/
+state/
+logs/
+data/
+config/
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.log
+.git/

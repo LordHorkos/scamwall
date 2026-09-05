@@ -1,0 +1,25 @@
+{
+  "pihole": {
+    "host": "pi.hole",
+    "port": 443,
+    "ca_path": "/etc/scamwall/certs/pihole-ca.crt",
+    "secret_path": "/run/secrets/pihole_app_password",
+    "connect_timeout": "5s",
+    "request_timeout": "10s",
+    "total_timeout": "30s",
+    "logout_timeout": "5s",
+    "max_response_bytes": 1048576,
+    "max_retries": 2,
+    "retry_base_delay": "200ms"
+  },
+  "feed": {
+    "path": "/etc/scamwall/feed.json",
+    "trust_key_id": "scamwall-test-key-1",
+    "trust_public_key": "ZZdzt8vw2UCXeoT95fcT9Fh0U80M7L0I1L/io4AeR7A=",
+    "max_file_bytes": 1048576,
+    "max_records": 10000
+  },
+  "runtime": {
+    "dry_run": true
+  }
+}

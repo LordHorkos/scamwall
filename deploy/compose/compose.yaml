@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# ScamWall Phase 1 deployment.
+#
+# Phase 1 is a one-shot, read-only, dry-run task: it authenticates, reads
+# version information, validates the signed feed, prints a proposed plan, and
+# exits. It is not a long-running service and it changes nothing.
+#
+# Values that are specific to a site live in a local .env file, which is
+# gitignored. Nothing in this file identifies a particular network.
+
+name: scamwall
+
+services:
+  scamwall:
+    image: scamwall:local
+    build:
+      context: ../..
+      dockerfile: container/Dockerfile
+      args:
+        VERSION: ${SCAMWALL_VERSION:-dev}
+        COMMIT: ${SCAMWALL_COMMIT:-unknown}
+        BUILD_DATE: ${SCAMWALL_BUILD_DATE:-unknown}
+
+    # ---------------------------------------------------------------------
+    # Name resolution
+    #
+    # The API hostname is pinned to a fixed address. On some networks DNS for
+    # this name answers with an entirely different device, and ScamWall must
+    # never authenticate to whatever happens to hold the name.
+    #
+    # This overrides resolution ONLY. TLS still requires a certificate valid
+    # for the name below, chaining to the private CA mounted at /etc/scamwall.
+    #
+    # PIHOLE_HOST_IP defaults to the Docker bridge gateway, which is the host.
+    # Set it in .env to route over a specific interface instead.
+    # ---------------------------------------------------------------------
+    extra_hosts:
+      - "pi.hole:${PIHOLE_HOST_IP:-host-gateway}"
+
+    # ---------------------------------------------------------------------
+    # Hardening
+    # ---------------------------------------------------------------------
+    read_only: true
+    privileged: false
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # A fixed non-root UID/GID matching the image.
+    user: "65532:65532"
+
+    # Supplementary group granting read access to the application password.
+    # Set SCAMWALL_SECRET_GID in .env to the gid that owns the secret file.
+    # Defaults to the container's own gid, which grants nothing extra.
+    group_add:
+      - "${SCAMWALL_SECRET_GID:-65532}"
+
+    # No ports are published. ScamWall listens on nothing; it is a client.
+    # There is deliberately no `ports:` key.
+    #
+    # The default bridge network is used. There is deliberately no
+    # `network_mode: host`, and no Docker socket is mounted.
+
+    # Writable scratch space only, with execution and setuid disabled so a
+    # downloaded payload cannot be run from it.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+
+    # ---------------------------------------------------------------------
+    # Mounts — all read-only, all explicit.
+    #
+    # /etc/pihole is NOT mounted. /var/run/docker.sock is NOT mounted.
+    # ---------------------------------------------------------------------
+    volumes:
+      - type: bind
+        source: /etc/scamwall/certs/pihole-ca.crt
+        target: /etc/scamwall/certs/pihole-ca.crt
+        read_only: true
+      - type: bind
+        source: ${SCAMWALL_CONFIG:-./config.example.json}
+        target: /etc/scamwall/config.json
+        read_only: true
+      - type: bind
+        source: ${SCAMWALL_FEED:-../../testdata/feed.json}
+        target: /etc/scamwall/feed.json
+        read_only: true
+
+    # The application password is delivered as a Compose secret, which mounts
+    # it read-only at /run/secrets/pihole_app_password — the only path ScamWall
+    # will read a credential from.
+    secrets:
+      - pihole_app_password
+
+    # ---------------------------------------------------------------------
+    # Resource bounds
+    #
+    # A read-only status client has no legitimate reason to consume much of
+    # anything. Tight bounds turn a runaway or hostile condition into a
+    # contained failure rather than a host-wide one.
+    # ---------------------------------------------------------------------
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
+    cpus: 0.50
+
+    # Phase 1 is a one-shot task, so it must not be restarted on clean exit.
+    # Restarting a dry-run repeatedly would produce noise, not protection.
+    restart: "no"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+secrets:
+  pihole_app_password:
+    file: ${SCAMWALL_SECRET_FILE:-/etc/scamwall/secrets/pihole_app_password}

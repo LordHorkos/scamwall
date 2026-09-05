@@ -187,7 +187,9 @@ The application password is read **only** from
   `MarshalJSON()` all return `"[REDACTED]"`, so it cannot be leaked by an
   accidental `%v` or a JSON dump.
 * Its plaintext is reachable only through an explicit `Reveal()` call, which
-  appears exactly once in the tree — in the auth request builder.
+  appears in exactly two places, both of them the point at which a credential
+  is placed on the wire: the auth request body and the `X-FTL-SID` header. A
+  test enforces that count.
 * It is zeroed after the authentication request is constructed.
 
 The session ID receives the same `Secret` treatment.
