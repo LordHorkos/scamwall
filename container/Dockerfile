@@ -38,6 +38,13 @@ ARG BUILD_DATE=unknown
 
 WORKDIR /src
 
+# GOTOOLCHAIN=local forbids an implicit toolchain download anywhere in this
+# stage. It is set BEFORE the module steps: `go mod download` will happily
+# fetch a different compiler if go.mod asks for one, which would make the
+# build silently non-hermetic and dependent on network reachability. If the
+# base image Go does not satisfy go.mod, the build must fail visibly instead.
+ENV GOTOOLCHAIN=local
+
 # Dependencies are resolved before the source is copied so that a source-only
 # change does not invalidate the module download layer.
 COPY go.mod go.sum ./
@@ -51,10 +58,7 @@ COPY . .
 #   -trimpath      removes build-host paths from the binary
 #   -buildid=      removes a non-deterministic build id
 #   -s -w          strips symbol and DWARF tables
-# GOTOOLCHAIN=local forbids an implicit toolchain download during the image
-# build. If the base image Go does not satisfy go.mod, the build fails visibly
-# instead of silently fetching a different compiler over the network.
-ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath GOTOOLCHAIN=local
+ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath
 RUN go build \
       -ldflags="-s -w -buildid= \
         -X main.version=${VERSION} \
