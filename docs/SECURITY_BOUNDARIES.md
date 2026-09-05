@@ -170,9 +170,11 @@ This is the more conservative choice: `docker` group membership is effectively
 root on this host, since it permits mounting the host filesystem into a
 container.
 
-Consequently `docker build` and the container-security **runtime** assertions
-are operator-executed and are reported as BLOCKED — never as passing — when
-`scripts/check.sh` runs as the service account.
+Consequently `docker build` and `scripts/container-runtime-verify.sh` are
+operator-executed, and are reported as BLOCKED — never as passing — when
+`scripts/check.sh` runs as the service account. The verifier itself has no git
+dependency, so the operator needs no `safe.directory` exception to run it here
+(§5.5).
 
 `docker compose config` is **not** in that set. It parses, interpolates and
 validates the definition entirely client-side, so it runs without daemon
@@ -219,84 +221,126 @@ remains at 1.24.4 and is not used for this module.
 
 Operator-executed, since the service account cannot reach the daemon (§5.2).
 
-> **This evidence describes a SUPERSEDED image.** It was collected before the
-> `HEALTHCHECK` was removed from `container/Dockerfile` and before
-> `scripts/container-security-check.sh` was corrected. The image must be
-> rebuilt and the runtime checks rerun before these results describe what is
-> actually shipped. Until then, treat this section as a record of what *was*
-> observed, not as current verification.
+**Scope: image `sha256:4a5bfa3dcb86550ed4ce76a4570f24d63ee363770b290dc364dbfea57a0859fd`.**
+Every claim in this section is scoped to that exact image ID and to no other.
+An earlier round of evidence, against image `sha256:303426…c08eb`, is
+superseded and has been removed rather than left to look current.
 
-**Build.** Exit 0. Image config digest
-`sha256:303426340aa1d68c3740aafb2ffc18f33e54b1d7ef3c6da4960a9f706f6c08eb`. All
-claims below are scoped to that digest.
+**Binary identity.** The image reports the commit it was built from and,
+critically, that enforcement is not compiled in:
 
-**Container creation.** With `--env-file deploy/compose/.env` passed
-explicitly, `docker compose create --no-build` returned exit 0 and the service
-container reached `Created` state. It was inspected, never started, so no
-authenticated workflow ran.
+```
+version: 9fc3b1a
+commit:  9fc3b1abf70313b49c6f603b7773f341fcb7d789
+built:   2026-09-05T22:39:31Z
+enforcement compiled in: false
+mode:    read-only, dry-run
+VERSION exit=0
+```
 
-**Inspected `HostConfig` / `Config`** — the hardening the compose definition
-claims, observed as effective on a real container:
+**Offline execution.** The same image completed `plan` with the network
+disabled, no password mount and no CA mount, a read-only rootfs with read-only
+config and feed mounts, uid/gid 65532:65532, all capabilities dropped,
+`no-new-privileges`, restricted tmpfs, 128 MiB memory and memory-swap, 64 PIDs
+and 0.5 CPU:
+
+```
+feed:   scamwall-test-feed (manifest 1.0)
+digest: sha256:4d1ed4ba4d3c7de138258360b2ed5e7b25442fc5bb42cca14693b0a35cbb952f
+5 proposed, 3 excluded (1 not block, 1 below confidence, 1 expired)
+PLAN exit=0
+```
+
+With no network namespace at all, this is a demonstration rather than a claim
+about intent: plan computation cannot have contacted anything.
+
+**Recreated deployment container.** Inspected, never started:
 
 | Property | Observed |
 | --- | --- |
-| `User` | `65532:65532` |
-| `ReadonlyRootfs` | `true` |
-| `Privileged` | `false` |
-| `CapDrop` / `CapAdd` | `["ALL"]` / `null` |
-| `SecurityOpt` | `["no-new-privileges:true"]` |
-| `GroupAdd` | the `swsecret` GID, resolved from `.env` |
-| `NetworkMode` | project-scoped bridge network — **not** host |
-| `PortBindings` | `{}` — nothing published |
-| `Tmpfs` `/tmp` | `rw,noexec,nosuid,nodev,size=16m` |
-| `Memory` | 128 MiB |
-| `NanoCpus` | 0.5 CPU |
-| `PidsLimit` | 64 |
-| `RestartPolicy` | `no`, max retries 0 |
+| `Image` | matched the exact image ID above |
+| `State.Status` | `created` |
+| `Config.Healthcheck` | `null` |
+| exit status | `RECREATE exit=0` |
 
-All four mounts reported `RW=false`: the config file, the feed fixture, the
-application password, and the Pi-hole CA.
+`Healthcheck=null` confirms the Dockerfile's `HEALTHCHECK` removal; `Status=created`
+confirms the authenticated default command never ran.
 
-**Offline execution.** `plan` was run with `--network none`, no password mount,
-read-only rootfs, uid/gid 65532, all capabilities dropped, `no-new-privileges`,
-restricted tmpfs, and the resource limits above. It produced a plan over the
-repository's signed test fixture and exited 0:
+**What this evidence does NOT establish.** Stated plainly, because each of
+these has at some point been read into results that did not support it:
 
-```
-proposed plan (scamwall-plan-v1)
-feed:   scamwall-test-feed (manifest 1.0)
-digest: sha256:4d1ed4ba4d3c7de138258360b2ed5e7b25442fc5bb42cca14693b0a35cbb952f
-...
-5 proposed, 3 excluded (1 not block, 1 below confidence, 1 expired)
-```
+* **Not live authentication.** `POST /api/auth`, authenticated
+  `GET /api/info/version`, and `DELETE /api/auth` &rarr; `204` remain unverified
+  against live infrastructure (§5.1).
+* **Not runtime password access.** §5.1's grant is a permissions
+  configuration. No ScamWall process has been observed reading the password.
+* **Not completion of the corrected automated runtime gate.**
+  `scripts/container-runtime-verify.sh` — which asserts the full property set
+  and fails when an inspection cannot run — has **not** been run against this
+  image. This section is a hand-collected subset, not that gate's output.
 
-This demonstrates that plan computation is genuinely offline: it completed with
-no network namespace at all, and with no credential present.
+### 5.5 How runtime verification is structured
 
-**What this evidence does NOT establish:**
+Two programs, split along the privilege boundary rather than by topic:
 
-* **Not** live authentication. The subcommand was `plan` — not `doctor`, not
-  `status`, not `sync`. `POST /api/auth` remains unverified against live
-  infrastructure (§5.1).
-* **Not** runtime password access. §5.1's grant is a permissions
-  configuration; no process has been observed reading the file.
-* **Not** the current image. See the notice above.
-* The excerpt returned by the operator did not repeat the full `docker run`
-  invocation, so the exact flag set used for the offline run is recorded here
-  as described rather than as transcribed.
+| | `container-security-check.sh` | `container-runtime-verify.sh` |
+| --- | --- | --- |
+| Runs as | the `scamwall` service account | the operator |
+| Inspects | repository content | the daemon's image and container |
+| Uses git | yes, and requires it | **never** |
+| In `check.sh` | runs every time | BLOCKED without daemon access |
 
----
-### 5.5 Operator rerun procedure
+The Docker path has no git dependency by design. The operator runs it as root
+against a repository owned by `scamwall`, where git refuses with a
+dubious-ownership error. The alternatives — a `safe.directory` exception,
+changing repository ownership, or putting the service account in the `docker`
+group — each widen a trust boundary to buy convenience. Instead the verifier
+derives the repository root from its own location and confirms it by the files
+it must contain, so none of those grants is needed.
 
-The evidence in §5.4 describes a superseded image. These are the exact commands
-that replace it. Run them from the repository root as the operator (the service
-account cannot reach the daemon — §5.2).
+Correctness properties the verifier now holds, each of which replaced a
+false pass:
 
-`--env-file` is explicit in every Compose invocation. Compose resolves a bare
-`.env` against the current working directory, so omitting it silently drops
-site-specific values, including the `swsecret` GID in `group_add`.
+* Creation status is checked explicitly, and the inspection container is
+  created under a Compose project name private to that invocation — so a
+  pre-existing container can neither mask a failed create nor be inspected in
+  its place.
+* Inspection output is captured and its exit status verified before any
+  assertion reads it, and assertions are evaluated with `jq` over that JSON.
+  A failed `docker inspect` or `docker history` can no longer be mistaken for
+  a satisfied property, and error text on either stream cannot match a
+  credential pattern.
+* The requested image is resolved to its immutable image ID, and the inspected
+  container's `.Image` must equal it. `SCAMWALL_EXPECTED_IMAGE_ID` pins that
+  ID when the operator wants to verify one specific build.
+* Prohibited mounts are detected through `.Mounts`, which covers binds,
+  volumes and tmpfs alike. `.HostConfig.Binds` reflects only one way of
+  requesting a mount and misses the rest.
+* Only resources created by the invocation are removed, including on failure
+  or interruption. `compose down` is always scoped to the private project.
+* Image history is labelled a **limited pattern check** over build
+  instructions — evidence against a pasted credential, not proof that the
+  filesystem holds no secret.
+* Filesystem enumeration is retained, with every step's status checked, and
+  its results are described as absence **of the enumerated paths**. An
+  arbitrarily renamed executable is not ruled out and is not claimed to be.
 
-**1. Rebuild the updated image.**
+`scripts/tests/runtime-verify-test.sh` drives the verifier against a scripted
+fake Docker and asserts that each of those failure modes produces a nonzero
+exit. It needs no daemon, so it runs in the ordinary gate suite as the service
+account.
+
+### 5.6 Operator rerun procedure
+
+The corrected automated gate has not been run against the image in §5.4. These
+are the exact commands that close that gap. Run them from the repository root
+as the operator; the service account cannot reach the daemon (§5.2).
+
+`--env-file` is explicit in every Compose invocation, because Compose resolves
+a bare `.env` against the current working directory — omit it and
+`group_add` silently falls back to its default.
+
+**1. Rebuild the image.**
 
 ```bash
 cd /home/scamwall/scamwall
@@ -309,21 +353,20 @@ docker build \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   .
 
-# Record the new digest; it supersedes the one in 5.4.
 docker image inspect -f '{{.Id}}' scamwall:local
 ```
 
-**2. Recreate the container WITHOUT starting it.**
+If the build arguments are produced on the operator's side, note that `git` is
+needed for those two substitutions only — not by any verification step. An
+operator without git access can pass literal values instead.
 
-`create` builds the container and stops. Do **not** use `up`, `start` or `run`
-on the default command here: the image's `CMD` is `sync --dry-run`, which
-performs a live authenticated read. Creating and inspecting keeps this step
-free of any credential use.
+**2. Recreate the deployment container WITHOUT starting it.**
+
+The image's `CMD` is `sync --dry-run`, which performs a live authenticated
+read. Use `create`; do **not** use `up`, `start`, or `run` with the default
+command.
 
 ```bash
-docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml \
-  down --remove-orphans
-
 docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml \
   create --no-build
 
@@ -331,26 +374,27 @@ docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml \
   ps -a
 ```
 
-**3. Rerun the corrected runtime checks.**
+**3. Run the corrected runtime verification.**
 
-The checker creates and removes its own container, so remove the one from step 2
-first if it is still present. It now FAILS rather than skips when an inspection
-cannot run, and establishes shell absence by enumerating the image filesystem
-rather than by attempting execution.
+This is the step that produces the gate output §5.4 does not yet have. It
+creates its own inspection container under a private Compose project, removes
+only what it created, and needs no git — so it is safe to run as root in this
+`scamwall`-owned repository without a `safe.directory` exception.
 
 ```bash
-docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml rm -fs
-
-bash scripts/container-security-check.sh --runtime   # runtime assertions only
-bash scripts/check.sh                                # every gate
+# Pin the expected image so a stale local tag cannot be verified by mistake.
+SCAMWALL_EXPECTED_IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)" \
+  bash scripts/container-runtime-verify.sh
+echo "VERIFY exit=$?"
 ```
+
+Exit 0 means every required check ran and passed. Any nonzero exit means at
+least one check failed **or could not run**; the output distinguishes the two.
 
 **4. Repeat the offline plan.**
 
-`plan` reads only the configuration and the signed feed — it never opens the CA
-or the password, so neither is mounted. With `--network none` there is no
-network namespace at all, which is what makes this a real offline proof rather
-than a claim about intent.
+`plan` reads only the configuration and the signed feed — it opens neither the
+CA nor the password, so neither is mounted.
 
 ```bash
 docker run --rm \
@@ -367,12 +411,19 @@ docker run --rm \
 echo "PLAN exit=$?"
 ```
 
-**Live authentication remains UNVERIFIED.** None of the four steps above
-authenticates to Pi-hole, and none is intended to. Proving `POST /api/auth`,
-authenticated `GET /api/info/version`, and `DELETE /api/auth` &rarr; `204`
-against live infrastructure is a separate, explicitly authorised step (§5.1),
-and until it is performed those paths are exercised only against the test
-suite's fake HTTPS server.
+**5. Confirm nothing was left running.**
+
+```bash
+docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml ps -a
+docker ps -a --filter 'name=scamwall-verify-' --format '{{.Names}}'   # expect no output
+```
+
+**Live authentication remains UNVERIFIED.** No step above authenticates to
+Pi-hole, and none is intended to. Proving `POST /api/auth`, authenticated
+`GET /api/info/version`, and `DELETE /api/auth` &rarr; `204` against live
+infrastructure is a separate, explicitly authorised action (§5.1). Until it is
+performed, those paths are exercised only against the test suite's fake HTTPS
+server.
 
 ---
 

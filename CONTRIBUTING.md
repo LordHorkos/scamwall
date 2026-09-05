@@ -92,13 +92,25 @@ staticcheck ./...
 govulncheck ./...
 ```
 
-Plus, for container changes:
+Plus, for container changes — these run without Docker daemon access:
 
 ```bash
-docker build -f container/Dockerfile .
-docker compose -f deploy/compose/compose.yaml config
-./scripts/container-security-check.sh
+docker compose --env-file deploy/compose/.env \
+  -f deploy/compose/compose.yaml config     # client-side; no daemon needed
+./scripts/container-security-check.sh        # repository content only
+./scripts/tests/runtime-verify-test.sh       # verifier regression tests
 ```
+
+And, with Docker daemon access, operator-executed:
+
+```bash
+docker build -f container/Dockerfile -t scamwall:local .
+./scripts/container-runtime-verify.sh        # image + container; needs no git
+```
+
+The runtime verifier is a separate program from the repository checker because
+it runs on the other side of a privilege boundary. See
+`docs/SECURITY_BOUNDARIES.md` §5.5.
 
 And before every commit:
 

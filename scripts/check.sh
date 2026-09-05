@@ -142,13 +142,27 @@ else
 fi
 
 echo
-echo "-- container (needs daemon) --"
+echo "-- runtime verifier regression tests --"
+# The runtime verifier's failure modes are all FALSE PASSES, which by
+# definition do not announce themselves. These tests drive it against a
+# scripted fake Docker so each one is reproduced deliberately, and they need
+# no daemon — so they run here, as the service account, on every gate run.
+require "runtime-verify regression tests" bash ./scripts/tests/runtime-verify-test.sh
+
+echo
+echo "-- container runtime (operator-executed, needs daemon) --"
+# Runtime verification is a separate program: it needs the daemon and has no
+# git dependency, so the operator can run it as root in this user-owned
+# repository without a safe.directory exception.
+#
+# When the daemon is unreachable it is BLOCKED, never skipped: the exit status
+# of this suite must not suggest the image was verified when it was not.
 if have docker && docker info >/dev/null 2>&1; then
-  require "docker build"                 docker docker build -f container/Dockerfile -t scamwall:local .
-  require "container security (runtime)" bash ./scripts/container-security-check.sh --runtime
+  require "docker build"        docker docker build -f container/Dockerfile -t scamwall:local .
+  require "container runtime verification" bash ./scripts/container-runtime-verify.sh
 else
-  blocked "docker build"                 "docker daemon not reachable by $(id -un)"
-  blocked "container security (runtime)" "docker daemon not reachable by $(id -un)"
+  blocked "docker build"                    "docker daemon not reachable by $(id -un)"
+  blocked "container runtime verification"  "docker daemon not reachable by $(id -un) — run scripts/container-runtime-verify.sh as the operator"
 fi
 
 echo
