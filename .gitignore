@@ -1,0 +1,35 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+/secrets/
+/config/
+/state/
+/data/
+/logs/
+
+# Certificates and private keys
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Go artifacts
+/bin/
+/dist/
+*.test
+coverage.out
+coverage.html
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
