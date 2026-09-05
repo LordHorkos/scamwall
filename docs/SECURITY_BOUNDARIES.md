@@ -163,12 +163,40 @@ This is the more conservative choice: `docker` group membership is effectively
 root on this host, since it permits mounting the host filesystem into a
 container.
 
-### 5.3 Go toolchain
+### 5.3 Go toolchain — RESOLVED, and a finding in its own right
 
-Not installed at time of writing. Approved for installation via
-`sudo apt-get install -y golang-go` (Debian trixie, Go 1.24). Until present,
-`go vet`, `go test -race`, `staticcheck`, and `govulncheck` cannot be run, and
-their results must be reported as unrun rather than as passing.
+Go is installed. The distribution package is `go1.24.4`, which is **end-of-life
+upstream**: the supported set at the time of writing is `go1.26.8` and
+`go1.27.1`.
+
+Running `govulncheck` against the 1.24.4 build produced **26 findings** — 24 in
+the standard library plus two in dependencies. Two were reachable from
+ScamWall's own code, both through the same call path that processes untrusted
+feed content:
+
+| Finding | Reached via | Effect |
+| --- | --- | --- |
+| `GO-2026-5970` | `domain.Normalize` &rarr; `idna.ToASCII` &rarr; `norm.Form.Bytes` | Infinite loop on crafted input in `golang.org/x/text` — a denial of service in domain validation |
+| `GO-2026-5026` | `domain.Normalize` &rarr; `idna.Profile.ToASCII` | Vulnerability in `golang.org/x/net/idna` |
+
+That a feed-processing path reached a denial-of-service bug is the reason the
+toolchain and dependency versions are treated as security controls rather than
+housekeeping.
+
+Resolution:
+
+* `go.mod` pins `toolchain go1.26.8`, a currently supported release.
+* `golang.org/x/net` raised to `v0.58.0`, `golang.org/x/text` to `v0.41.0`.
+* The container base image is pinned to `golang:1.26.8-trixie` by digest, so
+  local, CI and container builds use the same compiler.
+* `GOTOOLCHAIN=local` in the image build forbids an implicit toolchain download,
+  so a mismatch fails visibly instead of silently fetching another compiler.
+
+`govulncheck` now reports **no vulnerabilities**.
+
+Note that `go1.26.8` is obtained through Go's own toolchain mechanism rather
+than from apt, and is verified against the Go checksum database. The apt package
+remains at 1.24.4 and is not used for this module.
 
 ---
 

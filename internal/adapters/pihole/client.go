@@ -15,11 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"math/rand/v2"
+	"mime"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,15 +48,15 @@ const (
 
 // Errors returned by the client.
 var (
-	ErrPlaintextRefused   = errors.New("plaintext HTTP is refused")
+	ErrPlaintextRefused    = errors.New("plaintext HTTP is refused")
 	ErrCrossOriginRedirect = errors.New("refused redirect to a different origin")
-	ErrTooManyRedirects   = errors.New("too many redirects")
-	ErrResponseTooLarge   = errors.New("response exceeds maximum size")
-	ErrUnexpectedContent  = errors.New("unexpected response content type")
-	ErrNotAuthenticated   = errors.New("no active session")
-	ErrNoSessionID        = errors.New("authentication succeeded but returned no session id")
-	ErrUnexpectedDial     = errors.New("refused connection to an unexpected address")
-	ErrCAInvalid          = errors.New("certificate authority file contains no usable certificate")
+	ErrTooManyRedirects    = errors.New("too many redirects")
+	ErrResponseTooLarge    = errors.New("response exceeds maximum size")
+	ErrUnexpectedContent   = errors.New("unexpected response content type")
+	ErrNotAuthenticated    = errors.New("no active session")
+	ErrNoSessionID         = errors.New("authentication succeeded but returned no session id")
+	ErrUnexpectedDial      = errors.New("refused connection to an unexpected address")
+	ErrCAInvalid           = errors.New("certificate authority file contains no usable certificate")
 )
 
 // APIError is a redacted representation of a failed API response.
@@ -104,10 +105,10 @@ type SessionState struct {
 
 // ComponentVersion is the local and remote version of one Pi-hole component.
 type ComponentVersion struct {
-	LocalBranch  string
-	LocalVersion string
-	LocalHash    string
-	LocalDate    string
+	LocalBranch   string
+	LocalVersion  string
+	LocalHash     string
+	LocalDate     string
 	RemoteVersion string
 	RemoteHash    string
 }
@@ -381,7 +382,7 @@ func (c *Client) WithSession(ctx context.Context, secret config.Secret, fn func(
 	return fn(ctx)
 }
 
-func itoa(n int) string { return fmt.Sprintf("%d", n) }
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // sanitizeMessage bounds and cleans a server-supplied message before it is
 // allowed into an error string.

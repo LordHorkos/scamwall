@@ -17,12 +17,19 @@
 # Pinned by digest, not by tag: a tag is mutable and can be repointed at
 # different content, which would silently change what is being built.
 #
-# golang:1.24-bookworm
-#   index  sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac
-#   amd64  sha256:98d673f18a1aac43da744209873cb79323e11706f909251bcfb131828b95559d
+# golang:1.26.8-trixie
+#   index  sha256:771f3162219f7a66bb6be3fea1ba31f418932946a99ad9eac26ffd555dfcf393
+#   amd64  sha256:2d54f6c8c6ea532a321e0b4c69553b2ed3637608d4f4357dbed37939fe2620cc
 # The index digest is used so the image remains correct on other architectures;
-# on this host (linux/amd64) it resolves to the amd64 manifest above.
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS build
+# on this host (linux/amd64) it resolves to the amd64 manifest above, verified
+# against the registry before pinning.
+#
+# Go 1.26.8 is a CURRENTLY SUPPORTED release. The previous pin was 1.24, which
+# is end-of-life upstream and which govulncheck flagged for 24 standard-library
+# vulnerabilities, several reachable from this code. The toolchain version is a
+# security control, not a preference, and it must match go.mod's toolchain
+# directive so local, CI and container builds agree.
+FROM golang:1.26.8-trixie@sha256:771f3162219f7a66bb6be3fea1ba31f418932946a99ad9eac26ffd555dfcf393 AS build
 
 # Build metadata, supplied by the build command rather than baked into source.
 ARG VERSION=dev
@@ -44,7 +51,10 @@ COPY . .
 #   -trimpath      removes build-host paths from the binary
 #   -buildid=      removes a non-deterministic build id
 #   -s -w          strips symbol and DWARF tables
-ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath
+# GOTOOLCHAIN=local forbids an implicit toolchain download during the image
+# build. If the base image Go does not satisfy go.mod, the build fails visibly
+# instead of silently fetching a different compiler over the network.
+ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath GOTOOLCHAIN=local
 RUN go build \
       -ldflags="-s -w -buildid= \
         -X main.version=${VERSION} \
@@ -59,7 +69,7 @@ RUN ! ldd /out/scamwall 2>/dev/null | grep -q "=>" || (echo "binary is not stati
 
 # Verify the binary runs and reports enforcement as absent. This is a build-time
 # assertion of the Phase 1 boundary.
-RUN /out/scamwall version | grep -q "enforcement compiled in  false" \
+RUN /out/scamwall version | grep -qE "enforcement compiled in[[:space:]]+false" \
       || (echo "enforcement must not be compiled in" && exit 1)
 
 # =============================================================================

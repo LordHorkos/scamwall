@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -146,7 +147,7 @@ func Normalize(raw string) (Domain, error) {
 	// Guard against mixed-script labels before conversion, while the original
 	// runes are still visible. After punycode conversion the distinction is
 	// gone.
-	if err := checkSingleScript(s); err != nil {
+	if err := checkMixedScript(s); err != nil {
 		return "", err
 	}
 
@@ -161,6 +162,12 @@ func Normalize(raw string) (Domain, error) {
 
 	if len(ascii) > MaxLength {
 		return "", fmt.Errorf("%w: %d > %d", ErrTooLong, len(ascii), MaxLength)
+	}
+
+	// Checked before the label-count rule so that the bare name reports the
+	// specific reason rather than the generic "single label".
+	if ascii == "localhost" || strings.HasSuffix(ascii, ".localhost") {
+		return "", ErrLocalhost
 	}
 
 	labels := strings.Split(ascii, ".")
@@ -216,39 +223,122 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// checkSingleScript rejects labels that mix Unicode scripts.
+// allowedScriptGroups are sets of scripts that legitimately co-occur inside a
+// single label. Japanese mixes Han with the two kana scripts, Chinese mixes Han
+// with Bopomofo, and Korean mixes Han with Hangul. Rejecting those would break
+// real names.
+var allowedScriptGroups = []map[string]bool{
+	{"Han": true, "Hiragana": true, "Katakana": true}, // Japanese
+	{"Han": true, "Bopomofo": true},                   // Chinese
+	{"Han": true, "Hangul": true},                     // Korean
+}
+
+// checkMixedScript rejects labels that combine scripts in a confusable way.
 //
-// This is a conservative defence against homograph attacks: "аpple.com" with a
-// Cyrillic first letter converts to valid punycode and would otherwise be
-// accepted as a distinct, legitimate-looking name. Requiring one script per
-// label blocks the common confusable constructions.
+// This is a defence against homograph attacks: "аpple.example.com" with a
+// Cyrillic а converts to perfectly valid punycode and would otherwise be
+// accepted as a distinct, legitimate-looking name.
 //
-// It is not a complete UTS #39 implementation. Whole-script confusables — a
-// name written entirely in one non-Latin script that resembles a Latin one —
-// are not detected here.
-func checkSingleScript(s string) error {
+// The rule follows the shape of UTS #39's moderately restrictive profile:
+// Latin may accompany the CJK script groups, but a label mixing Latin with
+// Cyrillic or Greek — the pairs that supply nearly all confusable characters —
+// is refused. A label written wholly in one non-Latin script is fine.
+//
+// It is not a complete UTS #39 implementation. Whole-script confusables, where
+// a name is written entirely in one script that resembles another, are not
+// detected here.
+func checkMixedScript(s string) error {
 	for _, label := range strings.Split(s, ".") {
-		var seen string
-		for _, r := range label {
-			if r < 0x80 {
-				// ASCII is compatible with any script for this purpose;
-				// digits and hyphens appear in names of every script.
-				continue
-			}
-			script := scriptOf(r)
-			if script == "" {
-				continue
-			}
-			if seen == "" {
-				seen = script
-				continue
-			}
-			if seen != script {
-				return fmt.Errorf("%w: %q mixes %s and %s", ErrMixedScript, label, seen, script)
-			}
+		if isASCII(label) {
+			// Pure ASCII is Latin-only by construction; skip the expensive
+			// per-rune script lookup for the overwhelmingly common case.
+			continue
+		}
+		scripts := scriptsIn(label)
+		if err := scriptsCompatible(label, scripts); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// isASCII reports whether s contains only ASCII.
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// scriptsIn returns the set of Unicode scripts present in a label.
+//
+// Letters are what carry script identity; digits, hyphens and other
+// script-neutral characters are ignored so that "web3" is not treated as
+// mixing anything.
+func scriptsIn(label string) map[string]bool {
+	found := map[string]bool{}
+	for _, r := range label {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+		if name := scriptOf(r); name != "" {
+			found[name] = true
+		}
+	}
+	return found
+}
+
+// scriptsCompatible reports whether a set of scripts may share one label.
+func scriptsCompatible(label string, scripts map[string]bool) error {
+	if len(scripts) <= 1 {
+		return nil
+	}
+
+	// Latin is permitted alongside a CJK group, so consider the non-Latin
+	// remainder when matching against the allowed groups.
+	hasLatin := scripts["Latin"]
+	rest := make(map[string]bool, len(scripts))
+	for name := range scripts {
+		if name != "Latin" {
+			rest[name] = true
+		}
+	}
+
+	if len(rest) == 0 {
+		return nil
+	}
+	for _, group := range allowedScriptGroups {
+		if subsetOf(rest, group) {
+			return nil
+		}
+	}
+	// A single non-Latin script on its own is fine; combined with Latin it is
+	// the classic confusable construction and is refused.
+	if len(rest) == 1 && !hasLatin {
+		return nil
+	}
+	return fmt.Errorf("%w: %q combines %s", ErrMixedScript, label, joinScripts(scripts))
+}
+
+func subsetOf(sub, super map[string]bool) bool {
+	for k := range sub {
+		if !super[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// joinScripts renders a script set deterministically for error messages.
+func joinScripts(scripts map[string]bool) string {
+	names := make([]string, 0, len(scripts))
+	for k := range scripts {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, "+")
 }
 
 // scriptOf returns the name of the Unicode script r belongs to, ignoring

@@ -12,18 +12,19 @@ import (
 
 func TestNormalizeAccepts(t *testing.T) {
 	cases := map[string]string{
-		"simple":                 "example.com",
-		"subdomain":              "login.secure.example.com",
-		"uppercase":              "EXAMPLE.COM",
-		"mixed case":             "LoGiN.Example.Com",
-		"trailing root dot":      "example.com.",
-		"surrounding space":      "  example.com  ",
-		"hyphenated":             "secure-login.example.com",
-		"digits":                 "web3.example.com",
-		"long tld":               "example.technology",
-		"multi-part public tld":  "shop.example.co.uk",
-		"idn german":             "münchen.example.com",
-		"punycode already":       "xn--mnchen-3ya.example.com",
+		"simple":                "example.com",
+		"subdomain":             "login.secure.example.com",
+		"uppercase":             "EXAMPLE.COM",
+		"mixed case":            "LoGiN.Example.Com",
+		"trailing root dot":     "example.com.",
+		"surrounding space":     "  example.com  ",
+		"trailing newline":      "example.com\n",
+		"hyphenated":            "secure-login.example.com",
+		"digits":                "web3.example.com",
+		"long tld":              "example.technology",
+		"multi-part public tld": "shop.example.co.uk",
+		"idn german":            "münchen.example.com",
+		"punycode already":      "xn--mnchen-3ya.example.com",
 	}
 	want := map[string]string{
 		"simple":                "example.com",
@@ -32,6 +33,7 @@ func TestNormalizeAccepts(t *testing.T) {
 		"mixed case":            "login.example.com",
 		"trailing root dot":     "example.com",
 		"surrounding space":     "example.com",
+		"trailing newline":      "example.com",
 		"hyphenated":            "secure-login.example.com",
 		"digits":                "web3.example.com",
 		"long tld":              "example.technology",
@@ -115,7 +117,9 @@ func TestNormalizeRejects(t *testing.T) {
 		{"userinfo", "user@example.com", domain.ErrInvalidCharacter},
 		{"port", "example.com:443", domain.ErrInvalidCharacter},
 		{"query", "example.com?a=b", domain.ErrWildcard},
-		{"newline", "example.com\n", domain.ErrInvalidCharacter},
+		{"interior newline", "exa\nmple.com", domain.ErrInvalidCharacter},
+		{"interior carriage return", "exa\rmple.com", domain.ErrInvalidCharacter},
+		{"embedded second name", "example.com\nevil.com", domain.ErrInvalidCharacter},
 		{"tab", "exa\tmple.com", domain.ErrInvalidCharacter},
 		{"null byte", "example\x00.com", domain.ErrInvalidCharacter},
 		{"inner space", "exa mple.com", domain.ErrInvalidCharacter},
@@ -192,5 +196,45 @@ func TestDomainString(t *testing.T) {
 	}
 	if d.String() != "example.com" {
 		t.Errorf("String() = %q", d.String())
+	}
+}
+
+// TestMixedScriptRegression pins the behaviour of the confusable check.
+//
+// An earlier implementation skipped ASCII entirely when collecting scripts,
+// which meant a label like "аpple" (Cyrillic а followed by ASCII letters)
+// registered as Cyrillic-only and passed. That is precisely the homograph case
+// the check exists to stop, so each direction is asserted explicitly.
+func TestMixedScriptRegression(t *testing.T) {
+	reject := map[string]string{
+		"cyrillic a with latin":    "аpple.example.com",
+		"latin with cyrillic o":    "gо ogle.example.com",
+		"greek omicron with latin": "gοogle.example.com",
+		"cyrillic e in latin word": "paypаl.example.com",
+	}
+	for name, in := range reject {
+		t.Run("reject/"+name, func(t *testing.T) {
+			if _, err := domain.Normalize(in); err == nil {
+				t.Fatalf("Normalize(%q) should be rejected", in)
+			}
+		})
+	}
+
+	accept := map[string]string{
+		"pure latin":        "apple.example.com",
+		"latin with umlaut": "münchen.example.com",
+		"pure cyrillic":     "пример.example.com",
+		"pure greek":        "παράδειγμα.example.com",
+		"japanese han+kana": "例え.example.com",
+		"japanese katakana": "テスト.example.com",
+		"korean hangul":     "한국.example.com",
+		"digits with latin": "web3.example.com",
+	}
+	for name, in := range accept {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if _, err := domain.Normalize(in); err != nil {
+				t.Fatalf("Normalize(%q) should succeed, got %v", in, err)
+			}
+		})
 	}
 }

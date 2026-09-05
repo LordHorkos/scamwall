@@ -58,7 +58,14 @@ case first. Do not open a pull request that quietly relaxes a boundary.
 
 ## Getting set up
 
-Requirements: Go 1.24+, Git, and Docker (only for container work).
+Requirements: Go **1.26.8**, Git, and Docker (only for container work).
+
+The toolchain version is pinned in `go.mod` (`toolchain go1.26.8`) and matched by
+the container base image. Keep the three in step. This is a security control,
+not a style preference: Go 1.24 is end-of-life upstream, and `govulncheck`
+reported 24 standard-library vulnerabilities against it, several reachable from
+ScamWall's own code. Before changing it, confirm the target release is still in
+the supported set at <https://go.dev/dl/?mode=json>.
 
 ```bash
 git clone https://github.com/LordHorkos/scamwall.git
