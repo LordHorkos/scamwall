@@ -1,35 +1,146 @@
-# Credentials and local configuration
+# ============================================================================
+# ScamWall .gitignore
+#
+# This repository is PUBLIC. Everything below is deny-by-default for anything
+# that could carry credentials, installation-specific trust material, runtime
+# state, or generated artifacts. Add narrow "!" exceptions only for fixtures
+# that are provably non-sensitive (e.g. Ed25519 PUBLIC keys).
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Credentials and secrets
+# ---------------------------------------------------------------------------
 .env
 .env.*
 !.env.example
 /secrets/
-/config/
-/state/
-/data/
-/logs/
+# Deliberately NOT using broad name globs such as "*secret*" here. They
+# silently untrack legitimate source (internal/config/secret.go) and other
+# tooling, and silently-untracked source is a worse failure than the one they
+# prevent. Content is policed by scripts/secret-scan.sh, which inspects what is
+# actually staged.
+*.token
+.netrc
+.htpasswd
 
-# Certificates and private keys
+# Never capture a real Pi-hole application password, even by accident.
+pihole_app_password
+pihole_app_password.*
+
+# ---------------------------------------------------------------------------
+# Certificates, private keys, and other trust material
+#
+# The Pi-hole CA at /etc/scamwall/certs/pihole-ca.crt is specific to this
+# installation and must never be committed. Test CAs are generated at runtime
+# by the test suite and are likewise never committed.
+# ---------------------------------------------------------------------------
 *.key
 *.pem
 *.crt
+*.cer
+*.der
 *.p12
 *.pfx
+*.jks
+*.keystore
+*.csr
+/certs/
 
-# Go artifacts
+# Generated signing keys. The feed-signing PRIVATE key never enters git.
+*.ed25519
+*.priv
+*.private
+*_private_key*
+*-private-key*
+id_rsa
+id_ecdsa
+id_ed25519
+/keys/
+
+# Ed25519 PUBLIC keys are safe to publish and are required as committed trust
+# anchors for the test feed fixture.
+!testdata/**/*.pub
+!testdata/**/*_public*
+
+# ---------------------------------------------------------------------------
+# Runtime state, data, and logs
+# ---------------------------------------------------------------------------
+/state/
+/data/
+/logs/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Local runtime configuration. Only committed examples are tracked.
+/config/
+!deploy/compose/*.example.yaml
+!deploy/compose/*.example.yml
+
+# ---------------------------------------------------------------------------
+# Go build and test artifacts
+# ---------------------------------------------------------------------------
 /bin/
 /dist/
+/build/
+/out/
+scamwall
+!cmd/scamwall/
+*.exe
 *.test
+*.out
+*.a
+*.so
+vendor/
+
+# Coverage output
 coverage.out
 coverage.html
+coverage.txt
+cover.out
+*.cover
+profile.cov
 
-# Logs and temporary files
-*.log
+# Go tooling caches
+.gocache/
+.gomodcache/
+
+# ---------------------------------------------------------------------------
+# Container and compose local overrides
+# ---------------------------------------------------------------------------
+docker-compose.override.yml
+docker-compose.override.yaml
+compose.override.yml
+compose.override.yaml
+.docker/
+
+# ---------------------------------------------------------------------------
+# Temporary files
+# ---------------------------------------------------------------------------
 *.tmp
+*.temp
+*.bak
+*.orig
+*.rej
 *.swp
+*.swo
 *~
+.cache/
+/tmp/
+/scratch/
 
+# ---------------------------------------------------------------------------
 # Editors and operating systems
+# ---------------------------------------------------------------------------
 .vscode/
 .idea/
+*.iml
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+desktop.ini
