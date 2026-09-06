@@ -84,12 +84,25 @@ around it — ShellCheck, an independent secret detector, content-based
 vulnerability handling, CI — plus the findings this session's own inspection
 raised.
 
-**Status now.** Fourteen of fifteen verified. SW-P1-05 is BLOCKED on Docker
-daemon access and the phase therefore does not close; `docs/VERIFICATION.md`
-§6.1 carries the operator commands. Five findings were raised and resolved along
-the way, the most serious being a `pipefail`/SIGPIPE race that made the secret
-scanner report a planted private key as clean 200 times out of 200 in a 1 MB
-file (`docs/VERIFICATION.md` §4.1).
+**Status now, at `b6b1769`.** Nineteen of twenty verified — the requirement set
+grew from fifteen to twenty as the work exposed classes that had no requirement
+covering them. `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative; this paragraph
+is a summary and defers to it wherever the two differ.
+
+SW-P1-05 and SW-P1-20 closed on the operator's run at `b6b1769` against image
+`sha256:b95cc07c…`: build exit 0 with the ELF and enforcement-absent assertions
+executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup
+problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7).
+
+**SW-P1-12 is the one requirement still blocked, so the phase does not close.**
+It needs one hosted CI run; the push and trigger procedure is written out at
+`docs/VERIFICATION.md` §6.3 and is proposed rather than executed.
+
+Twenty-two findings were raised and resolved along the way. The most serious
+were a `pipefail`/SIGPIPE race that made the secret scanner report a planted
+private key as clean 200 times out of 200 in a 1 MB file
+(`docs/VERIFICATION.md` §4.1), and seventeen false-pass defects in the runtime
+verifier itself, found in two review rounds and none by execution (§4.7, §4.8).
 
 ### 3.1 Work items
 

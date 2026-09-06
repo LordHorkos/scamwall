@@ -57,8 +57,10 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | --- | --- |
 | Branch | `feat/phase-1-core` |
 | Session baseline | `2edb95a` — *fix(verify): rebuild runtime verification around checked operations* (tree `546ad23`) |
-| Evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions* |
-| Operator-built candidate | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier has been run against this image.** It predates every fix in `0b083cb`, so it is an identity on record, not evidence |
+| Evidence commit | `b6b1769151501d89d7f8550d2c8f3378d0e73c3d` — *fix(verify): check list processing, name scope, mounts, numbers and fields* |
+| **Verified image** | source `b6b1769151501d89d7f8550d2c8f3378d0e73c3d`, image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, build exit 0 with both in-build assertions executed, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup problems, `VERIFY exit=0`. Evidence: `docs/VERIFICATION.md` §3.7 |
+| Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. `b6b1769` changed `scripts/*.sh`, which demotes the rows §5 names; those were re-run and renewed |
+| Superseded candidate image | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier was ever run against this image**, and it predates all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. Retained as an identity on record for ID stability; it is not evidence and must not be deployed |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -82,7 +84,7 @@ visible rather than silently absent.
 | SW-P1-02 | Repository verification and operator Docker verification are separate programs | VERIFIED |
 | SW-P1-03 | Every command, search and parse failure is checked explicitly | VERIFIED |
 | SW-P1-04 | Assertions read only successfully captured structured output | VERIFIED |
-| SW-P1-05 | Exact image identity and deployment settings are verified against a real image | BLOCKED |
+| SW-P1-05 | Exact image identity and deployment settings are verified against a real image | VERIFIED |
 | SW-P1-06 | Inspection resources are isolated; only this invocation's resources are removed | VERIFIED |
 | SW-P1-07 | Regression tests cover the enumerated false-pass classes | VERIFIED |
 | SW-P1-08 | Shell scripts pass ShellCheck as a required gate | VERIFIED |
@@ -97,19 +99,39 @@ visible rather than silently absent.
 | SW-P1-17 | Every resource is attributed to this invocation before it is deleted; pre-existing resources are preserved | VERIFIED |
 | SW-P1-18 | One resolved Compose configuration drives creation, listing and expectation | VERIFIED |
 | SW-P1-19 | The deployment's mounts are asserted exactly: presence, type, source, mode, no extras | VERIFIED |
-| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | BLOCKED |
+| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | VERIFIED |
 
-**Phase 1 is not complete.** Seventeen of twenty requirements are verified.
-Three are BLOCKED and each needs an operator action, not more code:
+**Phase 1 is not complete.** Nineteen of twenty requirements are verified at
+`b6b1769`. One is BLOCKED, and it needs an operator action rather than more
+code:
 
-| Blocked | Needs | Operator command |
+| Blocked | Needs | Operator procedure |
 | --- | --- | --- |
-| SW-P1-05 | a run of the verifier against a real built image, recording the image ID | `docs/VERIFICATION.md` §6.1 |
-| SW-P1-12 | one actual hosted CI run | `docs/VERIFICATION.md` §6.3 |
-| SW-P1-20 | one `docker build`, which executes the ELF assertion inside the build | `docs/VERIFICATION.md` §6.1 |
+| SW-P1-12 | one actual hosted CI run — the workflow executed on GitHub, with a run URL and log | `docs/VERIFICATION.md` §6.3, which now carries the exact push and trigger sequence, **proposed and awaiting approval; nothing has been pushed** |
 
 A blocked required item means the phase does not close, however many of the
-others are green.
+others are green. Nineteen-twentieths is not nineteen-twentieths of a closed
+phase; it is an open phase.
+
+**Closed since the previous revision**, both by the operator's run at
+`b6b1769` against image `sha256:b95cc07c…` (`docs/VERIFICATION.md` §3.7):
+
+| Was blocked | Closed by | Acceptance criterion met |
+| --- | --- | --- |
+| SW-P1-05 | the verifier run against a real built image: 90 passed, 0 failed, 0 blocked, 0 cleanup problems, `VERIFY exit=0`, image identity confirmed against the pin, container created and never started | both artifacts required by the row — the regression suite against the fake, and a real run recording the image ID |
+| SW-P1-20 | the ELF linkage assertion executing inside a `docker build` that exited 0 | both parts — the controls pass (§3.6) *and* the assertion ran in a real build |
+
+**Reconciliation of everything else claimed for Phase 1**, so that nothing is
+carried on assumption:
+
+| Item | State |
+| --- | --- |
+| `check.sh` exit status, requested directly rather than inferred from the printed verdict | **Obtained** at `b6b1769`: `CHECK exit=1`, with 19 passed, 0 failed, 2 BLOCKED. The status and the printed verdict agree. `docs/VERIFICATION.md` §3.0 |
+| Evidence renewal after `b6b1769` changed `scripts/*.sh` | **Done.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11 and SW-P1-14 on any `scripts/*.sh` change; the suite was re-run at `b6b1769` and those rows rest on the new transcript, not the `0b083cb` one |
+| The six defects fixed in `b6b1769` | **Recorded** as FINDING-17 … FINDING-22, `docs/VERIFICATION.md` §4.8, with the pre-fix comparison in §3.5 — the `0b083cb` verifier fails 50 of the 319 cases |
+| Determinism (SW-P1-14) at the new suite size | **Partly renewed.** 30 consecutive runs of the 319-case suite at `b6b1769`, 0 failures — against 500 runs for the 237-case suite at `0b083cb`. Shorter by design and stated as such, not merged into one figure. `docs/VERIFICATION.md` §3.3 |
+| Fork-pull-request secret handling | **Not demonstrated**, and not demonstrable by the proposed push. Reviewed only. It is registered in `docs/VERIFICATION.md` §7 so it is not lost when SW-P1-12 closes |
+| Runtime password access, live authentication, destination connectivity and TLS verification through the `pi.hole` pin | **Not established, and out of Phase 1 scope.** Phase 2 — SW-P2-02 and SW-P2-04. `docs/VERIFICATION.md` §6.2 |
 
 ### SW-P1-01 — Runtime verification is built from checked operations
 
@@ -208,22 +230,40 @@ a log assertion that no image operation uses the mutable tag), *mounts*,
 *tmpfs bounds*, *logging bounds*, *API hostname pinning*, *supplementary
 group*, *hardening regressions*.
 **Evidence required.** Two distinct artifacts:
-1. the regression suite against the scripted fake — *available now*; and
+1. the regression suite against the scripted fake; and
 2. **a real run against a real built image, recording the image ID** — this is
    what makes the assertions statements about a deployable artifact rather than
    about a fixture.
 **Dependencies.** Docker daemon access.
 **Acceptance.** (1) and (2) both pass, and (2) records the image ID it ran
 against.
-**Status.** **BLOCKED** on (2). The service account cannot reach the Docker
-daemon and, by operator decision, will not be granted it. Operator commands:
-`docs/VERIFICATION.md` §6.1. (1) is VERIFIED.
+**Status.** **VERIFIED** at `b6b1769`, on both artifacts:
 
-*Note on the pasted candidate.* The operator's build of `b469c592` produced
-image `sha256:d3c4ed2c…`, and that is recorded. No verifier has been run
-against it. An image ID is an identity, not a result: until the corrected
-verifier is executed against that ID and its output returned, this row stays
-BLOCKED.
+| Artifact | Result |
+| --- | --- |
+| (1) regression suite against the scripted fake | 319 cases, 0 failed. The cases discriminate: the `0b083cb` verifier fails 50 of them — `docs/VERIFICATION.md` §3.5 |
+| (2) operator run against image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built from `b6b1769` | 90 passed, 0 failed, **0 blocked**, 0 cleanup problems; `VERIFY exit=0`; the inspected container's image matched the pin; the container remained created and was never started; cleanup reported completion — `docs/VERIFICATION.md` §3.7 |
+
+`0 blocked` carries as much weight here as `0 failed`. This verifier reports
+"could not run" separately from "failed", and a run with no failures but
+several unrun checks would satisfy the letter of the acceptance criterion while
+proving much less than it appears to.
+
+**Scope of the closure.** This row is about the container's *configuration as
+built and created*. It is not evidence that the application runs, authenticates,
+or reads its mounted secret — the verifier never starts it, deliberately, which
+is what makes the check safe to run on a host carrying a live deployment. Those
+are SW-P2-01 and SW-P2-04, both still open.
+
+**Renewal.** Tied to that image ID and that commit. Any rebuild produces a new,
+unverified image; §5 applies. The procedure is retained at
+`docs/VERIFICATION.md` §6.1.
+
+*Note on the earlier candidate.* The operator's build of `b469c592` produced
+image `sha256:d3c4ed2c…`. No verifier was ever run against it and it predates
+all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. It remains an
+identity on record, is superseded by `sha256:b95cc07c…`, and must not be
+deployed or cited as evidence for this row.
 
 ### SW-P1-06 — Attributable inspection resources and scoped cleanup
 
@@ -260,7 +300,10 @@ this invocation, no `compose down`, and no reference to any other resource.
 **Acceptance.** As above, plus: a collision blocks creation, and an
 unattributable resource is preserved rather than removed.
 **Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Behaviour against a real
-daemon rides on SW-P1-05.
+daemon rode on SW-P1-05, which is now closed: the operator's run at `b6b1769`
+reported 0 cleanup problems and cleanup completion against a real daemon, and
+left the host's existing deployment untouched — `docs/VERIFICATION.md` §3.7.
+
 ### SW-P1-07 — Regression tests for the false-pass classes
 
 **Intended behavior.** Each historical false pass is reproduced deliberately
@@ -286,7 +329,7 @@ DISCRIMINATE. Two mechanisms provide that:
 * **The whole suite run against the pre-fix implementation.** Recorded in
   `docs/VERIFICATION.md` §3.5.
 
-**Source / Tests.** `scripts/tests/runtime-verify-test.sh` (237 cases); the ELF
+**Source / Tests.** `scripts/tests/runtime-verify-test.sh` (319 cases at `b6b1769`); the ELF
 controls are `internal/buildcheck/elfcheck/main_test.go`. Both are wired into
 `scripts/check.sh` as required gates that need no daemon.
 **Evidence required.** All cases present and passing; the suite is a required
@@ -295,8 +338,12 @@ implementation.
 **Dependencies.** SW-P1-01 … SW-P1-06, SW-P1-16 … SW-P1-20.
 **Acceptance.** Every listed class has at least one case; the suite runs on
 every gate run as the service account; the pre-fix comparison is recorded.
-**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Coverage map in
-`docs/VERIFICATION.md` §3.2; pre-fix comparison in §3.5.
+**Status.** VERIFIED at `b6b1769` — `docs/VERIFICATION.md` §3.1. Coverage map in
+`docs/VERIFICATION.md` §3.2; pre-fix comparisons in §3.5, which record both the
+`b469c59` comparison (112 failures once its own baseline is unmasked) and the
+`0b083cb` one (50 of 319 cases). Six classes were added at `b6b1769` for
+FINDING-17 … FINDING-22; they are listed at the end of §3.2.
+
 ### SW-P1-08 — ShellCheck as a required gate
 
 **Intended behavior.** Every shell script in the repository is analysed by
@@ -406,10 +453,49 @@ gate in it.
 **Dependencies.** SW-P1-08, SW-P1-09, SW-P1-11.
 **Acceptance.** The hosted run exists and passes, and its gate list matches the
 local suite's.
-**Status.** **BLOCKED.** "Reviewed, not executed" is not verified CI execution,
-so this row is no longer carried as VERIFIED with a caveat. Running the
-workflow requires a push, which is outside the authorisation for this work.
-Operator action: `docs/VERIFICATION.md` §6.3.
+**Status.** **BLOCKED**, and now the only blocked Phase 1 requirement. "Reviewed,
+not executed" is not verified CI execution, so this row is not carried as
+VERIFIED with a caveat. Running the workflow requires a push, which is outside
+the authorisation for this work.
+
+**Operator action.** `docs/VERIFICATION.md` §6.3 carries the exact push and
+trigger sequence, written out in full and **proposed for approval only —
+nothing has been pushed, and no merge is proposed.** In outline: the branch is
+`feat/phase-1-core`, the workflow's `push` filter matches `feat/**`, so a plain
+non-forced `git push origin feat/phase-1-core` starts a run by itself; no pull
+request and no `workflow_dispatch` is needed for a first result.
+
+**Two things this row will still not cover when it closes.** Both are recorded
+now, because the moment a green run exists they become easy to forget:
+
+* **Fork-pull-request secret handling.** The workflow's strongest security
+  property — that a fork PR gets no repository secret and a read-only token —
+  cannot be demonstrated by pushing a branch in this repository. It needs a pull
+  request from a fork. Until then that property is reviewed, not observed.
+* **Agreement with the runtime evidence.** The hosted runner has a Docker
+  daemon, so `docker build` and the runtime verification will attempt to run
+  there rather than report `BLOCKED`. If either fails on a *hardening
+  assertion*, that is not a CI defect to be worked around: it is a disagreement
+  with `docs/VERIFICATION.md` §3.7 about builds of the same commit, and it takes
+  precedence over closing this row.
+
+**The acceptance criterion above is not satisfiable as written, and that was
+established before any push.** `deploy/compose/compose.yaml` binds
+`/etc/scamwall/certs/pihole-ca.crt` — a literal absolute path with no
+environment override — and a secret file defaulting to
+`/etc/scamwall/secrets/pihole_app_password`. Neither can exist on a fresh hosted
+runner, so `compose create` fails there, the runtime verification reports
+`BLOCKED` or `FAIL`, and `check.sh` exits 1. `docker compose config` does not
+catch it: tested against a nonexistent secret path, it exits 0. The analysis is
+`docs/VERIFICATION.md` §6.3.
+
+This row therefore closes only after a decision the operator has not yet been
+asked to make: materialise throwaway fixtures in CI so the container gates
+genuinely run there (which edits a gate input and re-opens §3.4's review), or
+amend this acceptance criterion to "the workflow ran, its gate list matched the
+local suite, and every gate that could run passed". Recording the requirement as
+unsatisfiable and leaving it that way would be the one unacceptable outcome, so
+it is written down here rather than discovered on a red run.
 
 ### SW-P1-13 — Pre-existing tests preserved and rerun
 
@@ -441,10 +527,27 @@ and a root-cause record for any nondeterminism found and removed.
 **Status.** VERIFIED — root cause found, fixed, and guarded.
 `docs/VERIFICATION.md` §4.1 records the whole chain: a `pipefail` +
 short-circuiting `grep -q` race that inverted matches. It was a false FAIL here
-and a false PASS elsewhere, including a 100%% false-clean in the secret scanner
+and a false PASS elsewhere, including a 100% false-clean in the secret scanner
 for files above the pipe buffer.
 `scripts/tests/pipefail-sigpipe-test.sh` now fails the build if the construction
-returns. Determinism re-measured in `docs/VERIFICATION.md` §3.3.
+returns.
+
+**Run counts, stated separately rather than merged**, because the suite changed
+size between them and a single figure would imply a measurement that was not
+made — `docs/VERIFICATION.md` §3.3:
+
+| Suite | Consecutive runs | Failures |
+| --- | --- | --- |
+| 237 cases, at `0b083cb` | 500 | 0 |
+| 319 cases, at `b6b1769` | 30 | 0 |
+
+The `b6b1769` measurement is shorter: each run of the larger suite takes about
+75 seconds, so 500 of them is roughly ten hours. The root cause behind the
+original nondeterminism is fixed and independently guarded by
+`scripts/tests/pipefail-sigpipe-test.sh`, which is why a shorter repeat is
+treated as sufficient to renew rather than as re-establishing the property from
+nothing. The shortfall is recorded in `docs/VERIFICATION.md` §7 so it is visible
+rather than rounded away.
 
 ### SW-P1-15 — The CLI read-only guarantee is tested
 
@@ -505,7 +608,9 @@ quietly weaken it. The properties held separately here are:
   are preserved and reported.
 
 **Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Behaviour against a real
-daemon rides on SW-P1-05.
+daemon rode on SW-P1-05, which is now closed: the operator's run at `b6b1769`
+reported 0 cleanup problems and cleanup completion against a real daemon, and
+left the host's existing deployment untouched — `docs/VERIFICATION.md` §3.7.
 
 ### SW-P1-18 — One resolved Compose configuration
 
@@ -595,10 +700,25 @@ the Dockerfile still invokes it and that no `ldd`-based assertion returns.
 inside a real `docker build`.
 **Dependencies.** Docker daemon access for the second part.
 **Acceptance.** Both.
-**Status.** **BLOCKED** on the build. The controls are VERIFIED —
-`docs/VERIFICATION.md` §3.6 — but no `docker build` has been executed from this
-account, so the in-build assertion has never run. Operator command:
-`docs/VERIFICATION.md` §6.1.
+**Status.** **VERIFIED** at `b6b1769`, on both:
+
+| Part | Result |
+| --- | --- |
+| The controls | 5 test functions, positive, negative and malformed inputs, all passing — `docs/VERIFICATION.md` §3.6 |
+| The assertion inside a real build | Executed during the operator's `docker build` of `b6b1769`, which exited 0 and produced image `sha256:b95cc07c…` — `docs/VERIFICATION.md` §3.7 |
+
+The assertion is a `RUN` step, so a build exit of 0 does not merely coexist with
+it having passed: the build could not have reached that status otherwise. The
+same build also executed the enforcement-absent assertion — the binary must
+report `enforcement compiled in false` — which is recorded alongside it and
+corroborates the `Enforcement` row in §2 against the built artifact rather than
+against the source alone.
+
+Neither part closes this row alone. Passing controls prove the checker works;
+a green build without them proves an assertion ran but not that it can fail.
+
+**Renewal.** Tied to that image. A rebuild re-executes the assertion, and its
+result is recorded against the new image ID; §5.
 
 ---
 
@@ -619,7 +739,7 @@ binding on that expansion.
 | SW-P2-01 | The permitted API method/path set is defined and enforced, including authentication and session cleanup | IMPLEMENTED-UNVERIFIED |
 | SW-P2-02 | TLS verification, destination pinning, redirect restriction, deadlines, bounded responses, and controlled proxy behavior are enforced | IMPLEMENTED-UNVERIFIED |
 | SW-P2-03 | Bounded retries, cancellation, rate-limit handling, and credential-safe diagnostics | IMPLEMENTED-UNVERIFIED |
-| SW-P2-04 | Secret permissions and access are verified **under the actual container identity** | BLOCKED |
+| SW-P2-04 | Secret permissions and access are verified **under the actual container identity** | BLOCKED — see the note below; the blocker is no longer daemon access |
 | SW-P2-05 | A disposable Pi-hole integration environment exists, with a documented compatibility scope | MISSING |
 | SW-P2-06 | Failure-path tests: correct and rejected credentials, invalid CA, wrong hostname, unavailable server, malformed responses, rate limits, interrupted execution | IMPLEMENTED-UNVERIFIED |
 | SW-P2-07 | Operator commands for one controlled live read-only test, not started automatically | IMPLEMENTED-UNVERIFIED |
@@ -632,8 +752,35 @@ compatibility assumptions are documented.
 
 *Notes.* SW-P2-01 through SW-P2-03 and SW-P2-06 are largely implemented at the
 baseline (`internal/adapters/pihole/`) and tested against a fake HTTPS server;
-what is missing is evidence against anything real. SW-P2-04 is blocked for the
-same reason as SW-P1-05.
+what is missing is evidence against anything real.
+
+*Carried into this phase from the `b6b1769` runtime verification.* The verified
+run resolved the API destination through the compose default mapping,
+`pi.hole:host-gateway`, with `PIHOLE_HOST_IP` unset. What that established is
+narrow and worth stating exactly: the pin is applied as configured — a single
+`extra_hosts` entry, agreeing between the resolved configuration and the created
+container, with no second or conflicting entry. It is a fact about the
+container's name resolution and about nothing beyond it.
+
+Three consequences follow, and all three are Phase 2 work rather than Phase 1
+gaps:
+
+| Question | Requirement | State |
+| --- | --- | --- |
+| Is the address behind the mapping reachable, and is it a Pi-hole? | SW-P2-05, SW-P2-07 | **Not attempted.** The container was never started; nothing was sent |
+| Does TLS verification succeed against it — correct CA, correct hostname, no downgrade or fallback? | SW-P2-02 | **Not attempted against anything real.** Evidenced only against a fake HTTPS server |
+| Can the container identity read the mounted password at runtime, and does authentication succeed? | SW-P2-04, SW-P2-01 | **Unverified.** No process has read the file; no session has been established |
+
+SW-P2-04 remains BLOCKED, and the reason has changed. It is no longer blocked
+on Docker daemon access — that is resolved. It is blocked because the runtime
+verifier deliberately never starts the application, so a passing run says
+nothing whatever about credential access. Verifying it requires a *started*
+container under the actual container identity, which is a Phase 2 activity,
+operator-initiated and never automatic. Passing runtime verification must not be
+read as partial evidence for it: it is not weak evidence, it is absent evidence.
+
+Destination connectivity and TLS verification through the mapping are recorded
+here as Phase 2 scope so that neither is mistaken for something Phase 1 closed.
 
 ### 4.2 Phase 3 — Trusted feeds, policy, and durable state
 
@@ -775,7 +922,7 @@ touches it:
 | `go.mod` / `go.sum` / toolchain | SW-P1-10, SW-P1-11, SW-P1-13, SW-P5-07 |
 | `container/Dockerfile` or `deploy/compose/compose.yaml` | SW-P1-05, SW-P1-06, and every container row |
 | Any `scripts/*.sh` | SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 |
-| A rebuilt image (new image ID) | SW-P1-05, SW-P2-04 |
+| A rebuilt image (new image ID) | SW-P1-05, SW-P1-20, SW-P2-04 |
 | Feed schema or trust key | SW-P3-01 … SW-P3-04, SW-P3-07 |
 | Detection behavior | Every Phase 4 row |
 
@@ -787,6 +934,13 @@ The converse also needs saying, or the rule becomes unusable: **evidence is
 tied to the last commit that changed a gate input.** A documentation-only
 commit changes none, so the record carries forward rather than requiring a
 re-run — otherwise writing down the evidence would itself invalidate it.
+
+**Image-bound rows carry a second identity.** SW-P1-05 and SW-P1-20 are tied to
+image `sha256:b95cc07c…` *and* to commit `b6b1769`. Both must hold. A rebuild
+from the same commit produces an image that has not been verified, however
+confident one is that it is equivalent — reproducibility is a property to be
+demonstrated, not assumed, and it has not been demonstrated here. Rebuild, then
+re-run `docs/VERIFICATION.md` §6.1 and record the new ID.
 
 ---
 
