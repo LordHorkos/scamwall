@@ -16,20 +16,38 @@
 #
 # Design rules, each of which exists because its absence produced a false pass:
 #
-#   * Every prerequisite, Docker operation and parse is checked explicitly.
-#     A check that could not run is BLOCKED and makes the exit status nonzero.
-#     It is never silently treated as a pass.
+#   * Every prerequisite, Docker operation, search and parse is checked
+#     explicitly. A check that could not run is BLOCKED or FAILED and makes the
+#     exit status nonzero. It is never silently treated as a pass. In
+#     particular a search distinguishes three outcomes — matched, did not
+#     match, and could not be performed — because grep exit 2 read as "no
+#     match" is indistinguishable from a clean result.
 #   * Inspection output is captured and its exit status verified BEFORE any
 #     assertion reads it. A failed `docker inspect` can therefore never be
-#     mistaken for "the property is absent".
+#     mistaken for "the property is absent". An absent or empty `.Mounts` is a
+#     FAILURE, not a satisfied absence.
 #   * Assertions are evaluated with jq over captured JSON, not by grepping
 #     command output, so error text on stderr cannot satisfy a pattern.
-#   * The requested image is resolved to its immutable image ID, and the
-#     inspected container's .Image must equal it.
-#   * The inspection container is created under a PRIVATE Compose project name
-#     unique to this invocation, and only resources this invocation created are
-#     removed — including on failure or interruption. A pre-existing deployment
-#     container is never stopped, removed, or inspected in place of ours.
+#   * The image is resolved ONCE to its immutable image ID, and every later
+#     operation — history, filesystem enumeration, container comparison — uses
+#     that ID rather than the mutable tag.
+#   * Expected deployment settings are derived from `docker compose config`,
+#     the resolved and interpolated configuration, using the SAME argument set
+#     that creates the container. They are never re-derived by grepping .env.
+#   * Resources are attributed before they are deleted. The invocation
+#     identifier is unpredictable, every created resource ID is recorded, a
+#     per-invocation ownership label is applied, and anything that existed
+#     before this invocation is preserved — including a resource that happens
+#     to carry a matching label. There is no project-wide `compose down`.
+#   * Cleanup is part of the verdict: it completes before success is reported,
+#     it is idempotent, it runs once on EXIT/INT/TERM, and a required cleanup
+#     that fails makes the exit status nonzero and names what was left behind.
+#
+# What this program does NOT prove is stated where each check is made. The two
+# most easily over-read are marked in the output itself: image-history scanning
+# is a build-instruction pattern check and never proof of a secret-free image
+# filesystem; and mount configuration never proves that the container identity
+# can actually read the mounted password.
 #
 # Usage:
 #   scripts/container-runtime-verify.sh
@@ -38,7 +56,8 @@
 #   SCAMWALL_IMAGE              image to verify           (default scamwall:local)
 #   SCAMWALL_EXPECTED_IMAGE_ID  if set, the resolved image ID must equal it
 #
-# Exit status: 0 only when every required check actually ran and passed.
+# Exit status: 0 only when every required check actually ran and passed AND
+# every required cleanup completed.
 
 set -uo pipefail
 
@@ -55,6 +74,7 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd -P)" || {
 COMPOSE="$REPO_ROOT/deploy/compose/compose.yaml"
 ENV_FILE="$REPO_ROOT/deploy/compose/.env"
 IMAGE="${SCAMWALL_IMAGE:-scamwall:local}"
+SERVICE="scamwall"
 
 for required in "$COMPOSE" "$REPO_ROOT/container/Dockerfile"; do
   [ -f "$required" ] || {
@@ -65,50 +85,424 @@ done
 
 case "${1:-}" in
   "") ;;
-  -h|--help) sed -n '3,44p' "$0"; exit 0 ;;
+  -h|--help) sed -n '3,60p' "$0"; exit 0 ;;
   *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 
-PASS=0; FAIL=0; BLOCK=0
+PASS=0; FAIL=0; BLOCK=0; CLEANUP_PROBLEMS=0
 ok()      { printf '\033[32mPASS\033[0m    %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()     { printf '\033[31mFAIL\033[0m    %s\n' "$1"; FAIL=$((FAIL + 1)); }
 blocked() { printf '\033[31mBLOCKED\033[0m %s\n' "$1"; BLOCK=$((BLOCK + 1)); }
 note()    { printf '        %s\n' "$1"; }
 
+# --- Resource tracking --------------------------------------------------------
+#
+# `scamwall-verify-$$` was not proof of ownership. A PID is small, reused, and
+# predictable, so a stale container from an earlier run — or one created by
+# something else entirely — could carry the same project name and be destroyed
+# by this invocation. Ownership is now established three ways at once:
+#
+#   1. an UNPREDICTABLE invocation identifier, used in the project name;
+#   2. the exact resource IDs this invocation created, recorded as they are
+#      created; and
+#   3. a per-invocation ownership label applied through a Compose override, so
+#      a resource can be attributed even if its ID was not recorded (partial
+#      creation, or a service added to the definition later).
+#
+# Anything that already carried the label before this invocation created
+# anything is treated as a COLLISION: nothing is created and nothing is
+# deleted. Deletion is by exact ID after re-verifying the label — never
+# `compose down -p <project>`, which deletes by name alone.
+OWN_LABEL="scamwall.verify.invocation"
+PROJECT_LABEL="com.docker.compose.project"
+INVOCATION=""
+VERIFY_PROJECT=""
+WORK_DIR=""
+OVERRIDE_FILE=""
+RESOURCES_POSSIBLY_CREATED=0
+CREATED_CONTAINERS=()
+PRE_CONTAINERS=""
+PRE_NETWORKS=""
+PRE_VOLUMES=""
+CLEANUP_DONE=0
+LEFTOVERS=""
+HANDLED_RESOURCES=""
+
+cleanup_problem() {
+  printf '\033[31mCLEANUP\033[0m %s\n' "$1"
+  CLEANUP_PROBLEMS=$((CLEANUP_PROBLEMS + 1))
+}
+
+record_leftover() {
+  LEFTOVERS="${LEFTOVERS}${LEFTOVERS:+$'\n'}$1"
+}
+
+# in_list <needle> <newline-separated list>
+in_list() {
+  local needle="$1" list="${2:-}" line
+  [ -n "$needle" ] || return 1
+  [ -n "$list" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" = "$needle" ] && return 0
+  done <<< "$list"
+  return 1
+}
+
+# label_query <kind> <label=value> — prints full IDs, one per line.
+# Returns 1 when the query itself failed, so "no resources" and "could not ask"
+# are never the same answer.
+label_query() {
+  local kind="$1" selector="$2"
+  case "$kind" in
+    container) docker ps -aq --no-trunc --filter "label=$selector" 2>/dev/null ;;
+    network)   docker network ls -q --no-trunc --filter "label=$selector" 2>/dev/null ;;
+    volume)    docker volume ls -q --filter "label=$selector" 2>/dev/null ;;
+    *)         return 1 ;;
+  esac
+}
+
+# owned_by_this_invocation <kind> <id>
+#   0 = carries this invocation's ownership label or project label
+#   1 = exists but is NOT ours — must be preserved
+#   2 = ownership could not be established (inspect failed / unparseable)
+owned_by_this_invocation() {
+  local kind="$1" id="$2" json own proj filter
+  case "$kind" in
+    container) json="$(docker inspect "$id" 2>/dev/null)" || return 2
+               filter='.[0].Config.Labels' ;;
+    network)   json="$(docker network inspect "$id" 2>/dev/null)" || return 2
+               filter='.[0].Labels' ;;
+    volume)    json="$(docker volume inspect "$id" 2>/dev/null)" || return 2
+               filter='.[0].Labels' ;;
+    *) return 2 ;;
+  esac
+  own="$(jq -r "($filter // {})[\"$OWN_LABEL\"] // \"\"" <<< "$json" 2>/dev/null)" || return 2
+  proj="$(jq -r "($filter // {})[\"$PROJECT_LABEL\"] // \"\"" <<< "$json" 2>/dev/null)" || return 2
+  if [ "$own" = "$INVOCATION" ] || [ "$proj" = "$VERIFY_PROJECT" ]; then return 0; fi
+  return 1
+}
+
+# resource_exists <kind> <id> — 0 = present, 1 = definitely gone, 2 = unknown.
+resource_exists() {
+  local kind="$1" id="$2" out
+  case "$kind" in
+    container) out="$(docker ps -aq --no-trunc --filter "id=$id" 2>/dev/null)" || return 2 ;;
+    network)   out="$(docker network ls -q --no-trunc --filter "id=$id" 2>/dev/null)" || return 2 ;;
+    volume)    out="$(docker volume ls -q --filter "name=$id" 2>/dev/null)" || return 2 ;;
+    *) return 2 ;;
+  esac
+  [ -n "$out" ] && return 0
+  return 1
+}
+
+# remove_owned <kind> <id> — delete only after ownership is re-established.
+remove_owned() {
+  local kind="$1" id="$2" rc
+  # At most one destructive attempt per resource per invocation, however many
+  # code paths reach it: the recorded-ID pass, the discovery sweep, and a
+  # second trap all converge here.
+  if in_list "$kind/$id" "$HANDLED_RESOURCES"; then return 0; fi
+  HANDLED_RESOURCES="${HANDLED_RESOURCES}${HANDLED_RESOURCES:+$'\n'}$kind/$id"
+  owned_by_this_invocation "$kind" "$id"; rc=$?
+  case "$rc" in
+    0) ;;
+    1) cleanup_problem "$kind $id does not carry this invocation's ownership label — PRESERVED"
+       record_leftover "$kind $id (not attributable to this invocation; left in place)"
+       return 1 ;;
+    *) resource_exists "$kind" "$id"; rc=$?
+       case "$rc" in
+         1) return 0 ;;  # already gone — cleanup is idempotent
+         *) cleanup_problem "$kind $id: ownership could not be established — PRESERVED"
+            record_leftover "$kind $id (ownership unknown; left in place)"
+            return 1 ;;
+       esac ;;
+  esac
+  local removed=1
+  case "$kind" in
+    container) docker rm -f "$id" >/dev/null 2>&1 && removed=0 ;;
+    network)   docker network rm "$id" >/dev/null 2>&1 && removed=0 ;;
+    volume)    docker volume rm "$id" >/dev/null 2>&1 && removed=0 ;;
+  esac
+  if [ "$removed" -ne 0 ]; then
+    # A removal that failed may or may not have taken effect. Re-ask.
+    resource_exists "$kind" "$id"; rc=$?
+    if [ "$rc" -eq 1 ]; then return 0; fi
+    cleanup_problem "removal of $kind $id failed"
+    record_leftover "$kind $id (removal failed)"
+    return 1
+  fi
+  return 0
+}
+
+# sweep <kind> <pre-existing list> — remove every labelled resource of this
+# kind that was NOT present before this invocation created anything.
+sweep() {
+  local kind="$1" pre="$2" ids extra id
+  ids="$(label_query "$kind" "$PROJECT_LABEL=$VERIFY_PROJECT")" || {
+    cleanup_problem "could not list ${kind}s carrying this invocation's project label — leftovers may remain"
+    return 1; }
+  extra="$(label_query "$kind" "$OWN_LABEL=$INVOCATION")" || {
+    cleanup_problem "could not list ${kind}s carrying this invocation's ownership label — leftovers may remain"
+    return 1; }
+  ids="$(printf '%s\n%s\n' "$ids" "$extra" | grep -v '^$' | sort -u)"
+  [ -n "$ids" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if in_list "$id" "$pre"; then
+      note "pre-existing $kind $id carries a matching label and is PRESERVED"
+      continue
+    fi
+    remove_owned "$kind" "$id"
+  done <<< "$ids"
+  return 0
+}
+
+# run_cleanup — idempotent, and part of the verdict rather than an afterthought.
+# Invoked directly before the summary and through the EXIT/INT/TERM traps.
+# shellcheck disable=SC2329  # also reached indirectly via trap
+run_cleanup() {
+  [ "$CLEANUP_DONE" -eq 0 ] || return 0
+  CLEANUP_DONE=1
+  printf '\n== cleanup ==\n'
+
+  local id
+  if [ "$RESOURCES_POSSIBLY_CREATED" -eq 1 ]; then
+    # Recorded IDs first: these are the resources this invocation is known to
+    # have created, and they are removed whether or not a later discovery
+    # query works.
+    for id in ${CREATED_CONTAINERS[@]+"${CREATED_CONTAINERS[@]}"}; do
+      [ -n "$id" ] || continue
+      in_list "$id" "$PRE_CONTAINERS" && continue
+      remove_owned container "$id"
+    done
+    # Then discovery, which catches resources created by a partially completed
+    # `compose create` whose IDs this program never saw.
+    sweep container "$PRE_CONTAINERS"
+    sweep network   "$PRE_NETWORKS"
+    sweep volume    "$PRE_VOLUMES"
+  else
+    note "no Docker resources were created by this invocation"
+  fi
+
+  if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+    if ! rm -rf "$WORK_DIR"; then
+      cleanup_problem "the rendered-configuration directory could not be removed: $WORK_DIR"
+      record_leftover "directory $WORK_DIR (removal failed)"
+    fi
+  fi
+
+  if [ "$CLEANUP_PROBLEMS" -eq 0 ]; then
+    printf '\033[32mPASS\033[0m    cleanup complete: every resource this invocation created was removed\n'
+  else
+    printf '\033[31mFAIL\033[0m    cleanup INCOMPLETE — %d problem(s). Remaining resources:\n' "$CLEANUP_PROBLEMS"
+    printf '%s\n' "$LEFTOVERS" | sed 's/^/          /'
+    note "no credential, environment or configuration content is printed above; identifiers only"
+  fi
+  return 0
+}
+
 summary_and_exit() {
-  printf '\n%d passed, %d failed, %d blocked\n' "$PASS" "$FAIL" "$BLOCK"
+  # Cleanup completes BEFORE the verdict is printed, and its outcome counts
+  # towards that verdict. Previously the success line was printed first and
+  # cleanup errors were discarded entirely.
+  run_cleanup
+  printf '\n%d passed, %d failed, %d blocked, %d cleanup problem(s)\n' \
+    "$PASS" "$FAIL" "$BLOCK" "$CLEANUP_PROBLEMS"
   if [ "$FAIL" -gt 0 ] || [ "$BLOCK" -gt 0 ]; then
     printf 'RESULT: runtime verification INCOMPLETE — required checks failed or could not run.\n'
     exit 1
   fi
-  printf 'RESULT: all required runtime checks passed.\n'
+  if [ "$CLEANUP_PROBLEMS" -gt 0 ]; then
+    printf 'RESULT: checks passed but REQUIRED CLEANUP FAILED — resources listed above remain.\n'
+    exit 1
+  fi
+  printf 'RESULT: all required runtime checks passed and cleanup completed.\n'
   exit 0
 }
 
-# --- Resource tracking and cleanup --------------------------------------------
-#
-# Only what THIS invocation created is removed. The Compose project name is
-# private to this run, so `compose down` cannot reach the real deployment.
-WORK_DIR=""
-VERIFY_PROJECT=""
-CREATED_CONTAINERS=()
-
-# Invoked through the EXIT/INT/TERM traps below, never by name.
 # shellcheck disable=SC2329  # reached indirectly via trap
-cleanup() {
-  local c
-  for c in ${CREATED_CONTAINERS[@]+"${CREATED_CONTAINERS[@]}"}; do
-    [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1
-  done
-  if [ -n "$VERIFY_PROJECT" ]; then
-    docker compose -p "$VERIFY_PROJECT" -f "$COMPOSE" down \
-      --remove-orphans --volumes >/dev/null 2>&1
+on_exit() {
+  local rc=$?
+  run_cleanup
+  if [ "$CLEANUP_PROBLEMS" -gt 0 ] && [ "$rc" -eq 0 ]; then
+    printf 'RESULT: REQUIRED CLEANUP FAILED — exit status forced nonzero.\n'
+    exit 1
   fi
-  [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
+  exit "$rc"
+}
+
+# shellcheck disable=SC2329  # reached indirectly via trap
+on_signal() { # name status
+  printf '\ninterrupted by %s — cleaning up before exiting\n' "$1"
+  run_cleanup
+  # `exit` re-enters on_exit, where run_cleanup is a no-op: the destructive
+  # operations happen exactly once no matter how many traps fire.
+  exit "$2"
+}
+
+trap on_exit EXIT
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+
+# --- Checked search -----------------------------------------------------------
+#
+# Three outcomes, never two. `grep -q PATTERN FILE` returning 2 means grep
+# could not do its job — an unreadable file, a bad pattern, an I/O error — and
+# reading that as "no match" is how the history check reported a search it
+# never performed as a clean result.
+#
+# The file form is used deliberately: `producer | grep -q` lets grep exit at
+# the first match while the producer takes SIGPIPE, which under `pipefail`
+# turns a match into a failure (docs/VERIFICATION.md 4.1).
+search_file() { # pattern file [-i] -> 0 matched, 1 no match, 2 could not search
+  local pattern="$1" file="$2" ci="${3:-}" rc
+  [ -f "$file" ] && [ -r "$file" ] || return 2
+  if [ "$ci" = "-i" ]; then
+    grep -qiE -- "$pattern" "$file"
+  else
+    grep -qE -- "$pattern" "$file"
+  fi
+  rc=$?
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *)   return 2 ;;
+  esac
+}
+
+# count_matches <pattern> <file> — prints the count; returns 1 if the search
+# could not be performed. grep -c exits 1 for a zero count, which is not an
+# error; 2 or more is.
+count_matches() {
+  local pattern="$1" file="$2" hits rc
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  hits="$(grep -cE -- "$pattern" "$file")"
+  rc=$?
+  if [ "$rc" -gt 1 ]; then return 1; fi
+  case "$hits" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$hits"
   return 0
 }
-trap cleanup EXIT
-trap 'cleanup; exit 130' INT TERM
+
+# --- Assertion helpers --------------------------------------------------------
+#
+# Each reads CAPTURED json. A jq failure is reported as a parse failure, never
+# as a satisfied assertion.
+assert_eq() { # label file filter expected
+  local label="$1" file="$2" filter="$3" want="$4" got
+  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
+    bad "$label (inspection JSON could not be parsed)"; return
+  fi
+  if [ "$got" = "$want" ]; then ok "$label ($want)"
+  else bad "$label: expected '$want', observed '$got'"; fi
+}
+
+assert_true() { # label file filter
+  local label="$1" file="$2" filter="$3" got
+  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
+    bad "$label (inspection JSON could not be parsed)"; return
+  fi
+  case "$got" in
+    true)  ok "$label" ;;
+    false) bad "$label" ;;
+    *)     bad "$label (expected a boolean, observed '$got')" ;;
+  esac
+}
+
+# assert_empty_list: the filter must yield a joined string; empty means clean.
+assert_empty_list() { # label file filter
+  local label="$1" file="$2" filter="$3" got
+  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
+    bad "$label (inspection JSON could not be parsed)"; return
+  fi
+  if [ -z "$got" ]; then ok "$label"
+  else bad "$label — found: $got"; fi
+}
+
+# jq_read <file> <filter> — capture a value, distinguishing a parse failure
+# from a value. Callers MUST test the return status.
+jq_read() {
+  jq -r "$2" < "$1" 2>/dev/null
+}
+
+# --- Size and option parsing --------------------------------------------------
+#
+# Finding the substring `size=` proves only that the letters are present. These
+# parse the value and reject anything that is not a bounded quantity, so
+# `size=0`, `size=`, `size=abc` and `size=999g` are all rejected.
+size_to_bytes() { # value -> bytes on stdout; 1 if malformed
+  local v="$1" num unit
+  if [[ "$v" =~ ^([0-9]+)([bkmgBKMG]?)$ ]]; then
+    num="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  case "$unit" in
+    ''|b|B) printf '%s' "$num" ;;
+    k|K)    printf '%s' "$((num * 1024))" ;;
+    m|M)    printf '%s' "$((num * 1024 * 1024))" ;;
+    g|G)    printf '%s' "$((num * 1024 * 1024 * 1024))" ;;
+    *)      return 1 ;;
+  esac
+  return 0
+}
+
+is_uint() { # value [min] [max]
+  local v="$1" min="${2:-0}" max="${3:-}"
+  case "$v" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$v" -ge "$min" ] || return 1
+  [ -z "$max" ] || [ "$v" -le "$max" ] || return 1
+  return 0
+}
+
+# TMPFS_MAX_BYTES: a scratch tmpfs is charged against the container's memory
+# limit, so an unbounded or oversized one defeats the memory bound.
+TMPFS_MAX_BYTES=$((64 * 1024 * 1024))
+LOG_MAX_SIZE_BYTES=$((100 * 1024 * 1024))
+LOG_MAX_TOTAL_BYTES=$((512 * 1024 * 1024))
+MEM_MAX_BYTES=$((512 * 1024 * 1024))
+
+# validate_tmpfs_options <label> <option string>
+# Requires noexec, nosuid, nodev and a parseable, bounded, nonzero size, and
+# rejects any option it does not recognise rather than ignoring it.
+validate_tmpfs_options() {
+  local label="$1" opts="$2" tok bytes
+  local have_noexec=0 have_nosuid=0 have_nodev=0 size_seen=0
+  if [ -z "$opts" ]; then
+    bad "$label: no tmpfs options recorded — /tmp hardening UNPROVEN"; return
+  fi
+  local -a toks=()
+  IFS=',' read -r -a toks <<< "$opts"
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    case "$tok" in
+      noexec) have_noexec=1 ;;
+      nosuid) have_nosuid=1 ;;
+      nodev)  have_nodev=1 ;;
+      rw|ro)  ;;
+      exec|suid|dev)
+        bad "$label: option '$tok' re-enables what noexec/nosuid/nodev forbid"; return ;;
+      mode=*) ;;
+      size=*)
+        size_seen=1
+        if ! bytes="$(size_to_bytes "${tok#size=}")"; then
+          bad "$label: size option '$tok' is not a parseable size"; return
+        fi
+        if [ "$bytes" -le 0 ] || [ "$bytes" -gt "$TMPFS_MAX_BYTES" ]; then
+          bad "$label: size $bytes bytes is outside the permitted bound (1..$TMPFS_MAX_BYTES)"; return
+        fi ;;
+      '') ;;
+      *) bad "$label: unrecognised tmpfs option '$tok' — not accepted"; return ;;
+    esac
+  done
+  if [ "$have_noexec" -eq 1 ] && [ "$have_nosuid" -eq 1 ] && [ "$have_nodev" -eq 1 ] && [ "$size_seen" -eq 1 ]; then
+    ok "$label ($opts)"
+  else
+    bad "$label: missing one of noexec/nosuid/nodev/size in '$opts'"
+  fi
+}
 
 # --- Prerequisites ------------------------------------------------------------
 echo "== prerequisites =="
@@ -137,68 +531,89 @@ else
 fi
 
 WORK_DIR="$(mktemp -d)" || { blocked "could not create a working directory"; summary_and_exit; }
+if ! chmod 700 "$WORK_DIR" 2>/dev/null; then
+  blocked "could not restrict the working directory $WORK_DIR"; summary_and_exit
+fi
+WORK_MODE="$(stat -c '%a' "$WORK_DIR" 2>/dev/null)" || WORK_MODE=""
+if [ "$WORK_MODE" = "700" ]; then
+  ok "rendered configuration is kept in a private directory (mode 700)"
+else
+  blocked "working directory permissions could not be confirmed (observed '${WORK_MODE:-unknown}')"
+  summary_and_exit
+fi
 
-# --- Assertion helpers --------------------------------------------------------
-#
-# Each reads CAPTURED json. A jq failure is reported as a parse failure, never
-# as a satisfied assertion.
-assert_eq() { # label file filter expected
-  local label="$1" file="$2" filter="$3" want="$4" got
-  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
-    bad "$label (inspection JSON could not be parsed)"; return
-  fi
-  if [ "$got" = "$want" ]; then ok "$label ($want)"
-  else bad "$label: expected '$want', observed '$got'"; fi
-}
-
-assert_true() { # label file filter
-  local label="$1" file="$2" filter="$3" got
-  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
-    bad "$label (inspection JSON could not be parsed)"; return
-  fi
-  case "$got" in
-    true)  ok "$label" ;;
-    false) bad "$label" ;;
-    *)     bad "$label (expected a boolean, observed '$got')" ;;
-  esac
-}
-
-# assert_empty_list: the filter must yield a joined string; empty means clean.
-assert_empty_list() { # label file filter empty-message
-  local label="$1" file="$2" filter="$3" got
-  if ! got="$(jq -r "$filter" < "$file" 2>/dev/null)"; then
-    bad "$label (inspection JSON could not be parsed)"; return
-  fi
-  if [ -z "$got" ]; then ok "$label"
-  else bad "$label — found: $got"; fi
-}
+# An UNPREDICTABLE invocation identifier. $$ was not one: PIDs are small and
+# reused, so a stale resource could carry this run's project name.
+INVOCATION=""
+if [ -r /dev/urandom ]; then
+  INVOCATION="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" || INVOCATION=""
+fi
+if [ -z "$INVOCATION" ]; then
+  # mktemp -d names are generated from the same entropy source and are created
+  # with O_EXCL, so the suffix is a sound fallback. If neither is available we
+  # stop rather than fall back to something guessable.
+  INVOCATION="$(basename "$WORK_DIR" 2>/dev/null | tr -cd 'a-zA-Z0-9')"
+fi
+INVOCATION="$(printf '%s' "$INVOCATION" | tr '[:upper:]' '[:lower:]' | cut -c1-32)"
+if [ "${#INVOCATION}" -lt 16 ]; then
+  blocked "could not obtain an unpredictable invocation identifier — refusing to guess ownership"
+  summary_and_exit
+fi
+VERIFY_PROJECT="scamwall-verify-$INVOCATION"
+ok "unpredictable invocation identifier obtained (${#INVOCATION} characters)"
 
 # --- Image identity -----------------------------------------------------------
 echo
 echo "== image identity =="
+note "Docker distinguishes several identifiers, which are NOT interchangeable:"
+note "  .Id          the local image identifier (config digest in the classic"
+note "               image store). This is what a container records in .Image."
+note "  .RepoDigests registry MANIFEST digests, empty for a locally built image."
+note "  a manifest-LIST digest identifies a multi-platform index, not an image."
+note "Only .Id is used for comparison here, and every later Docker operation is"
+note "given that .Id rather than the tag, so a tag moved mid-run cannot swap"
+note "another image into the middle of this verification."
 
 IMAGE_JSON="$WORK_DIR/image.json"
 if ! docker image inspect "$IMAGE" > "$IMAGE_JSON" 2>/dev/null; then
   blocked "image '$IMAGE' could not be inspected (build it first, or set SCAMWALL_IMAGE)"
   summary_and_exit
 fi
-if ! IMAGE_ID="$(jq -r '.[0].Id' < "$IMAGE_JSON" 2>/dev/null)" || [ -z "$IMAGE_ID" ] || [ "$IMAGE_ID" = "null" ]; then
+if ! jq -e 'type == "array" and length == 1' < "$IMAGE_JSON" >/dev/null 2>&1; then
+  blocked "image inspection output is not a single-element JSON array — image identity UNPROVEN"
+  summary_and_exit
+fi
+if ! IMAGE_ID="$(jq_read "$IMAGE_JSON" '.[0].Id')"; then
   blocked "image ID could not be parsed from inspection output"
+  summary_and_exit
+fi
+if ! [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  blocked "resolved image identifier '$IMAGE_ID' is not a sha256 digest — refusing to proceed"
   summary_and_exit
 fi
 ok "image '$IMAGE' resolves to $IMAGE_ID"
 
+IMAGE_REPO_TAGS="$(jq_read "$IMAGE_JSON" '(.[0].RepoTags // []) | join(", ")')" || IMAGE_REPO_TAGS="<unreadable>"
+IMAGE_REPO_DIGESTS="$(jq_read "$IMAGE_JSON" '(.[0].RepoDigests // []) | join(", ")')" || IMAGE_REPO_DIGESTS="<unreadable>"
+note "RepoTags:    ${IMAGE_REPO_TAGS:-<none>}"
+note "RepoDigests: ${IMAGE_REPO_DIGESTS:-<none> (expected for a locally built image)}"
+
 if [ -n "${SCAMWALL_EXPECTED_IMAGE_ID:-}" ]; then
-  if [ "$IMAGE_ID" = "$SCAMWALL_EXPECTED_IMAGE_ID" ]; then
+  if ! [[ "${SCAMWALL_EXPECTED_IMAGE_ID}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    bad "SCAMWALL_EXPECTED_IMAGE_ID is not a sha256 digest — the pin cannot be evaluated"
+  elif [ "$IMAGE_ID" = "$SCAMWALL_EXPECTED_IMAGE_ID" ]; then
     ok "resolved image ID matches SCAMWALL_EXPECTED_IMAGE_ID"
   else
     bad "resolved image ID does not match SCAMWALL_EXPECTED_IMAGE_ID (expected $SCAMWALL_EXPECTED_IMAGE_ID)"
   fi
+else
+  note "SCAMWALL_EXPECTED_IMAGE_ID is not set; the tag was trusted to name the"
+  note "intended image. Set it to bind this run to a specific build."
 fi
 
-assert_eq   "image user"            "$IMAGE_JSON" '.[0].Config.User' '65532:65532'
+assert_eq   "image user"                    "$IMAGE_JSON" '.[0].Config.User' '65532:65532'
 assert_eq   "image declares no healthcheck" "$IMAGE_JSON" '.[0].Config.Healthcheck' 'null'
-assert_eq   "image exposes no ports" "$IMAGE_JSON" '(.[0].Config.ExposedPorts // {}) | length' '0'
+assert_eq   "image exposes no ports"        "$IMAGE_JSON" '(.[0].Config.ExposedPorts // {}) | length' '0'
 
 # --- Image history: a LIMITED pattern check -----------------------------------
 echo
@@ -208,92 +623,408 @@ note "evidence against a pasted credential in a build command — NOT proof that
 note "the image filesystem contains no secret."
 
 HISTORY_OUT="$WORK_DIR/history.txt"
-if ! docker history --no-trunc --format '{{.CreatedBy}}' "$IMAGE" > "$HISTORY_OUT" 2>/dev/null; then
-  bad "image history could not be read (docker history failed)"
+if ! docker history --no-trunc --format '{{.CreatedBy}}' "$IMAGE_ID" > "$HISTORY_OUT" 2>/dev/null; then
+  bad "image history could not be read (docker history failed) — build instructions UNSCANNED"
 elif [ ! -s "$HISTORY_OUT" ]; then
-  bad "image history could not be read (no output)"
-elif grep -qiE 'password|passwd=|BEGIN [A-Z ]*PRIVATE KEY|api[_-]?key' "$HISTORY_OUT"; then
-  bad "credential pattern matched in image build instructions"
+  bad "image history could not be read (no output) — build instructions UNSCANNED"
 else
-  ok "no credential pattern in image build instructions"
+  search_file 'password|passwd=|BEGIN [A-Z ]*PRIVATE KEY|api[_-]?key' "$HISTORY_OUT" -i
+  case $? in
+    0) bad "credential pattern matched in image build instructions" ;;
+    1) ok "no credential pattern in image build instructions" ;;
+    *) bad "image history could not be searched — the scan did not run, so its result is UNPROVEN" ;;
+  esac
 fi
+
+# --- Resource ownership pre-snapshot ------------------------------------------
+#
+# Taken BEFORE anything is created. Any resource already carrying this
+# invocation's project or ownership label is, by construction, not ours: the
+# identifier is unpredictable and was chosen moments ago. Such a resource is
+# recorded so cleanup preserves it, and — because Compose would ADOPT a
+# container that already carries the project label rather than create a new
+# one — this invocation creates nothing at all in that case.
+echo
+echo "== resource ownership =="
+
+snapshot_kind() { # kind -> newline-separated ids on stdout
+  local kind="$1" by_project by_invocation
+  by_project="$(label_query "$kind" "$PROJECT_LABEL=$VERIFY_PROJECT")" || return 1
+  by_invocation="$(label_query "$kind" "$OWN_LABEL=$INVOCATION")" || return 1
+  printf '%s\n%s\n' "$by_project" "$by_invocation" | grep -v '^[[:space:]]*$' | sort -u
+  return 0
+}
+
+COLLISIONS=""
+for kind in container network volume; do
+  if ! snapshot="$(snapshot_kind "$kind")"; then
+    blocked "pre-existing ${kind}s could not be enumerated — ownership cannot be established, so nothing will be created or deleted"
+    summary_and_exit
+  fi
+  case "$kind" in
+    container) PRE_CONTAINERS="$snapshot" ;;
+    network)   PRE_NETWORKS="$snapshot" ;;
+    volume)    PRE_VOLUMES="$snapshot" ;;
+  esac
+  if [ -n "$snapshot" ]; then
+    COLLISIONS="${COLLISIONS}${COLLISIONS:+; }$kind: $(printf '%s' "$snapshot" | tr '\n' ' ')"
+  fi
+done
+
+if [ -n "$COLLISIONS" ]; then
+  blocked "resources already carry this invocation's labels ($COLLISIONS) — they are NOT ours, so nothing is created and nothing is deleted"
+  note "this is a name collision, not a leftover: re-run to obtain a fresh identifier"
+  summary_and_exit
+fi
+ok "no pre-existing container, network or volume carries this invocation's labels"
+note "resources belonging to the real deployment are never queried, listed or"
+note "removed: every query is filtered by a label unique to this invocation."
 
 # --- Image filesystem enumeration ---------------------------------------------
 echo
 echo "== image filesystem (enumerated paths) =="
 
 FS_TAR="$WORK_DIR/image.tar"
+FS_RAW="$WORK_DIR/image-fs-raw.txt"
 FS_LIST="$WORK_DIR/image-fs.txt"
 FS_OK=0
 
-if ! FS_CID="$(docker create "$IMAGE" 2>/dev/null | tail -1)" || [ -z "${FS_CID:-}" ]; then
+# Created from the resolved IMAGE ID, not the tag, and labelled with this
+# invocation so it can be attributed later even if this shell dies before the
+# ID is recorded.
+RESOURCES_POSSIBLY_CREATED=1
+FS_CREATE_OUT="$WORK_DIR/fs-create.txt"
+if ! docker create --label "$OWN_LABEL=$INVOCATION" "$IMAGE_ID" > "$FS_CREATE_OUT" 2>/dev/null; then
   bad "image filesystem could not be enumerated (docker create failed) — path absence UNPROVEN"
 else
-  CREATED_CONTAINERS+=("$FS_CID")
-  if ! docker export "$FS_CID" > "$FS_TAR" 2>/dev/null || [ ! -s "$FS_TAR" ]; then
-    bad "image filesystem could not be enumerated (docker export failed) — path absence UNPROVEN"
-  elif ! tar -tf "$FS_TAR" > "$FS_LIST" 2>/dev/null || [ ! -s "$FS_LIST" ]; then
-    bad "image filesystem could not be enumerated (tar listing failed) — path absence UNPROVEN"
-  elif ! grep -qE '^\./?usr/local/bin/scamwall$|^usr/local/bin/scamwall$' "$FS_LIST"; then
-    # Anchor: without the one file the image is known to contain, the listing is
-    # not trustworthy, and every absence derived from it would pass vacuously.
-    bad "filesystem listing is untrustworthy (scamwall binary absent from listing) — path absence UNPROVEN"
+  FS_CID="$(tr -d '\r' < "$FS_CREATE_OUT" | grep -E '^[0-9a-f]{12,64}$' | tail -1)" || FS_CID=""
+  if [ -z "${FS_CID:-}" ]; then
+    bad "docker create returned no usable container ID — path absence UNPROVEN"
   else
-    FS_OK=1
-    ok "image filesystem enumerated ($(wc -l < "$FS_LIST") entries; scamwall binary present)"
+    CREATED_CONTAINERS+=("$FS_CID")
+    if ! docker export "$FS_CID" > "$FS_TAR" 2>/dev/null || [ ! -s "$FS_TAR" ]; then
+      bad "image filesystem could not be enumerated (docker export failed) — path absence UNPROVEN"
+    elif ! tar -tf "$FS_TAR" > "$FS_RAW" 2>/dev/null || [ ! -s "$FS_RAW" ]; then
+      bad "image filesystem could not be enumerated (tar listing failed) — path absence UNPROVEN"
+    elif ! sed -e 's#^\./##' -e 's#^/##' "$FS_RAW" > "$FS_LIST" 2>/dev/null || [ ! -s "$FS_LIST" ]; then
+      # Normalisation happens ONCE, here, so every pattern below matches a
+      # single canonical form. The previous patterns began with `^\./?`, which
+      # requires a leading dot: an archive written without the `./` prefix —
+      # `bin/sh`, `usr/bin/bash`, `etc/shadow` — matched nothing at all, and
+      # every absence assertion passed vacuously.
+      bad "image filesystem listing could not be normalised — path absence UNPROVEN"
+    else
+      search_file '^usr/local/bin/scamwall$' "$FS_LIST"
+      case $? in
+        0) FS_OK=1
+           ok "image filesystem enumerated ($(wc -l < "$FS_LIST") entries; scamwall binary present)" ;;
+        1) # Anchor: without the one file the image is known to contain, the
+           # listing is not trustworthy, and every absence derived from it
+           # would pass vacuously.
+           bad "filesystem listing is untrustworthy (scamwall binary absent from listing) — path absence UNPROVEN" ;;
+        *) bad "filesystem listing could not be searched — path absence UNPROVEN" ;;
+      esac
+    fi
   fi
 fi
 
 if [ "$FS_OK" -eq 1 ]; then
   # These assert that SPECIFIC PATHS are absent. They do not, and cannot, rule
   # out an executable placed under some other name.
-  note "Absence below is of the ENUMERATED PATHS ONLY. An arbitrarily renamed"
-  note "executable is not ruled out by these checks."
+  note "Absence below is of the ENUMERATED PATHS ONLY, after normalising away a"
+  note "leading './' or '/'. An arbitrarily renamed executable is not ruled out."
   absent_path() { # label pattern
-    local label="$1" pattern="$2" hits rc
-    hits="$(grep -cE "$pattern" "$FS_LIST" 2>/dev/null)"; rc=$?
-    # grep -c exits 1 when the count is zero; 2 or more is a real error.
-    if [ "$rc" -gt 1 ]; then bad "$label (listing could not be searched)"; return; fi
-    if [ "${hits:-0}" -eq 0 ]; then ok "$label"
+    local label="$1" pattern="$2" hits
+    if ! hits="$(count_matches "$pattern" "$FS_LIST")"; then
+      bad "$label (listing could not be searched — result UNPROVEN)"; return
+    fi
+    if [ "$hits" -eq 0 ]; then ok "$label"
     else bad "$label — $hits matching path(s) present"; fi
   }
-  absent_path "no shell at checked paths (sh/bash/dash/ash/zsh/ksh)" '^\./?(usr/)?s?bin/(sh|bash|dash|ash|zsh|ksh)$'
-  absent_path "no busybox at checked paths"                         '^\./?(usr/)?s?bin/busybox$'
-  absent_path "no package manager at checked paths"                 '^\./?(usr/)?s?bin/(apt|apt-get|dpkg|apk|yum|dnf|rpm)$'
-  absent_path "no dynamic loader / libc at checked paths"           '^\./?(usr/)?lib.*/(libc|ld-linux)[-.]'
-  absent_path "no /etc/passwd"                                      '^\./?etc/passwd$'
-  absent_path "no /etc/shadow"                                      '^\./?etc/shadow$'
+  SHELL_PATTERN='^(usr/)?(local/)?s?bin/(sh|bash|dash|ash|zsh|ksh)$'
+  absent_path "no shell at checked paths (sh/bash/dash/ash/zsh/ksh)" "$SHELL_PATTERN"
+  absent_path "no busybox at checked paths"                         '^(usr/)?(local/)?s?bin/busybox$'
+  absent_path "no package manager at checked paths"                 '^(usr/)?(local/)?s?bin/(apt|apt-get|dpkg|apk|yum|dnf|rpm)$'
+  absent_path "no dynamic loader / libc at checked paths"           '^(usr/)?lib.*/(libc|ld-linux)[-.]'
+  absent_path "no /etc/passwd"                                      '^etc/passwd$'
+  absent_path "no /etc/shadow"                                      '^etc/shadow$'
+fi
+
+# --- Resolved deployment configuration ----------------------------------------
+#
+# ONE argument set resolves the configuration, creates the container and lists
+# it. Creation and cleanup previously disagreed — cleanup omitted --env-file —
+# so the two commands could be describing different deployments.
+#
+# The expected values below come from `docker compose config`, which performs
+# the same interpolation Compose performs when creating. Re-deriving them by
+# grepping .env, stripping quotes by hand, reimplements Compose's precedence
+# rules (shell environment over .env, defaults, ${VAR:-x} forms) and gets them
+# wrong in exactly the cases that matter.
+echo
+echo "== resolved deployment configuration =="
+
+OVERRIDE_FILE="$WORK_DIR/verify-ownership-override.yaml"
+cat > "$OVERRIDE_FILE" <<OVERRIDE_YAML
+# Written by scripts/container-runtime-verify.sh. It adds ONE label, so the
+# resources this invocation creates can be attributed to it. It changes no
+# security-relevant setting.
+services:
+  $SERVICE:
+    labels:
+      $OWN_LABEL: "$INVOCATION"
+OVERRIDE_YAML
+if [ ! -s "$OVERRIDE_FILE" ]; then
+  blocked "the ownership override could not be written — refusing to create unattributable resources"
+  summary_and_exit
+fi
+
+COMPOSE_ARGS=(-p "$VERIFY_PROJECT")
+if [ -f "$ENV_FILE" ]; then
+  # Explicit, because Compose resolves a bare .env against the CURRENT WORKING
+  # DIRECTORY, not against the compose file's directory. The same array is used
+  # for config, create and ps; nothing may use a different set.
+  COMPOSE_ARGS+=(--env-file "$ENV_FILE")
+  ok "deployment .env supplied explicitly to every Compose invocation"
+else
+  note "no deployment .env present; Compose defaults apply to every invocation"
+fi
+COMPOSE_ARGS+=(-f "$COMPOSE" -f "$OVERRIDE_FILE")
+
+CONFIG_JSON="$WORK_DIR/compose-config.json"
+CONFIG_ERR="$WORK_DIR/compose-config.err"
+if ! docker compose "${COMPOSE_ARGS[@]}" config --format json > "$CONFIG_JSON" 2>"$CONFIG_ERR"; then
+  blocked "the deployment configuration could not be resolved: $(tr '\n' ' ' < "$CONFIG_ERR" | cut -c1-200)"
+  summary_and_exit
+fi
+if ! jq -e 'type == "object"' < "$CONFIG_JSON" >/dev/null 2>&1; then
+  blocked "the resolved configuration is not a JSON object — deployment settings UNPROVEN"
+  summary_and_exit
+fi
+ok "deployment configuration resolved and parsed"
+note "the resolved configuration is kept in $WORK_DIR (mode 700) and is never printed"
+
+cfg() { jq_read "$CONFIG_JSON" "$1"; }
+
+# --- Configuration features that could escape project isolation ---------------
+#
+# A private project name only isolates resources that Compose actually names
+# after the project. These do not:
+#   container_name    fixed, project-independent; it can collide with the real
+#                     deployment container and be adopted or removed
+#   external: true    the resource is not created or owned by this project
+#   extra services    would be created and would need attributing too
+CONF_ISSUES=""
+conf_issue() { CONF_ISSUES="${CONF_ISSUES}${CONF_ISSUES:+; }$1"; }
+
+if ! SERVICE_NAMES="$(cfg '(.services // {}) | keys | join(",")')"; then
+  blocked "the resolved service list could not be read"; summary_and_exit
+fi
+if [ "$SERVICE_NAMES" = "$SERVICE" ]; then
+  ok "exactly one service is defined ($SERVICE)"
+else
+  bad "unexpected service set '$SERVICE_NAMES' — every service would need attributing before deletion"
+  conf_issue "unexpected services: $SERVICE_NAMES"
+fi
+
+FIXED_NAMES="$(cfg '[ (.services // {}) | to_entries[] | select(.value.container_name != null) | .key ] | join(",")')" || FIXED_NAMES="<unreadable>"
+if [ -z "$FIXED_NAMES" ]; then
+  ok "no service sets container_name (project isolation is not bypassed)"
+else
+  bad "container_name is set on: $FIXED_NAMES — such a container is NOT project-scoped"
+  conf_issue "container_name set"
+fi
+
+EXTERNALS="$(cfg '[ (.networks // {}), (.volumes // {}), (.secrets // {}) | to_entries[] | select(.value.external == true) | .key ] | join(",")')" || EXTERNALS="<unreadable>"
+if [ -z "$EXTERNALS" ]; then
+  ok "no externally named networks, volumes or secrets"
+else
+  bad "externally named resources present: $EXTERNALS — they are not owned by this project"
+  conf_issue "external resources: $EXTERNALS"
+fi
+
+TOP_VOLUMES="$(cfg '(.volumes // {}) | keys | join(",")')" || TOP_VOLUMES="<unreadable>"
+if [ -z "$TOP_VOLUMES" ]; then
+  ok "no named volumes are declared"
+else
+  note "named volumes declared: $TOP_VOLUMES (these are removed only if this invocation created them)"
+fi
+
+OWN_LABEL_VALUE="$(cfg ".services.\"$SERVICE\".labels.\"$OWN_LABEL\" // \"\"")" || OWN_LABEL_VALUE=""
+if [ "$OWN_LABEL_VALUE" = "$INVOCATION" ]; then
+  ok "per-invocation ownership label is present in the resolved configuration"
+else
+  blocked "the ownership label did not survive configuration resolution — refusing to create unattributable resources"
+  summary_and_exit
+fi
+
+if [ -n "$CONF_ISSUES" ]; then
+  blocked "the configuration contains features that escape project isolation ($CONF_ISSUES) — refusing to create resources"
+  summary_and_exit
+fi
+
+# --- Expected settings, derived from the resolved configuration ---------------
+echo
+echo "-- expected settings derived from the resolved configuration --"
+
+derive_fail() { bad "$1"; DERIVE_FAILED=1; }
+DERIVE_FAILED=0
+
+# Supplementary group. Validated as a value, not merely read: a non-numeric or
+# zero gid would grant nothing or grant root's group.
+EXPECTED_GID=""
+GID_COUNT="$(cfg "(.services.\"$SERVICE\".group_add // []) | length")" || GID_COUNT="?"
+if [ "$GID_COUNT" = "1" ]; then
+  EXPECTED_GID="$(cfg "(.services.\"$SERVICE\".group_add // [])[0] | tostring")" || EXPECTED_GID=""
+fi
+if ! is_uint "${EXPECTED_GID:-x}" 1 65535; then
+  derive_fail "supplementary group is not a single valid gid (observed count=$GID_COUNT value='${EXPECTED_GID:-none}')"
+  EXPECTED_GID=""
+else
+  ok "supplementary group resolves to a single valid non-root gid ($EXPECTED_GID)"
+fi
+
+# Hostname pinning. Compose renders extra_hosts as "host=addr" (and older
+# versions as a "host:addr" list, or as a map); all three are accepted, and
+# anything else is rejected rather than defaulted.
+EXPECTED_HOST_ENTRY=""
+HOSTS_RAW="$(cfg "
+  (.services.\"$SERVICE\".extra_hosts // [])
+  | if type == \"object\" then [ to_entries[] | .key + \"=\" + (.value|tostring) ]
+    elif type == \"array\" then .
+    else [] end
+  | map(if test(\"=\") then . else sub(\":\"; \"=\") end)
+  | join(\"\n\")")" || HOSTS_RAW=""
+HOST_COUNT=0
+if [ -n "$HOSTS_RAW" ]; then
+  HOST_COUNT="$(printf '%s\n' "$HOSTS_RAW" | grep -c '[^[:space:]]')" || HOST_COUNT=0
+fi
+if [ "$HOST_COUNT" -ne 1 ]; then
+  derive_fail "the API hostname pin is not a single extra_hosts entry (observed $HOST_COUNT)"
+else
+  PIN_HOST="${HOSTS_RAW%%=*}"
+  PIN_ADDR="${HOSTS_RAW#*=}"
+  if [ "$PIN_HOST" != "pi.hole" ]; then
+    derive_fail "the pinned hostname is '$PIN_HOST', expected 'pi.hole'"
+  elif [ -z "$PIN_ADDR" ]; then
+    derive_fail "the pinned address for pi.hole is empty"
+  elif [ "$PIN_ADDR" = "host-gateway" ] || [[ "$PIN_ADDR" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$PIN_ADDR" =~ ^[0-9a-fA-F:]+$ ]]; then
+    EXPECTED_HOST_ENTRY="$PIN_HOST:$PIN_ADDR"
+    ok "API hostname pin resolves to a single entry ($EXPECTED_HOST_ENTRY)"
+  else
+    derive_fail "the pinned address '$PIN_ADDR' is neither host-gateway nor an IP literal"
+  fi
+fi
+
+# Logging bounds.
+EXPECTED_LOG_DRIVER="$(cfg ".services.\"$SERVICE\".logging.driver // \"\"")" || EXPECTED_LOG_DRIVER=""
+EXPECTED_LOG_MAXSIZE="$(cfg "(.services.\"$SERVICE\".logging.options.\"max-size\" // \"\") | tostring")" || EXPECTED_LOG_MAXSIZE=""
+EXPECTED_LOG_MAXFILE="$(cfg "(.services.\"$SERVICE\".logging.options.\"max-file\" // \"\") | tostring")" || EXPECTED_LOG_MAXFILE=""
+case "$EXPECTED_LOG_DRIVER" in
+  json-file|local) ok "log driver is a bounded local driver ($EXPECTED_LOG_DRIVER)" ;;
+  "")  derive_fail "no log driver is configured — log growth is unbounded" ;;
+  *)   derive_fail "log driver '$EXPECTED_LOG_DRIVER' is not one this deployment permits" ;;
+esac
+LOG_SIZE_BYTES=""
+if ! LOG_SIZE_BYTES="$(size_to_bytes "$EXPECTED_LOG_MAXSIZE")"; then
+  derive_fail "max-size '$EXPECTED_LOG_MAXSIZE' is missing or not a parseable size"
+elif [ "$LOG_SIZE_BYTES" -le 0 ] || [ "$LOG_SIZE_BYTES" -gt "$LOG_MAX_SIZE_BYTES" ]; then
+  derive_fail "max-size $LOG_SIZE_BYTES bytes is outside the permitted bound"
+elif ! is_uint "$EXPECTED_LOG_MAXFILE" 1 10; then
+  derive_fail "max-file '$EXPECTED_LOG_MAXFILE' is missing or not an integer in 1..10"
+elif [ $((LOG_SIZE_BYTES * EXPECTED_LOG_MAXFILE)) -gt "$LOG_MAX_TOTAL_BYTES" ]; then
+  derive_fail "the total log bound ($((LOG_SIZE_BYTES * EXPECTED_LOG_MAXFILE)) bytes) exceeds the permitted maximum"
+else
+  ok "log size is bounded (max-size=$EXPECTED_LOG_MAXSIZE, max-file=$EXPECTED_LOG_MAXFILE)"
+fi
+
+# tmpfs options, parsed rather than substring-matched.
+EXPECTED_TMPFS="$(cfg "
+  [ (.services.\"$SERVICE\".tmpfs // []) | (if type == \"string\" then [.] else . end)[]
+    | select(startswith(\"/tmp:\")) | sub(\"^/tmp:\"; \"\") ] | first // \"\"")" || EXPECTED_TMPFS=""
+validate_tmpfs_options "configured /tmp tmpfs options are bounded and hardened" "$EXPECTED_TMPFS"
+
+# Resource bounds.
+EXPECTED_MEM=""
+MEM_RAW="$(cfg "(.services.\"$SERVICE\".mem_limit // \"\") | tostring")" || MEM_RAW=""
+if ! EXPECTED_MEM="$(size_to_bytes "$MEM_RAW")"; then
+  derive_fail "mem_limit '$MEM_RAW' is missing or not a parseable size"
+elif [ "$EXPECTED_MEM" -le 0 ] || [ "$EXPECTED_MEM" -gt "$MEM_MAX_BYTES" ]; then
+  derive_fail "mem_limit $EXPECTED_MEM bytes is outside the permitted bound"
+else
+  ok "memory limit is bounded ($EXPECTED_MEM bytes)"
+fi
+EXPECTED_MEMSWAP=""
+MEMSWAP_RAW="$(cfg "(.services.\"$SERVICE\".memswap_limit // \"\") | tostring")" || MEMSWAP_RAW=""
+if ! EXPECTED_MEMSWAP="$(size_to_bytes "$MEMSWAP_RAW")"; then
+  derive_fail "memswap_limit '$MEMSWAP_RAW' is missing or not a parseable size"
+elif [ -n "$EXPECTED_MEM" ] && [ "$EXPECTED_MEMSWAP" -ne "$EXPECTED_MEM" ]; then
+  derive_fail "memswap_limit ($EXPECTED_MEMSWAP) differs from mem_limit ($EXPECTED_MEM): swap would be available"
+else
+  ok "swap is not additional to the memory limit"
+fi
+EXPECTED_PIDS="$(cfg "(.services.\"$SERVICE\".pids_limit // \"\") | tostring")" || EXPECTED_PIDS=""
+if ! is_uint "$EXPECTED_PIDS" 1 1024; then
+  derive_fail "pids_limit '$EXPECTED_PIDS' is missing or outside 1..1024"
+else
+  ok "pid count is bounded ($EXPECTED_PIDS)"
+fi
+EXPECTED_NANOCPUS="$(cfg "((.services.\"$SERVICE\".cpus // 0) * 1000000000) | round | tostring")" || EXPECTED_NANOCPUS=""
+if ! is_uint "$EXPECTED_NANOCPUS" 1 2000000000; then
+  derive_fail "cpus is missing or outside the permitted bound (resolved nanocpus '$EXPECTED_NANOCPUS')"
+else
+  ok "cpu share is bounded ($EXPECTED_NANOCPUS nanocpus)"
+fi
+
+# Mounts: the configuration and secret bind mounts that MUST be present.
+EXPECTED_MOUNTS="$WORK_DIR/expected-mounts.txt"
+if ! cfg "
+  [ (.services.\"$SERVICE\".volumes // [])[]
+      | (.type // \"?\") + \"|\" + (.source // \"?\") + \"|\" + (.target // \"?\") + \"|\"
+        + (if .read_only == true then \"ro\" else \"rw\" end) ]
+  + [ (.services.\"$SERVICE\".secrets // [])[] as \$s
+      | \"bind|\" + ((.secrets[\$s.source].file) // \"?\") + \"|\"
+        + (\$s.target // (\"/run/secrets/\" + \$s.source)) + \"|ro\" ]
+  | sort | .[]" > "$EXPECTED_MOUNTS"; then
+  derive_fail "the expected mount set could not be derived from the resolved configuration"
+  : > "$EXPECTED_MOUNTS"
+fi
+EXPECTED_MOUNT_COUNT="$(grep -c '[^[:space:]]' "$EXPECTED_MOUNTS")" || EXPECTED_MOUNT_COUNT=0
+if [ "$EXPECTED_MOUNT_COUNT" -lt 4 ]; then
+  derive_fail "the resolved configuration declares only $EXPECTED_MOUNT_COUNT mounts; the CA, config, feed and password mounts are all required"
+else
+  ok "$EXPECTED_MOUNT_COUNT mounts are required by the resolved configuration"
+fi
+for required_dest in /etc/scamwall/certs/pihole-ca.crt /etc/scamwall/config.json /etc/scamwall/feed.json /run/secrets/pihole_app_password; do
+  search_file "\\|${required_dest}\\|ro\$" "$EXPECTED_MOUNTS"
+  case $? in
+    0) ok "the configuration requires a read-only mount at $required_dest" ;;
+    1) derive_fail "the configuration does not require a read-only mount at $required_dest" ;;
+    *) derive_fail "the expected mount set could not be searched for $required_dest" ;;
+  esac
+done
+if ! MOUNT_SOURCE_ISSUES="$(cfg "
+  [ (.services.\"$SERVICE\".volumes // [])[]
+      | select(((.source // \"\") | test(\"docker\\\\.sock|^/etc/pihole|^/var/lib/docker|^/var/run/docker|^/proc|^/sys|^/dev(/|\$)|^/\$|^/etc\$|^/root|^/home\$\"))
+               or ((.target // \"\") | test(\"docker\\\\.sock|^/etc/pihole\")))
+      | (.source // \"?\") + \" -> \" + (.target // \"?\") ] | join(\"; \")")"; then
+  derive_fail "the configured mount sources could not be examined"
+elif [ -n "$MOUNT_SOURCE_ISSUES" ]; then
+  derive_fail "the configuration mounts a prohibited path: $MOUNT_SOURCE_ISSUES"
+else
+  ok "no prohibited path appears in the configured mounts"
+fi
+
+if [ "$DERIVE_FAILED" -ne 0 ]; then
+  blocked "expected settings could not be derived from the resolved configuration — container assertions would compare against guesses"
+  summary_and_exit
 fi
 
 # --- Deployment container -----------------------------------------------------
 echo
 echo "== deployment container =="
-
-# A private project name. `compose down` in cleanup is scoped to it, so no
-# pre-existing deployment container can be stopped or removed by this run.
-VERIFY_PROJECT="scamwall-verify-$$"
-note "private Compose project: $VERIFY_PROJECT (isolated from the deployment)"
-
-COMPOSE_ARGS=(-p "$VERIFY_PROJECT" -f "$COMPOSE")
-if [ -f "$ENV_FILE" ]; then
-  # Explicit, because Compose resolves a bare .env against the current working
-  # directory. Only the values needed for assertions are ever printed; the file
-  # itself is never echoed.
-  COMPOSE_ARGS=(-p "$VERIFY_PROJECT" --env-file "$ENV_FILE" -f "$COMPOSE")
-  ok "deployment .env supplied explicitly"
-else
-  note "no deployment .env present; Compose defaults apply"
-fi
-
-EXPECTED_GID="65532"
-if [ -f "$ENV_FILE" ]; then
-  gid_line="$(grep -E '^[[:space:]]*SCAMWALL_SECRET_GID[[:space:]]*=' "$ENV_FILE" 2>/dev/null | tail -1)"
-  if [ -n "$gid_line" ]; then
-    gid_val="${gid_line#*=}"
-    gid_val="$(printf '%s' "$gid_val" | tr -d '"'"'"' \t\r')"
-    [ -n "$gid_val" ] && EXPECTED_GID="$gid_val"
-  fi
-fi
+note "private Compose project: $VERIFY_PROJECT"
+note "created with the SAME argument set used to resolve the configuration"
 
 # Creation status is checked EXPLICITLY. Previously the status was discarded
 # and the container id looked up afterwards, so a pre-existing container could
@@ -301,22 +1032,43 @@ fi
 CREATE_LOG="$WORK_DIR/create.log"
 if ! docker compose "${COMPOSE_ARGS[@]}" create --no-build --quiet-pull > "$CREATE_LOG" 2>&1; then
   bad "compose create failed — container assertions UNPROVEN: $(tr '\n' ' ' < "$CREATE_LOG" | cut -c1-200)"
+  note "any resource this partial creation did produce is removed by cleanup below"
   summary_and_exit
 fi
 ok "compose create succeeded (exit 0)"
 
-if ! CID_LIST="$(docker compose "${COMPOSE_ARGS[@]}" ps -aq scamwall 2>/dev/null)"; then
-  bad "created container could not be listed — container assertions UNPROVEN"
+# The authoritative list is a LABEL query, not a name query: it finds every
+# container this invocation caused to exist, including one created by a service
+# that was added to the definition after this program was written.
+if ! PROJECT_CONTAINERS="$(label_query container "$PROJECT_LABEL=$VERIFY_PROJECT")"; then
+  bad "containers created by this invocation could not be listed — container assertions UNPROVEN"
   summary_and_exit
 fi
-CID_COUNT="$(printf '%s\n' "$CID_LIST" | grep -c '[^[:space:]]')"
-if [ "$CID_COUNT" -ne 1 ]; then
-  bad "expected exactly 1 container in project $VERIFY_PROJECT, found $CID_COUNT — UNPROVEN"
+PROJECT_CONTAINER_COUNT="$(printf '%s\n' "$PROJECT_CONTAINERS" | grep -c '[^[:space:]]')" || PROJECT_CONTAINER_COUNT=0
+if [ "$PROJECT_CONTAINER_COUNT" -ne 1 ]; then
+  bad "expected exactly 1 container in project $VERIFY_PROJECT, found $PROJECT_CONTAINER_COUNT — UNPROVEN"
   summary_and_exit
 fi
-CID="$(printf '%s\n' "$CID_LIST" | grep '[^[:space:]]' | tail -1)"
+CID="$(printf '%s\n' "$PROJECT_CONTAINERS" | grep '[^[:space:]]' | tail -1)"
 CREATED_CONTAINERS+=("$CID")
-ok "inspection container created (not started)"
+
+# Compose's own view must agree with the label query. If it does not, the
+# container being inspected is not the one Compose created for this service.
+if ! COMPOSE_CID_LIST="$(docker compose "${COMPOSE_ARGS[@]}" ps -aq "$SERVICE" 2>/dev/null)"; then
+  bad "the created service container could not be listed by Compose — container assertions UNPROVEN"
+  summary_and_exit
+fi
+COMPOSE_CID_COUNT="$(printf '%s\n' "$COMPOSE_CID_LIST" | grep -c '[^[:space:]]')" || COMPOSE_CID_COUNT=0
+COMPOSE_CID="$(printf '%s\n' "$COMPOSE_CID_LIST" | grep '[^[:space:]]' | tail -1)"
+if [ "$COMPOSE_CID_COUNT" -ne 1 ]; then
+  bad "Compose reports $COMPOSE_CID_COUNT containers for service $SERVICE, expected 1 — UNPROVEN"
+  summary_and_exit
+fi
+if [ "${CID:0:12}" != "${COMPOSE_CID:0:12}" ]; then
+  bad "the labelled container ($CID) is not the one Compose reports ($COMPOSE_CID) — UNPROVEN"
+  summary_and_exit
+fi
+ok "inspection container created (not started) and attributed to this invocation"
 
 CJSON="$WORK_DIR/container.json"
 if ! docker inspect "$CID" > "$CJSON" 2>/dev/null; then
@@ -329,56 +1081,177 @@ if ! jq -e 'type == "array" and length == 1' < "$CJSON" >/dev/null 2>&1; then
 fi
 ok "container inspection captured and parsed"
 
-# Identity: the inspected container must run the image we resolved above.
-assert_eq "container image matches resolved image ID" "$CJSON" '.[0].Image' "$IMAGE_ID"
+assert_eq "container carries this invocation's ownership label" "$CJSON" \
+  "(.[0].Config.Labels // {})[\"$OWN_LABEL\"] // \"\"" "$INVOCATION"
 
-# The application must not have been started.
-assert_eq "container is created, not running" "$CJSON" '.[0].State.Status' 'created'
+# --- Image identity of the created container ----------------------------------
+#
+# Compose creates from the TAG in the compose file. This comparison is what
+# detects a tag that moved between resolution and creation: the container would
+# then record a different image ID than the one every image-level assertion
+# above was made against.
+if ! CONTAINER_IMAGE="$(jq_read "$CJSON" '.[0].Image')"; then
+  bad "the container's image identifier could not be read — image identity UNPROVEN"
+elif [ "$CONTAINER_IMAGE" = "$IMAGE_ID" ]; then
+  ok "container image matches the resolved image ID ($IMAGE_ID)"
+else
+  # Not automatically a mismatch. Docker's image stores do not all record the
+  # same identifier: with the containerd store, `docker image inspect` may
+  # report a manifest digest where a container records the config digest. The
+  # question is whether both identifiers name the SAME image, so ask the daemon
+  # to resolve the container's identifier and compare the resolutions.
+  RESOLVED_FROM_CONTAINER=""
+  if CONTAINER_IMAGE_JSON="$(docker image inspect "$CONTAINER_IMAGE" 2>/dev/null)"; then
+    RESOLVED_FROM_CONTAINER="$(jq -r '.[0].Id // ""' <<< "$CONTAINER_IMAGE_JSON" 2>/dev/null)" || RESOLVED_FROM_CONTAINER=""
+  fi
+  if [ -n "$RESOLVED_FROM_CONTAINER" ] && [ "$RESOLVED_FROM_CONTAINER" = "$IMAGE_ID" ]; then
+    ok "container image resolves to the verified image (container records $CONTAINER_IMAGE, which resolves to $IMAGE_ID)"
+  else
+    MISMATCH_DETAIL=""
+    [ -n "$RESOLVED_FROM_CONTAINER" ] && MISMATCH_DETAIL=" (that identifier resolves to $RESOLVED_FROM_CONTAINER)"
+    bad "container image mismatch: the container records $CONTAINER_IMAGE, verification resolved $IMAGE_ID$MISMATCH_DETAIL"
+    note "a tag moved between image resolution and container creation would look exactly like this"
+  fi
+fi
+REQUESTED_REF="$(jq_read "$CJSON" '.[0].Config.Image // ""')" || REQUESTED_REF="<unreadable>"
+note "the container recorded the requested reference as '${REQUESTED_REF:-<none>}' (a tag; not an identity)"
+
+echo
+echo "-- no application execution --"
+# `docker compose create` and `docker create` do not start a process. These
+# assertions state that positively rather than assuming it.
+assert_eq   "container is created, not running" "$CJSON" '.[0].State.Status' 'created'
+assert_true "container has never run"           "$CJSON" '.[0].State.Running == false'
+assert_eq   "no process id is recorded"         "$CJSON" '(.[0].State.Pid // 0) | tostring' '0'
+assert_true "no start time is recorded"         "$CJSON" '((.[0].State.StartedAt // "") | (. == "" or startswith("0001-01-01")))'
+assert_eq   "restart count is zero"             "$CJSON" '(.[0].RestartCount // 0) | tostring' '0'
 
 echo
 echo "-- identity and privileges --"
 assert_eq   "container user"                "$CJSON" '.[0].Config.User' '65532:65532'
 assert_eq   "supplementary group"           "$CJSON" '(.[0].HostConfig.GroupAdd // []) | join(",")' "$EXPECTED_GID"
+assert_eq   "exactly one supplementary group" "$CJSON" '(.[0].HostConfig.GroupAdd // []) | length | tostring' '1'
 assert_eq   "capabilities dropped"          "$CJSON" '(.[0].HostConfig.CapDrop // []) | join(",")' 'ALL'
-assert_eq   "no capabilities added"         "$CJSON" '(.[0].HostConfig.CapAdd // []) | length' '0'
+assert_eq   "no capabilities added"         "$CJSON" '(.[0].HostConfig.CapAdd // []) | length | tostring' '0'
 assert_true "not privileged"                "$CJSON" '.[0].HostConfig.Privileged == false'
 assert_true "no-new-privileges set"         "$CJSON" '((.[0].HostConfig.SecurityOpt // []) | map(select(. == "no-new-privileges:true")) | length) == 1'
 assert_true "no unconfined seccomp/apparmor" "$CJSON" '((.[0].HostConfig.SecurityOpt // []) | map(select(test("unconfined"))) | length) == 0'
 assert_true "init process enabled"          "$CJSON" '.[0].HostConfig.Init == true'
 
 echo
-echo "-- filesystem --"
-assert_true "rootfs read-only"              "$CJSON" '.[0].HostConfig.ReadonlyRootfs == true'
-assert_empty_list "every mount is read-only" "$CJSON" \
-  '[ .[0].Mounts[]? | select(.RW != false) | (.Destination // "?") ] | join(", ")'
+echo "-- filesystem and mounts --"
+assert_true "rootfs read-only" "$CJSON" '.[0].HostConfig.ReadonlyRootfs == true'
 
-# Prohibited mounts are detected through .Mounts, which covers bind mounts,
-# volumes and tmpfs alike. .HostConfig.Binds only reflects one way of asking
-# for a mount and misses the others entirely.
-assert_empty_list "no prohibited mounts (.Mounts inspected)" "$CJSON" \
-  '[ .[0].Mounts[]?
-     | select(((.Source // "") | test("docker\\.sock|^/etc/pihole|^/var/lib/docker|^/var/run/docker|^/proc|^/sys|^/dev(/|$)|^/$|^/etc$|^/root|^/home$"))
-              or ((.Destination // "") | test("docker\\.sock|^/etc/pihole")))
-     | ((.Source // "?") + " -> " + (.Destination // "?")) ] | join("; ")'
+# .Mounts must be a NON-EMPTY array before any absence claim is made about it.
+# An absent or empty .Mounts previously satisfied both "every mount is
+# read-only" and "no prohibited mounts" without a single mount being examined,
+# and it also hid the absence of the mounts the deployment requires.
+MOUNTS_OK=0
+MOUNTS_TYPE="$(jq_read "$CJSON" '.[0].Mounts | type')" || MOUNTS_TYPE=""
+MOUNTS_LEN="$(jq_read "$CJSON" '(.[0].Mounts // []) | length | tostring')" || MOUNTS_LEN="0"
+if [ "$MOUNTS_TYPE" != "array" ]; then
+  bad "mount information is absent from the inspection output (.Mounts is '${MOUNTS_TYPE:-missing}') — every mount requirement is UNPROVEN"
+elif ! is_uint "$MOUNTS_LEN" 1; then
+  bad "the container records no mounts at all — the configuration, feed, CA and password mounts are all missing"
+else
+  MOUNTS_OK=1
+  ok "mount information present ($MOUNTS_LEN mounts recorded)"
+fi
 
-assert_true "tmpfs /tmp has noexec" "$CJSON" '((.[0].HostConfig.Tmpfs // {})["/tmp"] // "") | test("noexec")'
-assert_true "tmpfs /tmp has nosuid" "$CJSON" '((.[0].HostConfig.Tmpfs // {})["/tmp"] // "") | test("nosuid")'
-assert_true "tmpfs /tmp has nodev"  "$CJSON" '((.[0].HostConfig.Tmpfs // {})["/tmp"] // "") | test("nodev")'
-assert_true "tmpfs /tmp is size-bounded" "$CJSON" '((.[0].HostConfig.Tmpfs // {})["/tmp"] // "") | test("size=")'
+if [ "$MOUNTS_OK" -eq 1 ]; then
+  OBSERVED_MOUNTS="$WORK_DIR/observed-mounts.txt"
+  # tmpfs at /tmp is excluded here and validated separately below: Docker
+  # represents a compose `tmpfs:` entry through HostConfig.Tmpfs, and its
+  # appearance in .Mounts carries no source or options to compare.
+  if ! jq -r '[ .[0].Mounts[]
+                | select((((.Type // "") == "tmpfs") and ((.Destination // "") == "/tmp")) | not)
+                | ((.Type // "?") + "|" + (.Source // "?") + "|" + (.Destination // "?") + "|"
+                   + (if .RW == false then "ro" else "rw" end)) ] | sort | .[]' \
+       < "$CJSON" > "$OBSERVED_MOUNTS" 2>/dev/null; then
+    bad "the observed mount set could not be extracted — mount requirements UNPROVEN"
+  else
+    LC_ALL=C sort -o "$OBSERVED_MOUNTS" "$OBSERVED_MOUNTS" || true
+    LC_ALL=C sort -o "$EXPECTED_MOUNTS" "$EXPECTED_MOUNTS" || true
+    MISSING_MOUNTS="$(LC_ALL=C comm -23 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')" || MISSING_MOUNTS="<unreadable>"
+    EXTRA_MOUNTS="$(LC_ALL=C comm -13 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')" || EXTRA_MOUNTS="<unreadable>"
+    if [ -z "${MISSING_MOUNTS// /}" ]; then
+      ok "every required mount is present with the expected type, resolved source and read-only status"
+    else
+      bad "required mount(s) missing or differing (type|source|destination|mode): $MISSING_MOUNTS"
+    fi
+    if [ -z "${EXTRA_MOUNTS// /}" ]; then
+      ok "no unexpected mounts (only the tmpfs at /tmp is runtime-managed and is checked separately)"
+    else
+      bad "unexpected mount(s) present: $EXTRA_MOUNTS"
+    fi
+  fi
+
+  assert_eq "no duplicate mount destinations" "$CJSON" \
+    '[ .[0].Mounts[].Destination ] | group_by(.) | map(select(length > 1)) | length | tostring' '0'
+
+  # Every mount EXCEPT the runtime-managed scratch tmpfs, which is writable by
+  # design and is validated separately (noexec, nosuid, nodev, bounded size).
+  # Naming the one exception here keeps "read-only" an exact claim rather than
+  # one with an unstated exemption.
+  assert_empty_list "every mount except the /tmp scratch tmpfs is read-only" "$CJSON" \
+    '[ .[0].Mounts[]
+       | select((((.Type // "") == "tmpfs") and ((.Destination // "") == "/tmp")) | not)
+       | select(.RW != false) | (.Destination // "?") ] | join(", ")'
+
+  # Prohibited mounts are detected through .Mounts, which covers bind mounts,
+  # volumes and tmpfs alike. .HostConfig.Binds only reflects one way of asking
+  # for a mount and misses the others entirely.
+  assert_empty_list "no prohibited mount source or destination" "$CJSON" \
+    '[ .[0].Mounts[]
+       | select(((.Source // "") | test("docker\\.sock|^/etc/pihole|^/var/lib/docker|^/var/run/docker|^/proc|^/sys|^/dev(/|$)|^/$|^/etc$|^/root|^/home$"))
+                or ((.Destination // "") | test("docker\\.sock|^/etc/pihole|^/proc|^/sys|^/dev(/|$)")))
+       | ((.Source // "?") + " -> " + (.Destination // "?")) ] | join("; ")'
+
+  note "A read-only mount at /run/secrets/pihole_app_password does NOT prove the"
+  note "container identity can read it. That depends on the host file's owner,"
+  note "group and mode, which this program does not inspect and does not claim."
+fi
+
+# /tmp is validated from HostConfig.Tmpfs, where Docker records the options.
+OBSERVED_TMPFS="$(jq_read "$CJSON" '((.[0].HostConfig.Tmpfs // {})["/tmp"] // "")')" || OBSERVED_TMPFS="<unreadable>"
+if [ "$OBSERVED_TMPFS" = "<unreadable>" ]; then
+  bad "tmpfs options could not be read from the inspection output — /tmp hardening UNPROVEN"
+else
+  validate_tmpfs_options "container /tmp tmpfs is hardened and size-bounded" "$OBSERVED_TMPFS"
+  if [ "$OBSERVED_TMPFS" = "$EXPECTED_TMPFS" ]; then
+    ok "container tmpfs options match the resolved configuration"
+  else
+    bad "container tmpfs options '$OBSERVED_TMPFS' differ from the configured '$EXPECTED_TMPFS'"
+  fi
+fi
 
 echo
 echo "-- network --"
 assert_true "not on host network"    "$CJSON" '(.[0].HostConfig.NetworkMode // "") != "host"'
 assert_true "not sharing a container netns" "$CJSON" '((.[0].HostConfig.NetworkMode // "") | startswith("container:")) == false'
-assert_eq   "no published port bindings" "$CJSON" '(.[0].HostConfig.PortBindings // {}) | length' '0'
-assert_eq   "no exposed container ports" "$CJSON" '(.[0].NetworkSettings.Ports // {}) | length' '0'
+assert_eq   "no published port bindings" "$CJSON" '(.[0].HostConfig.PortBindings // {}) | length | tostring' '0'
+assert_eq   "no exposed container ports" "$CJSON" '(.[0].NetworkSettings.Ports // {}) | length | tostring' '0'
+
+# Hostname pinning. ScamWall must never authenticate to whatever happens to
+# answer DNS for the API name, so the mapping is asserted exactly: one entry,
+# for the expected name, with the resolved address from the configuration.
+assert_eq "API hostname pinned to exactly one address" "$CJSON" \
+  '(.[0].HostConfig.ExtraHosts // []) | length | tostring' '1'
+assert_eq "API hostname pin matches the resolved configuration" "$CJSON" \
+  '(.[0].HostConfig.ExtraHosts // []) | join(",")' "$EXPECTED_HOST_ENTRY"
+
+echo
+echo "-- logging --"
+assert_eq "log driver" "$CJSON" '.[0].HostConfig.LogConfig.Type // ""' "$EXPECTED_LOG_DRIVER"
+assert_eq "log max-size" "$CJSON" '((.[0].HostConfig.LogConfig.Config // {})["max-size"] // "") | tostring' "$EXPECTED_LOG_MAXSIZE"
+assert_eq "log max-file" "$CJSON" '((.[0].HostConfig.LogConfig.Config // {})["max-file"] // "") | tostring' "$EXPECTED_LOG_MAXFILE"
 
 echo
 echo "-- resource bounds --"
-assert_eq "memory limit"      "$CJSON" '.[0].HostConfig.Memory'     '134217728'
-assert_eq "memory+swap limit" "$CJSON" '.[0].HostConfig.MemorySwap' '134217728'
-assert_eq "pids limit"        "$CJSON" '.[0].HostConfig.PidsLimit'  '64'
-assert_eq "cpu limit"         "$CJSON" '.[0].HostConfig.NanoCpus'   '500000000'
-assert_eq "restart policy"    "$CJSON" '.[0].HostConfig.RestartPolicy.Name' 'no'
+assert_eq "memory limit"      "$CJSON" '(.[0].HostConfig.Memory // 0) | tostring'     "$EXPECTED_MEM"
+assert_eq "memory+swap limit" "$CJSON" '(.[0].HostConfig.MemorySwap // 0) | tostring' "$EXPECTED_MEMSWAP"
+assert_eq "pids limit"        "$CJSON" '(.[0].HostConfig.PidsLimit // 0) | tostring'  "$EXPECTED_PIDS"
+assert_eq "cpu limit"         "$CJSON" '(.[0].HostConfig.NanoCpus // 0) | tostring'   "$EXPECTED_NANOCPUS"
+assert_eq "restart policy"    "$CJSON" '.[0].HostConfig.RestartPolicy.Name // ""' 'no'
 
 summary_and_exit
