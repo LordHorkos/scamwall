@@ -84,20 +84,36 @@ around it — ShellCheck, an independent secret detector, content-based
 vulnerability handling, CI — plus the findings this session's own inspection
 raised.
 
-**Status now, at `72bc84c`.** Eighteen of twenty verified — the requirement set
+**Status now, at `b6e70f4`.** Nineteen of twenty verified — the requirement set
 grew from fifteen to twenty as the work exposed classes that had no requirement
 covering them. `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative; this paragraph
 is a summary and defers to it wherever the two differ.
 
-**SW-P1-05 and SW-P1-20 were closed and have been re-opened**, not by a failure
-but by the renewal rule. They closed on the operator's run at `b6b1769` against
-image `sha256:b95cc07c…`: build exit 0 with the ELF and enforcement-absent
-assertions executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0
-cleanup problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7). `ef40156` and
+**SW-P1-05 and SW-P1-20 were closed and re-opened together; only SW-P1-20 has
+closed again.** Both closed on the operator's run at `b6b1769` against image
+`sha256:b95cc07c…`: build exit 0 with the ELF and enforcement-absent assertions
+executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup
+problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7). `ef40156` and
 `aa49797` then changed the verifier and the compose definition, which
-`docs/REQUIREMENTS_MATRIX.md` §5 demotes both rows on, and no image has been
-built from `aa49797`. Renewal is an operator action — `docs/VERIFICATION.md`
-§6.1 — and is expected to pass; expected is not observed.
+`docs/REQUIREMENTS_MATRIX.md` §5 demotes both rows on.
+
+**SW-P1-20 is VERIFIED again at `72bc84c`**, bound to the CI-built image
+`sha256:d7c44949…`. Its acceptance is that the ELF controls pass and that the
+assertion is observed to run inside a real `docker build`; the passing run's
+build did that on an uncached runner. An earlier revision of this plan said a
+passing CI run renewed neither row. That was an over-application of the renewal
+rule: CI's deployment differs from the operator's, but the ELF assertion runs in
+the build stage and reads no password, CA, mount or group, so no deployment
+difference can bear on it (`docs/VERIFICATION.md` §3.12).
+
+**SW-P1-05 remains `IMPLEMENTED-UNVERIFIED`,** and what is missing is nameable:
+four assertions that depend on the operator's own configuration — the
+prohibited-path rule over the secret source, the host-side regular-file check on
+each approved mount, the password file's world-reachability, and the
+supplementary group resolving to `989` rather than to the default `65532`. Every
+other assertion in that row ran against a real image in CI. Renewal is an
+operator action — `docs/VERIFICATION.md` §6.1 — and is expected to pass;
+expected is not observed.
 
 **SW-P1-12 is now VERIFIED.** Three hosted runs were executed, each with
 operator approval for its specific push, and the third passed: run 34047025567
@@ -112,13 +128,13 @@ time and they passed, and it diagnosed its own single failure, which turned out
 to be FINDING-27 and FINDING-28 — both defects in this session's work. The third
 passed.
 
-**The phase still does not close.** SW-P1-05 and SW-P1-20 are
-`IMPLEMENTED-UNVERIFIED`, and a passing CI run does not renew them: CI verified
-a container built on the runner, mounting throwaway fixtures, resolving
-`group_add: 65532` rather than the deployment's `989`. It corroborates the
-deployment's shape on an independent host and says nothing about the operator's
-configuration or the artifact the operator would deploy. That needs
-`docs/VERIFICATION.md` §6.1, which only the operator can run.
+**The phase still does not close.** SW-P1-05 is `IMPLEMENTED-UNVERIFIED`, and a
+passing CI run does not renew it: CI verified a container built on the runner,
+mounting throwaway fixtures, resolving `group_add: 65532` rather than the
+deployment's `989`. It corroborates the deployment's shape on an independent
+host and says nothing about the operator's configuration or the artifact the
+operator would deploy. That needs `docs/VERIFICATION.md` §6.1, which only the
+operator can run. One open required row is an open phase.
 
 Twenty-eight findings were raised and resolved along the way, five of them by
 hosted CI runs that a local suite could not have produced. The most serious
@@ -256,13 +272,14 @@ Phase 1 is complete when, at one commit:
 * existing deployment resources survive checker execution;
 * remaining evidence gaps are explicitly `BLOCKED`, with operator commands.
 
-Two of these are outstanding at `72bc84c`, and neither is satisfiable from the
-service account:
+Two of these are outstanding at `b6e70f4`, and neither is satisfiable from the
+service account. Both are covered by one operator run:
 
 | Outstanding | Why | Who |
 | --- | --- | --- |
 | ~~A hosted run that passes~~ | **Done** — run 34047025567 at `72bc84c`, 24 passed / 0 failed / 0 BLOCKED | — |
-| Runtime assertions tied to an image ID | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition. CI verified `sha256:d7c44949…`, but against a different deployment — throwaway fixtures, `group_add: 65532` — so it corroborates rather than renews | Operator — `docs/VERIFICATION.md` §6.1 |
+| ~~The ELF assertion executes in a real build~~ | **Done** — the same run's `docker build`, uncached, producing `sha256:d7c44949…`. SW-P1-20 | — |
+| Runtime assertions tied to an image ID, against *this* deployment | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition. CI verified `sha256:d7c44949…`, but against a different deployment — throwaway fixtures, `group_add: 65532` — so it corroborates rather than renews. Four assertions remain unevaluated here | Operator — `docs/VERIFICATION.md` §6.1 |
 | Deployment resources survive checker execution | Demonstrated against the scripted fake at `72bc84c` (336 cases) and against a real daemon in CI — where there is no coexisting deployment to survive, which is the whole point of the check. Not re-demonstrated on a host that HAS one since `b6b1769` | Same operator run |
 
 ### 3.4 Previous-state validation

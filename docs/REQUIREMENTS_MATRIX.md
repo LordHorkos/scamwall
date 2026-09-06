@@ -58,7 +58,8 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Branch | `feat/phase-1-core` |
 | Session baseline | `2edb95a` — *fix(verify): rebuild runtime verification around checked operations* (tree `546ad23`) |
 | Evidence commit | `aa49797` — *fix(ci): supply the deployment's fixtures, and check the mount sources*. The last commit that changes a gate input |
-| **Verified image** | source `b6b1769151501d89d7f8550d2c8f3378d0e73c3d`, image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, build exit 0 with both in-build assertions executed, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup problems, `VERIFY exit=0`. Evidence: `docs/VERIFICATION.md` §3.7. **Lapsed at `aa49797`**, which changes the verifier and `compose.yaml`; no image has been built from `aa49797`. Renewal: `docs/VERIFICATION.md` §6.1 |
+| **Verified image** | source `b6b1769151501d89d7f8550d2c8f3378d0e73c3d`, image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, build exit 0 with both in-build assertions executed, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup problems, `VERIFY exit=0`. Evidence: `docs/VERIFICATION.md` §3.7. **Lapsed at `aa49797`**, which changes the verifier and `compose.yaml`; no image has been built from `aa49797` or later on the operator's host. Renewal: `docs/VERIFICATION.md` §6.1 |
+| **CI-built image** | source `72bc84c13f4e6914bfb015e87d46a5234e8f5234`, image `sha256:d7c44949d56d4f609b3f184464521a2d95c6b34e628f69fd5b145ad6104bba07`, built on the runner in the passing run 34047025567: build exit 0 with both in-build assertions executed, and `container runtime verification` PASSED against CI's own fixtures. Evidence: `docs/VERIFICATION.md` §3.12. It carries **SW-P1-20**, which is about the executable. It does **not** carry SW-P1-05, which is about this deployment's settings. Not a deployable artifact for this household: it was built from a clean checkout with no `.env` |
 | Previous evidence commit | `b6b1769` — *fix(verify): check list processing, name scope, mounts, numbers and fields*. `ef40156`/`aa49797` changed `scripts/*.sh`, `compose.yaml` and the workflow, which demotes the rows §5 names; the script-bound rows were re-run and renewed at `aa49797`, the image-bound ones were not and cannot be from the service account |
 | Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. `b6b1769` changed `scripts/*.sh`, which demotes the rows §5 names; those were re-run and renewed |
 | Superseded candidate image | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier was ever run against this image**, and it predates all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. Retained as an identity on record for ID stability; it is not evidence and must not be deployed |
@@ -100,47 +101,59 @@ visible rather than silently absent.
 | SW-P1-17 | Every resource is attributed to this invocation before it is deleted; pre-existing resources are preserved | VERIFIED |
 | SW-P1-18 | One resolved Compose configuration drives creation, listing and expectation | VERIFIED |
 | SW-P1-19 | The deployment's mounts are asserted exactly: presence, type, source, mode, no extras | VERIFIED |
-| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | IMPLEMENTED-UNVERIFIED |
+| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | VERIFIED |
 
-**Phase 1 is not complete.** Eighteen of twenty requirements are verified at
+**Phase 1 is not complete.** Nineteen of twenty requirements are verified at
 `72bc84c`. No requirement is BLOCKED any more — SW-P1-12 closed on a passing
-hosted run — and two remain demoted, awaiting an operator action this account
-cannot perform:
+hosted run, and SW-P1-20 closed on the build inside it — and one remains
+demoted, awaiting an operator action this account cannot perform:
 
 | Row | State | Next step |
 | --- | --- | --- |
 | SW-P1-12 | **VERIFIED** | Closed at `72bc84c` by run 34047025567: 24 passed, 0 failed, 0 BLOCKED, gate list identical to the local suite's. It took three runs — the first could not be diagnosed at all (FINDING-23), the second diagnosed itself and found FINDING-27 — and the acceptance criterion was never relaxed. `docs/VERIFICATION.md` §3.12 |
-| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Demoted by §5: `aa49797` changes `deploy/compose/compose.yaml` **and** `scripts/container-runtime-verify.sh`, and the verifier now makes assertions the `b6b1769` run never evaluated. The CI run at `72bc84c` passed the same verifier against image `sha256:d7c44949…` and **does not close this**: it resolved a different deployment. Renewal is an operator action: `docs/VERIFICATION.md` §6.1 |
-| SW-P1-20 | IMPLEMENTED-UNVERIFIED | Its ELF controls are untouched and still pass (§3.6), and the in-build assertion executed in three CI builds. Its image-bound half lapsed with SW-P1-05: no image has been built from these commits on the operator's host. Same renewal |
+| SW-P1-20 | **VERIFIED** | Closed at `72bc84c`, bound to image `sha256:d7c44949…`. Its acceptance is "the controls pass, AND the assertion is observed to run inside a real `docker build`"; the controls are untouched and were re-run at `b6e70f4`, and the assertion is a `RUN` step in a build that exited 0 on an uncached runner. An earlier revision held this row open because CI's *deployment* differs from the operator's — an over-application, since the ELF assertion reads no deployment. `docs/VERIFICATION.md` §3.12 |
+| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Demoted by §5: `aa49797` changes `deploy/compose/compose.yaml` **and** `scripts/container-runtime-verify.sh`, and the verifier now makes assertions the `b6b1769` run never evaluated. The CI run at `72bc84c` passed the same verifier against image `sha256:d7c44949…` and **does not close this**: it resolved a different deployment, so four assertions remain unevaluated against the operator's configuration. Renewal is an operator action: `docs/VERIFICATION.md` §6.1 |
 
-Demoting two rows that were green is the rule working, not a regression. The
+Demoting rows that were green is the rule working, not a regression. The
 alternative — leaving them VERIFIED because the change "should not affect them"
-— is precisely the assumption §5 exists to forbid.
+— is precisely the assumption §5 exists to forbid. Restoring one of them on
+evidence that genuinely covers it is the same rule working in the other
+direction, and is not a relaxation: SW-P1-20's criterion was met, not amended.
 
 An unverified required item means the phase does not close, however many of the
 others are green — and "the CI badge is green" is the most tempting reason to
-forget that. Eighteen-twentieths is not eighteen-twentieths of a closed phase;
-it is an open phase. The two open rows are the ones that tie the work to a
-real image and a real deployment, which is precisely the half a passing CI run
+forget that. Nineteen-twentieths is not nineteen-twentieths of a closed phase;
+it is an open phase. The one open row is the one that ties the work to a real
+image *and a real deployment*, which is precisely the half a passing CI run
 cannot supply: CI verified a container built on the runner, mounting throwaway
 fixtures, with `group_add: 65532` rather than the deployment's `989`
 (`docs/VERIFICATION.md` §3.12).
 
-**Closed since the previous revision**, both by the operator's run at
-`b6b1769` against image `sha256:b95cc07c…` (`docs/VERIFICATION.md` §3.7):
+**What is missing for SW-P1-05, precisely** — four assertions, not the row as a
+whole. `docs/VERIFICATION.md` §6.1 lists them: the prohibited-path rule over the
+secret source, the host-side regular-file check on every approved mount, the
+password file's world-reachability, and the supplementary group resolving to the
+deployment's `989` rather than the default `65532`. Everything else the row
+asserts ran against a real image in CI.
 
-| Was blocked | Closed by | Acceptance criterion met |
-| --- | --- | --- |
-| SW-P1-05 | the verifier run against a real built image: 90 passed, 0 failed, 0 blocked, 0 cleanup problems, `VERIFY exit=0`, image identity confirmed against the pin, container created and never started | both artifacts required by the row — the regression suite against the fake, and a real run recording the image ID |
-| SW-P1-20 | the ELF linkage assertion executing inside a `docker build` that exited 0 | both parts — the controls pass (§3.6) *and* the assertion ran in a real build |
+**The history of these two rows**, retained rather than rewritten, because a
+row that was closed, demoted and closed again on different evidence is a
+different thing from one that was never in doubt. Both were first closed by the
+operator's run at `b6b1769` against image `sha256:b95cc07c…`
+(`docs/VERIFICATION.md` §3.7):
+
+| Was blocked | Closed by | Acceptance criterion met | State now |
+| --- | --- | --- | --- |
+| SW-P1-05 | the verifier run against a real built image: 90 passed, 0 failed, 0 blocked, 0 cleanup problems, `VERIFY exit=0`, image identity confirmed against the pin, container created and never started | both artifacts required by the row — the regression suite against the fake, and a real run recording the image ID | **Demoted** at `aa49797`. Artifact (1) renewed; artifact (2) awaits §6.1 |
+| SW-P1-20 | the ELF linkage assertion executing inside a `docker build` that exited 0 | both parts — the controls pass (§3.6) *and* the assertion ran in a real build | **VERIFIED again** at `72bc84c`, on the CI build. Bound to `sha256:d7c44949…` rather than to `sha256:b95cc07c…` |
 
 **Reconciliation of everything else claimed for Phase 1**, so that nothing is
 carried on assumption:
 
 | Item | State |
 | --- | --- |
-| `check.sh` exit status, requested directly rather than inferred from the printed verdict | **Obtained** at `aa49797`: `CHECK exit=1`, with 22 passed, 0 failed, 2 BLOCKED. Run directly, not through a wrapper, a monitor, `tee` or a background task, so the status is the script's own. The status and the printed verdict agree. `docs/VERIFICATION.md` §3.0 |
-| Evidence renewal after `ef40156`/`aa49797` changed `scripts/*.sh`, `compose.yaml` and the workflow | **Done for what this account can renew.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11 and SW-P1-14 on any `scripts/*.sh` change; the suite was re-run at `aa49797` and those rows rest on that transcript. SW-P1-05 and SW-P1-20 need a rebuilt image and cannot be renewed from the service account; they are demoted rather than carried, `docs/VERIFICATION.md` §6.1 |
+| `check.sh` exit status, requested directly rather than inferred from the printed verdict | **Obtained** at `aa49797` and again at `b6e70f4`: `CHECK exit=1`, with 22 passed, 0 failed, 2 BLOCKED. Run directly, not through a wrapper, a monitor, `tee` or a background task, so the status is the script's own. The status and the printed verdict agree. `docs/VERIFICATION.md` §3.0, §3.13 |
+| Evidence renewal after `ef40156`/`aa49797` changed `scripts/*.sh`, `compose.yaml` and the workflow | **Done, except for one row.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11 and SW-P1-14 on any `scripts/*.sh` change; the suite was re-run at `aa49797`, and again at `b6e70f4`, and those rows rest on that transcript. SW-P1-20 was renewed by the CI build at `72bc84c`. SW-P1-05 needs an image built on the operator's host against the operator's deployment and cannot be renewed from the service account; it is demoted rather than carried, `docs/VERIFICATION.md` §6.1 |
 | The six defects fixed in `b6b1769` | **Recorded** as FINDING-17 … FINDING-22, `docs/VERIFICATION.md` §4.8, with the pre-fix comparison in §3.5 — the `0b083cb` verifier fails 50 of the 319 cases |
 | Determinism (SW-P1-14) at the new suite size | **Partly renewed.** 30 consecutive runs of the 319-case suite at `b6b1769`, 0 failures — against 500 runs for the 237-case suite at `0b083cb`. Shorter by design and stated as such, not merged into one figure. `docs/VERIFICATION.md` §3.3 |
 | Hosted CI execution | **Done, and it failed.** Run 34036997074 at `2a18874`. What it established: the workflow runs, its recorded tool versions match §2.2 exactly, its gate list matches the local suite's, and `docker build` passes on an independent host. What it did not: a passing run. `docs/VERIFICATION.md` §3.8 |
@@ -254,19 +267,35 @@ group*, *hardening regressions*.
 **Dependencies.** Docker daemon access.
 **Acceptance.** (1) and (2) both pass, and (2) records the image ID it ran
 against.
-**Status.** **IMPLEMENTED-UNVERIFIED** at `aa49797`. It was VERIFIED at
-`b6b1769` on both artifacts; artifact (2) lapsed:
+**Status.** **IMPLEMENTED-UNVERIFIED** at `b6e70f4`. It was VERIFIED at
+`b6b1769` on both artifacts; artifact (2) lapsed and is partly, not wholly,
+restored by CI:
 
-| Artifact | Result | At `aa49797` |
+| Artifact | Result | At `b6e70f4` |
 | --- | --- | --- |
-| (1) regression suite against the scripted fake | 336 cases, 0 failed. The cases discriminate: the `0b083cb` verifier fails 50 of the 319 it shares — `docs/VERIFICATION.md` §3.5 | **Renewed.** Seventeen cases were added for the host-side mount-source and password-permission assertions, with a PRE-FIX CONTROL for the exempted secret source |
-| (2) operator run against image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built from `b6b1769` | 90 passed, 0 failed, **0 blocked**, 0 cleanup problems; `VERIFY exit=0`; the inspected container's image matched the pin; the container remained created and was never started; cleanup reported completion — `docs/VERIFICATION.md` §3.7 | **Lapsed.** `aa49797` changes `compose.yaml` and the verifier; §5 demotes this row on either. The verifier now asserts things that run never evaluated — that every approved mount resolves to an existing regular file, that the password file is not world-reachable, that the secret source obeys the prohibited-path rule |
+| (1) regression suite against the scripted fake | 336 cases, 0 failed. The cases discriminate: the `0b083cb` verifier fails 50 of the 319 it shares — `docs/VERIFICATION.md` §3.5 | **Renewed**, at `aa49797` and re-run at `b6e70f4`. Seventeen cases were added for the host-side mount-source and password-permission assertions, with a PRE-FIX CONTROL for the exempted secret source |
+| (2) operator run against image `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built from `b6b1769` | 90 passed, 0 failed, **0 blocked**, 0 cleanup problems; `VERIFY exit=0`; the inspected container's image matched the pin; the container remained created and was never started; cleanup reported completion — `docs/VERIFICATION.md` §3.7 | **Lapsed, and only partly replaced.** `aa49797` changes `compose.yaml` and the verifier; §5 demotes this row on either. The CI run at `72bc84c` ran the current verifier against a real image (`sha256:d7c44949…`) and so restores most of what artifact (2) asserts — the mount set, destinations, read-only flags, image-identity discipline, hardening flags, bounds and limits, on an independent host. It does **not** restore the four assertions that depend on the operator's own configuration |
+
+**The four assertions still unevaluated against this deployment**, which is the
+whole of what is missing:
+
+1. `no prohibited path appears in the configured mounts or in the secret source`
+   — added at `aa49797`; CI evaluated it against fixture paths under `RUNNER_TEMP`.
+2. `every approved mount resolves to an existing regular file on this host`
+   — added at `aa49797`; "this host" was the runner.
+3. `the application password file is not world-readable through its path`
+   — added at `aa49797`; the runner's was a 0600 fixture in a fresh directory,
+   not `/etc/scamwall/secrets/pihole_app_password`.
+4. the supplementary group — CI resolved `65532` from the default, because
+   `deploy/compose/.env` is gitignored and a fresh clone has none. The
+   deployment resolves `989`.
 
 Nothing observed suggests the renewal will fail: the operator host already has a
-regular file at the CA path and a `0750 root:swsecret` secrets directory. But
-"expected to pass" is not a result, which is the entire point of §5.
-`docs/VERIFICATION.md` §6.1 lists the exact commands and the three new lines to
-look for.
+regular file at the CA path and a `0750 root:swsecret` secrets directory, and
+rendering the definition with the deployment's `.env` yields `group_add:
+["989"]` (`docs/VERIFICATION.md` §3.13). But "expected to pass" is not a result,
+which is the entire point of §5. `docs/VERIFICATION.md` §6.1 lists the exact
+commands and the lines to look for.
 
 `0 blocked` carries as much weight here as `0 failed`. This verifier reports
 "could not run" separately from "failed", and a run with no failures but
@@ -798,13 +827,26 @@ the Dockerfile still invokes it and that no `ldd`-based assertion returns.
 inside a real `docker build`.
 **Dependencies.** Docker daemon access for the second part.
 **Acceptance.** Both.
-**Status.** **IMPLEMENTED-UNVERIFIED** at `aa49797`. It was VERIFIED at
-`b6b1769` on both parts; the second lapsed with the image:
+**Status.** **VERIFIED** at `72bc84c`, bound to image
+`sha256:d7c44949d56d4f609b3f184464521a2d95c6b34e628f69fd5b145ad6104bba07`.
+It was VERIFIED at `b6b1769`, demoted at `aa49797` when the image it was bound
+to no longer matched the candidate, and re-established by the passing CI run:
 
-| Part | Result | At `aa49797` |
+| Part | Result | At `b6e70f4` |
 | --- | --- | --- |
-| The controls | 5 test functions, positive, negative and malformed inputs, all passing — `docs/VERIFICATION.md` §3.6 | **Still valid.** `internal/buildcheck/elfcheck` and `container/Dockerfile` are untouched by `ef40156` and `aa49797`, and the tests were re-run at `aa49797` (§3.0) |
-| The assertion inside a real build | Executed during the operator's `docker build` of `b6b1769`, which exited 0 and produced image `sha256:b95cc07c…` — `docs/VERIFICATION.md` §3.7; and independently in CI at `2a18874` on Ubuntu 24.04.4 with Docker 28.0.4 — §3.8 | **Lapsed.** §5 demotes this row on a rebuilt image, and there is no image from `aa49797` at all. That the Dockerfile is unchanged makes the renewal likely to pass; it does not make it unnecessary, because reproducibility is the property being claimed and it has never been demonstrated here |
+| The controls | 5 test functions, positive, negative and malformed inputs, all passing — `docs/VERIFICATION.md` §3.6 | **Valid.** `internal/buildcheck/elfcheck` and `container/Dockerfile` are untouched by `ef40156`, `aa49797`, `72bc84c` and `b6e70f4`, and the tests were re-run at `b6e70f4` (`docs/VERIFICATION.md` §3.13) |
+| The assertion inside a real build | Executed during the operator's `docker build` of `b6b1769` (§3.7); in CI at `2a18874` (§3.8); and in the **passing** run 34047025567 at `72bc84c`, which produced `sha256:d7c44949…` (§3.12) | **Valid at `72bc84c`.** The runner is fresh and the workflow declares no build cache, so the `RUN` step executed rather than being restored |
+
+**Why the CI run closes this row when it does not close SW-P1-05.** The two
+rows were demoted together and are easily assumed to renew together. They do
+not. SW-P1-05 asserts *deployment settings* — the supplementary group, the CA
+and password sources, the mount set — and CI resolves a different deployment,
+so its run does not speak to the operator's. This row asserts a property of the
+*executable*, established in the build stage before any deployment exists: the
+assertion opens the binary, parses its ELF structure and exits. It reads no
+password, no CA, no mount and no group. A difference in those cannot bear on
+it, and treating it as though it could was an over-application of the renewal
+rule rather than an application of it — `docs/VERIFICATION.md` §3.12.
 
 The assertion is a `RUN` step, so a build exit of 0 does not merely coexist with
 it having passed: the build could not have reached that status otherwise. The
@@ -816,8 +858,17 @@ against the source alone.
 Neither part closes this row alone. Passing controls prove the checker works;
 a green build without them proves an assertion ran but not that it can fail.
 
-**Renewal.** Tied to that image. A rebuild re-executes the assertion, and its
-result is recorded against the new image ID; §5.
+**Scope of the closure.** This row is closed for the artifact the assertion ran
+against. It is not a claim about any other image, and specifically not about an
+image the operator has yet to build: `docs/VERIFICATION.md` §6.1 re-executes the
+assertion during the operator's build and records the result against that image
+ID, extending this row to a second artifact. That extension is not a
+precondition for closing it — a requirement is met by the evidence its
+acceptance names, and this one names a real build, not a particular host.
+
+**Renewal.** Tied to an image. A rebuild re-executes the assertion, and its
+result is recorded against the new image ID; §5. A `CACHED` build step is not a
+re-execution, which is why §6.1 refuses one.
 
 ---
 
@@ -1045,13 +1096,23 @@ commit changes none, so the record carries forward rather than requiring a
 re-run — otherwise writing down the evidence would itself invalidate it.
 
 **Image-bound rows carry a second identity.** SW-P1-05 and SW-P1-20 are tied to
-image `sha256:b95cc07c…` *and* to commit `b6b1769`. Both must hold — and at
-`aa49797` the commit half no longer does, which is why both rows are
-`IMPLEMENTED-UNVERIFIED` in §3 rather than carried forward on the image alone. A rebuild
-from the same commit produces an image that has not been verified, however
-confident one is that it is equivalent — reproducibility is a property to be
-demonstrated, not assumed, and it has not been demonstrated here. Rebuild, then
-re-run `docs/VERIFICATION.md` §6.1 and record the new ID.
+an image ID *and* to a commit. Both must hold. At `b6e70f4`:
+
+| Row | Bound to | Holds? |
+| --- | --- | --- |
+| SW-P1-20 | image `sha256:d7c44949…`, commit `72bc84c` | **Yes.** `b6e70f4` changes documentation only, so the commit half is intact; the image half is the artifact the assertion ran against |
+| SW-P1-05 | image `sha256:b95cc07c…`, commit `b6b1769` | **No.** The commit half lapsed at `aa49797`, which changed the verifier and `compose.yaml` — so the row is `IMPLEMENTED-UNVERIFIED` in §3 rather than carried forward on the image alone |
+
+A rebuild from the same commit produces an image that has not been verified,
+however confident one is that it is equivalent — reproducibility is a property
+to be demonstrated, not assumed, and it has not been demonstrated here.
+Rebuild, then re-run `docs/VERIFICATION.md` §6.1 and record the new ID.
+
+**A row bound to a CI-built image is not thereby a weaker row.** What matters is
+whether the artifact the evidence names is the artifact the requirement is
+about. SW-P1-20 is about an executable's linkage, and CI built a real one.
+SW-P1-05 is about a deployment's settings, and CI resolved a different
+deployment. The distinction is the requirement's, not the runner's.
 
 ---
 

@@ -1132,10 +1132,32 @@ and its gate list matches the local suite's" — both halves, at a named commit,
 with a run URL, recorded tool versions and a per-gate outcome. The row moves to
 VERIFIED. The criterion was never amended; CI was made able to satisfy it.
 
-**It does NOT renew SW-P1-05 or SW-P1-20, and the reason is specific rather
-than procedural.** `container runtime verification` passed on the runner against
-a named image, which looks like exactly what those rows ask for. It is not,
-because CI resolves a *different deployment*:
+**Independently re-verified at `b6e70f4`**, from the run itself rather than from
+this document: `gh run view 34047025567` reports `conclusion: success`,
+`headSha: 72bc84c13f4e6914bfb015e87d46a5234e8f5234`, `event: push`, and all
+fifteen steps `success`; the downloaded run log contains the `24 passed, 0
+failed, 0 BLOCKED` summary line, `RESULT: all required gates passed.`, `verified
+image: sha256:d7c44949…`, `source commit: 72bc84c…`, and `CI fixtures removed.`
+The workflow configures no build cache and the runner is fresh, so every `RUN`
+in the build executed rather than being restored.
+
+**It closes SW-P1-20.** That row's acceptance is "the controls pass, AND the
+assertion is observed to run inside a real `docker build`". Both halves hold at
+`72bc84c`: the controls pass (§3.6, re-run at `b6e70f4`), and the assertion is a
+`RUN` step in a build that exited 0 on an uncached runner, producing
+`sha256:d7c44949…`. **An earlier revision of this section said the CI run did not
+renew SW-P1-20. That was wrong, and the error was one of over-application:** the
+four CI/deployment differences tabulated below are differences in the *deployment
+the container is created from*. The ELF assertion is a property of the
+*executable*, asserted in the build stage, before any deployment exists. It does
+not read the password, the CA, the supplementary group or the mount set, so no
+difference in those can bear on it. The row is now VERIFIED, **bound to image
+`sha256:d7c44949…`** — the artifact the assertion actually ran against.
+
+**It does NOT close SW-P1-05**, and the reason is specific rather than
+procedural. `container runtime verification` passed on the runner against a
+named image, which looks like exactly what that row asks for. It is not, because
+CI resolves a *different deployment*:
 
 | Setting | Operator's deployment | What CI verified |
 | --- | --- | --- |
@@ -1148,19 +1170,54 @@ The supplementary group is the sharpest of these and was checked directly rather
 than assumed: `deploy/compose/.env` is gitignored, so a fresh clone has none, and
 `${SCAMWALL_SECRET_GID:-65532}` falls back to the default. Resolving the
 definition with no `.env` yields `group_add: ["65532"]`; with the operator's,
-`["989"]`. **CI therefore verified that a supplementary group is configured
+`["989"]` — confirmed again at `b6e70f4` by rendering the definition locally
+(§3.13). **CI therefore verified that a supplementary group is configured
 correctly, not that the deployment's supplementary group is.**
 
-So the CI run corroborates the *shape* of the deployment — the exact mount set,
-the destinations, the read-only binds, the bounds, the pin, the hardening flags —
-on an independent host, from a clean checkout, by an unrelated account. It says
-nothing about the operator's actual configuration or the artifact the operator
-would deploy. Those remain §6.1's job, and both rows stay
-`IMPLEMENTED-UNVERIFIED` until it is run.
+**What CI does establish for SW-P1-05, precisely.** Against a real image on an
+independent host, from a clean checkout, by an unrelated account: the mount set
+and its destinations, the read-only flags, the image-identity discipline, the
+hardening flags, the tmpfs and logging bounds, the resource limits, and the fact
+that the verifier's assertions can all be satisfied by a correctly shaped
+deployment. What remains unevaluated against the operator's configuration is
+narrow and nameable — it is listed in §6.1 and in the row itself, and it is not
+"everything".
+
+**The pin was not exercised.** CI runs the verifier without
+`SCAMWALL_EXPECTED_IMAGE_ID`, so the `SCAMWALL_EXPECTED_IMAGE_ID` comparison was
+skipped there. It is covered by the regression suite against the fake (§3.5) and
+by the operator procedure, which sets it (§6.1).
 
 Stating it the other way, because this is the row most likely to be over-read:
 **a green CI badge on this repository does not mean the deployment is
 verified.**
+
+---
+
+### 3.13 Evidence reconciled at `b6e70f4` (this session)
+
+Nothing here is new implementation. It is the set of observations made to
+confirm that the record above still describes the repository, made before any
+operator command was proposed.
+
+| Claim under test | How it was checked | Result |
+| --- | --- | --- |
+| Local `HEAD` is `b6e70f4`, tree clean, branch ahead of `origin/feat/phase-1-core` by one | `git rev-parse HEAD`, `git status --porcelain`, `git branch -av` | Confirmed. Remote is `72bc84c`; `main` is `66aff2e` |
+| `b6e70f4` changes documentation only | `git show --stat b6e70f4` | Confirmed: `docs/IMPLEMENTATION_PLAN.md`, `docs/REQUIREMENTS_MATRIX.md`, `docs/VERIFICATION.md`. No gate input is touched, so the CI evidence at `72bc84c` applies unchanged to this tree |
+| The CI run is real and passed at the stated commit | `gh run view 34047025567 --json` | `conclusion: success`, `headSha: 72bc84c…`, `event: push`, all 15 steps `success`, 16:56:22Z → 16:59:59Z |
+| The gate transcript, image record, diagnostics handling and fixture cleanup | the run log, downloaded with `gh run view --log` | `24 passed, 0 failed, 0 BLOCKED, 0 optional-skipped`; `RESULT: all required gates passed.`; `verified image: sha256:d7c44949…`; `source commit: 72bc84c…`; `CI fixtures removed.`; runner `docker 28.0.4` / `compose v2.38.2` |
+| The CI build could not have restored a cached ELF assertion | the workflow declares no cache action and no buildx cache; the runner is fresh | Confirmed — so the assertion executed |
+| The local gate suite still reports what §3.0 says | `bash scripts/check.sh` at `b6e70f4` | **22 passed, 0 failed, 2 BLOCKED, 0 optional-skipped; `CHECK exit=1`.** The two BLOCKED are `docker build` and `container runtime verification`, both "docker daemon not reachable by scamwall" |
+| The operator's `.env` really does change what the verifier will assert | `docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml config --format json`, run **as `scamwall`** — `compose config` needs the CLI, not the daemon | `group_add: ["989"]`. Without the `.env`, `["65532"]` |
+| The bind sources the new host-side check will evaluate | the same rendering | `/etc/scamwall/certs/pihole-ca.crt`, `/home/scamwall/scamwall/deploy/compose/config.example.json`, `/home/scamwall/scamwall/testdata/feed.json`, secret `/etc/scamwall/secrets/pihole_app_password`. Compose resolves the two relative sources to absolute paths, so the check will not depend on the working directory |
+| Those sources exist as regular files | `stat` as `scamwall` | CA `644 root:root`, config and feed `664 scamwall:scamwall`. The secrets directory is `0750 root:swsecret` and `scamwall` cannot list it — which is why the procedure must run as root |
+| `create_host_path: false` is observable on this host's Compose | the same rendering, Compose **v5.5.1** | Rendered on all three binds. CI's v2.38.2 omits it, which is what `72bc84c` taught the fixture test to handle in both directions |
+| The verifier never starts anything | every `docker` invocation in `scripts/container-runtime-verify.sh` enumerated | `create`, `inspect`, `ps`, `ls`, `history`, `export`, `rm`, `network ls/inspect/rm`, `compose config/create/ps`. No `up`, `start` or `run` |
+| The image the operator would build is byte-identical in context to `b6b1769`'s | `.dockerignore` admits only `go.mod`, `go.sum`, `cmd/`, `internal/`; `git diff b6b1769..HEAD` touches none of them, nor `container/Dockerfile` | Confirmed — which is why the build-cache question in §6.1 is a real one and is now guarded |
+
+**What this session did not do.** It did not reach the Docker daemon, build an
+image, create a container, read the application password, contact a Pi-hole, or
+push anything. `origin/feat/phase-1-core` is still `72bc84c`.
 
 ---
 
@@ -2116,30 +2173,39 @@ bound, so that a later change does not quietly step outside them.
 
 ## 6. Operator procedures, and what remains blocked
 
-### 6.1 Runtime verification against a real image (SW-P1-05, SW-P1-20) — **RENEWAL REQUIRED at `aa49797`**
+### 6.1 Runtime verification against a real image (SW-P1-05) — **RENEWAL REQUIRED at `b6e70f4`**
 
 **Status.** Executed by the operator at commit `b6b1769` against image
 `sha256:b95cc07c…`: build exit 0 with both in-build assertions run, verifier
 90 passed / 0 failed / 0 blocked / 0 cleanup problems, `VERIFY exit=0`. The
-result is §3.7, and it closed both rows at `b6b1769`.
+result is §3.7. That evidence remains valid **for `b6b1769` and for that image**
+and is not withdrawn; it no longer covers the current candidate.
 
-**That evidence does not carry forward to `aa49797`.** `ef40156` and `aa49797`
-change `scripts/container-runtime-verify.sh` and `deploy/compose/compose.yaml`,
-which `docs/REQUIREMENTS_MATRIX.md` §5 lists as gate inputs for exactly these
-rows. The verifier now makes assertions the `b6b1769` run never made — that
-every approved mount resolves to an existing regular file, that the password
-file is not reachable by every account on the host, that the secret source is
-subject to the prohibited-path rule — and the definition now carries
-`bind.create_host_path: false` and a CA source override. A run that did not
-evaluate those did not establish them.
+**SW-P1-20 is no longer waiting on this procedure.** Its acceptance is about the
+ELF assertion executing in a real build, and the passing CI run at `72bc84c` did
+that on an uncached runner — §3.12. This procedure still re-executes the
+assertion, and its result is recorded against the operator-built image, but that
+is an extension of the row to a second artifact rather than the evidence the row
+was blocked on.
 
-**The expected outcome of the renewal is unchanged: 0 failed, 0 blocked.** The
-new checks describe the operator host as it already is — the CA at
-`/etc/scamwall/certs/pihole-ca.crt` is a regular file, and
-`/etc/scamwall/secrets` is `0750 root:swsecret`, so the password is not
-world-reachable. The check count rises from 90, because checks were added. If
-any of them FAILS, that is a finding about the deployment and takes precedence
-over closing anything.
+**What is actually missing for SW-P1-05, at `b6e70f4`.** Not "the whole row".
+Four assertions have never been evaluated against the operator's resolved
+configuration and an operator-built image:
+
+| Assertion | Why CI does not cover it |
+| --- | --- |
+| `no prohibited path appears in the configured mounts or in the secret source` | added at `aa49797`; CI evaluated it against fixture paths under `RUNNER_TEMP` |
+| `every approved mount resolves to an existing regular file on this host` | added at `aa49797`; "this host" was the runner |
+| `the application password file is not world-readable through its path` | added at `aa49797`; the runner's file was a 0600 fixture in a fresh directory, not `/etc/scamwall/secrets` |
+| the supplementary group is the gid that owns the password file | CI resolved `65532` from the default, not `989` from the operator's `.env` — §3.12 |
+
+Everything else the row asserts was exercised in CI against a real image
+(§3.12). The renewal is expected to pass: the CA at
+`/etc/scamwall/certs/pihole-ca.crt` is a regular file, `/etc/scamwall/secrets`
+is `0750 root:swsecret`, and rendering the definition with the operator's `.env`
+yields `group_add: ["989"]` (§3.13). "Expected to pass" is not a result. If any
+of them FAILS, that is a finding about the deployment and takes precedence over
+closing anything.
 
 **The access constraint is unchanged, and is not a defect.** The service
 account is not in the `docker` group and has no passwordless sudo. By operator
@@ -2148,11 +2214,6 @@ this host, since it permits mounting the host filesystem into a container.
 Docker operations remain operator-executed, so a `scamwall` run of
 `scripts/check.sh` will continue to report these two gates as `BLOCKED` and
 exit 1 (§3.0). That is the correct local result and does not contradict §3.7.
-
-**This section is retained as the renewal procedure.** The evidence is tied to
-one image ID and one commit. Rebuild or change a gate input and it lapses —
-`docs/REQUIREMENTS_MATRIX.md` §5 — at which point the commands below are run
-again, not edited.
 
 **Earlier candidate images.** `sha256:d3c4ed2c…`, built from `b469c592`, was
 recorded before any verifier had run. It is superseded and was never verified;
@@ -2167,49 +2228,178 @@ daemon. Neither side is given the other's access: **do not** add a
 `safe.directory` exception, change repository ownership, or put `scamwall` in
 the `docker` group.
 
+#### Four defects in the previous form of this procedure, and their fixes
+
+The commands printed here before `b6e70f4` would have run, and three of the four
+faults below could have produced a *wrong result* rather than a failed run. They
+were found by reviewing the procedure against the current verifier and
+Dockerfile, not by running it.
+
+1. **A failed build was survivable, and the stale tag would have been verified
+   in its place.** The block set no `-e` and tested nothing: after a failing
+   `docker build`, `docker image inspect -f '{{.Id}}' scamwall:local` returns
+   whatever already held that tag — on this host, `b6b1769`'s
+   `sha256:b95cc07c…`. The verifier would then have passed, pinned to an image
+   built from a different commit, and the transcript would have been filed
+   against `b6e70f4`. **Fixed:** the tag's pre-build identity is recorded first,
+   a nonzero build status aborts, and both identities are printed.
+2. **The evidence the procedure asked for could not appear in the output it
+   collected.** Step 2 said "the last ~40 lines of build output … contain the
+   ELF assertion's report". Under BuildKit's default progress renderer they
+   contain a collapsed step summary; `elfcheck`'s report is not in them.
+   **Fixed:** `--progress=plain`, the build log captured, and the two assertion
+   steps extracted by step number.
+3. **A cached layer would have been read as an assertion that ran.** Both
+   in-build assertions are `RUN` steps. The build context is byte-identical to
+   `b6b1769`'s — `.dockerignore` admits only `go.mod`, `go.sum`, `cmd/` and
+   `internal/`, none of which changed — so only the differing `--build-arg`
+   values invalidate the cache. **Fixed:** `CACHED` on either assertion step
+   aborts with the instruction to rebuild with `--no-cache`, and the count of
+   cached steps is printed either way.
+4. **`tee /tmp/scamwall-verify.log`, run as root, reintroduced the exact defect
+   `scripts/check.sh` documents and avoids** — a predictable name in a
+   world-writable directory, which any local account can pre-create as a symlink
+   and so redirect a root-owned write. **Fixed:** `mktemp`, `chmod 600`.
+
+Two additions of the same kind: the CI fixture variables are refused if they are
+still exported in the operator's shell, so a leftover `SCAMWALL_CA_FILE` cannot
+silently redirect a bind source to a placeholder; and the real secret's mode,
+owner, size and content digest are compared before and after, so "the procedure
+did not touch the credential" is an observation rather than an assurance. The
+digest is compared, never printed.
+
+**Run the whole block as root.** The password-permission assertion needs
+traverse permission on the `0750 root:swsecret` secrets directory. An identity
+without it makes the verifier report the exposure as UNDETERMINED and FAIL —
+which is the correct behaviour, but it is a fact about the identity, not about
+the deployment. The preflight settles this before anything is built.
+
+**Two inputs.** `SCAMWALL_REPO` is the checkout path, deliberately not recorded
+in this document. `SCAMWALL_EXPECT_COMMIT` is the candidate's full SHA, taken
+from the handoff — it is a parameter rather than a literal because this file is
+part of the tree it names, so a SHA written inside it would be invalidated by
+the very commit that recorded it. The run aborts if `HEAD` is anything else.
+
 ```bash
-# Run as the operator (the account with Docker access), from anywhere.
-set -u
-# The ScamWall checkout, owned by the service account. Set for this host; the
-# path is deliberately not recorded in this document.
-REPO="${SCAMWALL_REPO:?set this to the checkout path}"
+# ScamWall — operator runtime verification.
+# The candidate commit is supplied by the handoff, not hardcoded: this file is
+# part of the tree it names, so any revision of it would invalidate a SHA
+# written inside it.
+set -uo pipefail
 
-# ---- 1. Source identity, read AS scamwall -------------------------------
-# git is run under the owning account so no ownership exception is needed.
-COMMIT="$(sudo -u scamwall git -C "$REPO" rev-parse HEAD)"
-DESCRIBE="$(sudo -u scamwall git -C "$REPO" describe --tags --always --dirty)"
-DIRTY="$(sudo -u scamwall git -C "$REPO" status --porcelain | wc -l)"
-printf 'SOURCE COMMIT=%s\nDESCRIBE=%s\nUNCOMMITTED FILES=%s\n' \
-  "$COMMIT" "$DESCRIBE" "$DIRTY"
-# UNCOMMITTED FILES must be 0. A dirty tree means the image cannot be tied
-# to a commit, and the evidence would be untraceable.
+REPO="${SCAMWALL_REPO:?set this to the ScamWall checkout path}"
+EXPECT_COMMIT="${SCAMWALL_EXPECT_COMMIT:?set this to the candidate commit named in the handoff}"
+SECRET=/etc/scamwall/secrets/pihole_app_password
 
-# ---- 2. Build, through the operator's Docker access ----------------------
+die() { printf '\nABORT: %s\n' "$1" >&2; exit 1; }
+
+# ---- 0. Preflight ------------------------------------------------------------
+# CI passes throwaway fixture paths through these variables. If one is still
+# exported in this shell it silently redirects a bind SOURCE, and the run would
+# verify a fixture while reporting the deployment.
+for v in SCAMWALL_CA_FILE SCAMWALL_SECRET_FILE SCAMWALL_CONFIG SCAMWALL_FEED \
+         SCAMWALL_IMAGE SCAMWALL_EXPECTED_IMAGE_ID; do
+  [ -z "${!v:-}" ] || die "$v is set in this shell ('${!v}') — unset it; the deployment's own values must apply"
+done
+
+printf 'RUN AS=%s (uid %s)\n' "$(id -un)" "$(id -u)"
+printf 'DOCKER=%s\n' "$(docker --version 2>&1)"
+printf 'COMPOSE=%s\n' "$(docker compose version 2>&1)"
+docker info >/dev/null 2>&1 || die "this account cannot reach the Docker daemon"
+
+# The password-permission assertion needs traverse permission on the 0750
+# secrets directory. Without it the verifier reports the exposure UNDETERMINED
+# and fails — a fact about the identity, not about the deployment. Settle it now.
+stat -c '%a' -- "$SECRET" >/dev/null 2>&1 ||
+  die "cannot stat $SECRET as $(id -un) — run this whole procedure as root"
+
+ENV_FILE="$REPO/deploy/compose/.env"
+[ -f "$ENV_FILE" ] || die "$ENV_FILE is absent — the deployment's overrides would not apply"
+printf 'ENV FILE=%s\nENV KEYS=%s\n' "$ENV_FILE" \
+  "$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$ENV_FILE" | tr '\n' ' ')"
+
+# Identity of the real secret, recorded before anything runs. The digest is
+# compared, never printed.
+printf 'SECRET BEFORE=%s\n' "$(stat -c 'mode=%a owner=%U:%G size=%s mtime=%Y' -- "$SECRET")"
+SECRET_SUM_BEFORE="$(sha256sum -- "$SECRET" | cut -d' ' -f1)" || die "could not read $SECRET"
+
+# ---- 1. Source identity, read AS scamwall ------------------------------------
+COMMIT="$(sudo -u scamwall git -C "$REPO" rev-parse HEAD)" || die "could not read HEAD as scamwall"
+DESCRIBE="$(sudo -u scamwall git -C "$REPO" describe --tags --always --dirty)" || die "could not describe HEAD"
+DIRTY="$(sudo -u scamwall git -C "$REPO" status --porcelain | wc -l | tr -d ' ')" || die "could not read the working-tree state"
+printf 'SOURCE COMMIT=%s\nDESCRIBE=%s\nUNCOMMITTED FILES=%s\n' "$COMMIT" "$DESCRIBE" "$DIRTY"
+[ "$DIRTY" = 0 ] || die "$DIRTY uncommitted file(s) — the image could not be tied to a commit"
+[ "$COMMIT" = "$EXPECT_COMMIT" ] || die "HEAD is $COMMIT, expected $EXPECT_COMMIT"
+
+# ---- 2. What holds the tag now, before the build replaces it -----------------
+PRE_IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local 2>/dev/null)" || PRE_IMAGE_ID=none
+printf 'PRE-BUILD scamwall:local=%s\n' "$PRE_IMAGE_ID"
+
+# ---- 3. Build, through the operator's Docker access --------------------------
+BUILD_LOG="$(mktemp)" || die "could not create a build log"
+chmod 600 "$BUILD_LOG"
 docker build \
+  --progress=plain \
   -f "$REPO/container/Dockerfile" \
   -t scamwall:local \
   --build-arg VERSION="$DESCRIBE" \
   --build-arg COMMIT="$COMMIT" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "$REPO"
-printf 'BUILD exit=%s\n' "$?"
-# This build EXECUTES the ELF linkage assertion (SW-P1-20). A dynamically
-# linked binary fails the build here rather than at run time.
+  "$REPO" 2>&1 | tee "$BUILD_LOG"
+BUILD_RC="${PIPESTATUS[0]}"
+printf 'BUILD exit=%s\n' "$BUILD_RC"
+[ "$BUILD_RC" -eq 0 ] ||
+  die "the build failed; scamwall:local still refers to $PRE_IMAGE_ID, which must NOT be verified as this candidate"
 
-# ---- 3. Image identity --------------------------------------------------
-IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)"
-printf 'IMAGE ID=%s\n' "$IMAGE_ID"
-# Evidence is tied to this, not to the tag.
+# ---- 4. The two in-build assertions, from the build's own output -------------
+show_step() { # <substring of the RUN command>
+  local n
+  n="$(sed -n "s|^#\([0-9][0-9]*\) \[[^]]*\] RUN .*$1.*|\1|p" "$BUILD_LOG" | head -1)"
+  [ -n "$n" ] || { printf '  (no build step matched "%s" — read %s in full)\n' "$1" "$BUILD_LOG"; return 0; }
+  grep -E "^#${n}( |\$)" "$BUILD_LOG"
+}
+printf 'CACHED STEPS=%s (a cached step did not execute for this build)\n' "$(grep -cE '^#[0-9]+ CACHED' "$BUILD_LOG")"
+echo "---- ELF linkage assertion (SW-P1-20) ----"
+ELF_STEP="$(show_step 'elfcheck')"
+printf '%s\n' "$ELF_STEP"
+case "$ELF_STEP" in
+  *CACHED*) die "the ELF assertion step was CACHED — it did not execute for this build. Re-run step 3 with --no-cache" ;;
+esac
+echo "---- enforcement-absent assertion ----"
+ENF_STEP="$(show_step '/out/scamwall version')"
+printf '%s\n' "$ENF_STEP"
+case "$ENF_STEP" in
+  *CACHED*) die "the enforcement assertion step was CACHED — it did not execute for this build. Re-run step 3 with --no-cache" ;;
+esac
 
-# ---- 4. Verify, pinned to that image ------------------------------------
-# The pin means a tag that moves between these two commands cannot substitute
-# another image. The verifier creates a container but never starts one: it
-# uses `docker compose create` and `docker create` only, so the authenticated
-# application does not run and no credential is used.
+# ---- 5. Image identity -------------------------------------------------------
+IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)" || die "could not resolve the built image"
+printf 'IMAGE ID=%s\nPREVIOUS TAG HELD=%s\n' "$IMAGE_ID" "$PRE_IMAGE_ID"
+
+# ---- 6. Verify, pinned to exactly that image ---------------------------------
+# The verifier uses `docker compose create` and `docker create` only. It starts
+# nothing, so no credential is used and no authenticated command runs.
+VERIFY_LOG="$(mktemp)" || die "could not create a verifier log"
+chmod 600 "$VERIFY_LOG"
 SCAMWALL_EXPECTED_IMAGE_ID="$IMAGE_ID" \
-  bash "$REPO/scripts/container-runtime-verify.sh" 2>&1 | tee /tmp/scamwall-verify.log
+  bash "$REPO/scripts/container-runtime-verify.sh" 2>&1 | tee "$VERIFY_LOG"
 VERIFY_RC="${PIPESTATUS[0]}"
 printf 'VERIFY exit=%s\n' "$VERIFY_RC"
+
+# ---- 7. The deployment's secret is exactly as it was -------------------------
+printf 'SECRET AFTER=%s\n' "$(stat -c 'mode=%a owner=%U:%G size=%s mtime=%Y' -- "$SECRET")"
+if [ "$(sha256sum -- "$SECRET" | cut -d' ' -f1)" = "$SECRET_SUM_BEFORE" ]; then
+  echo "SECRET CONTENTS=unchanged"
+else
+  echo "SECRET CONTENTS=CHANGED — stop and investigate before anything else"
+fi
+
+# ---- 8. Nothing of this invocation is left behind ----------------------------
+echo "---- residue (both lists must be empty) ----"
+docker ps -a --filter 'name=scamwall-verify-' --format '{{.ID}} {{.Names}} {{.Status}}'
+docker network ls --filter 'name=scamwall-verify-' --format '{{.ID}} {{.Name}}'
+
+printf '\nRETURN: every line above, plus the full contents of:\n  %s\n  %s\n' "$BUILD_LOG" "$VERIFY_LOG"
 ```
 
 `VERIFY_RC` is the exit status of the verifier itself, not of `tee` — that is
@@ -2219,13 +2409,16 @@ green result.
 
 **What the verifier does to the host.** It creates two containers and one
 network under a Compose project named `scamwall-verify-<128 random bits>`,
-starts neither, and removes exactly what it created. It refuses to create
-anything if a resource already carries that project name, it never issues a
-project-wide `compose down`, every resource query is filtered by a label unique
-to the invocation, and any resource it cannot attribute to itself is left in
-place and reported. **A running deployment is not stopped, removed, inspected,
-or adopted.** If the run is interrupted, cleanup still completes; if cleanup
-fails, the exit status is nonzero and the remaining identifiers are printed.
+starts neither, and removes exactly what it created. Its only Docker verbs are
+`create`, `inspect`, `ps`, `ls`, `history`, `export` and `rm`: there is no `up`,
+no `start` and no `run`, so the application never executes and no credential is
+read. It refuses to create anything if a resource already carries that project
+name, it never issues a project-wide `compose down`, every resource query is
+filtered by a label unique to the invocation, and any resource it cannot
+attribute to itself is left in place and reported. **A running deployment is not
+stopped, removed, inspected, or adopted.** If the run is interrupted, cleanup
+still completes; if cleanup fails, the exit status is nonzero and the remaining
+identifiers are printed.
 
 **Interpreting the result.**
 
@@ -2235,44 +2428,52 @@ fails, the exit status is nonzero and the remaining identifiers are printed.
 | 1 | at least one check failed, could not run, or required cleanup failed — the output distinguishes `FAIL`, `BLOCKED` and `CLEANUP` |
 | 2 | the script was invoked wrongly, or the directory is not a ScamWall checkout |
 
-**What to return on a renewal run:**
+**What to return.** Every line the block prints, plus the full contents of the
+two logs it names. Partial output is weaker: the verifier's value is that it
+distinguishes "passed", "failed" and "could not run", and a truncated log loses
+exactly that distinction — which is why the counts for all three categories are
+recorded in §3.7 and not just the passes. FINDING-23 was that same mistake made
+mechanically, by the gate suite, to this verifier's output.
 
-1. the `SOURCE COMMIT`, `DESCRIBE` and `UNCOMMITTED FILES` lines from step 1;
-2. the `BUILD exit` line, and the last ~40 lines of build output — they contain
-   the ELF assertion's report, which is SW-P1-20's evidence;
-3. the `IMAGE ID` line from step 3;
-4. the complete contents of `/tmp/scamwall-verify.log`, and the `VERIFY exit`
-   line.
-
-All four are recorded against that image ID. Partial output is weaker: the
-verifier's value is that it distinguishes "passed", "failed" and "could not
-run", and a truncated log loses exactly that distinction — which is why the
-counts for all three categories are recorded in §3.7 and not just the passes.
-FINDING-23 was that same mistake made mechanically, by the gate suite, to this
-verifier's output.
-
-**For the renewal at `aa49797` specifically**, four assertions exist that the
-`b6b1769` run did not evaluate. Their lines are the ones to look for, because
-they are the reason the renewal is required rather than a formality:
+The lines that are the reason this renewal exists rather than a formality — the
+three assertions added at `aa49797`, and the two that carry the supplementary
+group:
 
 ```
 PASS    no prohibited path appears in the configured mounts or in the secret source
 PASS    every approved mount resolves to an existing regular file on this host
 PASS    the application password file is not world-readable through its path
+PASS    supplementary group resolves to a single valid non-root gid (989)
+PASS    supplementary group
 ```
 
-and, in the container section, the mount set assertions as before. The total
-will exceed 90 because checks were added, not because anything was relaxed. A
-`FAIL` on the third line means `/etc/scamwall/secrets/pihole_app_password` is
-reachable by every account on the host, which would be a finding about the
-deployment rather than about the verifier, and it takes precedence over closing
-either row.
+The gid in the fourth line is the evidence that the operator's `.env` was in
+force: a run with no `.env` reports `65532` there and still passes, which is
+what CI did. The total will exceed 90 because checks were added, not because
+anything was relaxed. A `FAIL` on the third line means
+`/etc/scamwall/secrets/pihole_app_password` is reachable by every account on the
+host, which would be a finding about the deployment rather than about the
+verifier, and it takes precedence over closing either row.
 
-**Redaction.** The log may name the deployment's resolved paths, its
-supplementary group id and its pinned address. None of those belong in this
-document; §3.7 records that the assertions held, not the values they held
-against. Redact before pasting, or return only the verdict lines and the
-identities.
+**A limitation to record rather than fix here.** The verifier asserts that the
+supplementary group is a single valid non-root gid and that the container
+carries exactly the gid the resolved configuration specifies. It does **not**
+stat the password file to confirm that this gid is the file's owning group —
+that `989` is `swsecret` is established by the deployment's `.env` and by §3.13,
+not by an assertion. Closing that gap means changing
+`scripts/container-runtime-verify.sh`, which is a gate input for eleven rows and
+would invalidate the CI evidence at `72bc84c`. It is registered as a Phase 2
+item (§6.4) rather than smuggled into a renewal run, and no acceptance criterion
+in Phase 1 requires it.
+
+**Redaction.** The verifier's output names the deployment's resolved paths, its
+supplementary group id and its pinned address. It contains no credential — it
+never reads one — but none of those values belong in this document: §3.7 records
+that the assertions held, not what they held against. Redact before pasting, or
+return only the verdict lines and the identities.
+
+**Do not** substitute CI's fixture paths for the deployment's, and do not change
+a deployment setting to make an assertion pass. A failing assertion is a result.
 
 ### 6.2 Live Pi-hole read (SW-P2-04, and Phase 2 generally)
 
@@ -2530,6 +2731,31 @@ is recorded here so the gap is not lost when SW-P1-12 goes green.
 a pull request, tagging, creating a release, publishing an image, or changing
 any repository setting.
 
+### 6.4 Phase 2 work order — **DRAFT, opens when SW-P1-05 closes**
+
+Registered now so that Phase 1 evidence links forward and so that the scope is
+fixed before implementation. Nothing here is authorised to run yet. Two
+standing constraints apply to every item: **no household blocking state is
+changed**, and **no live authenticated command runs until its own operator
+procedure has been reviewed and recorded here**, on the model of §6.1.
+
+| # | Work | Acceptance it must produce |
+| --- | --- | --- |
+| 1 | **Disposable Pi-hole integration tests.** A throwaway Pi-hole instance, created and destroyed by the test, never the household one | A transcript naming the instance's identity and its teardown, and a control proving the test fails when the instance is absent rather than skipping |
+| 2 | **Approved API methods and paths.** The allowlist in `docs/PIHOLE_API_CONTRACT.md` asserted against the client, not merely documented | A test that fails on any request outside the allowlist, including one issued through a redirect |
+| 3 | **Session lifecycle and bounded retries.** Acquire, reuse, expiry, re-authentication, and a hard bound on attempts | Controls for each transition, and a demonstration that a failing endpoint cannot produce unbounded authentication attempts |
+| 4 | **Credential-safe diagnostics.** Extends `scripts/gate-diagnostics.sh` to whatever Phase 2 logs | Decoy tests for the new shapes — session identifiers, cookies, `Authorization` headers — added to the existing eleven |
+| 5 | **Runtime password readability.** The one thing §3.7 and §6.1 deliberately do not establish: that the container identity can *read* the mounted secret | A started container, in a disposable deployment, reporting a successful read without echoing the value. Not on the household deployment |
+| 6 | **Destination and TLS verification through the configured pin.** That the address behind `pi.hole` is reachable, is a Pi-hole, and chains to the private CA | A recorded handshake through the real mapping, plus a negative control with the wrong CA |
+| 7 | **Failure scenarios and compatibility scope.** Unreachable host, wrong password, expired session, malformed response, oversized response, slow-loris, and the Pi-hole versions claimed to be supported | One case per scenario, each asserting a named error rather than a generic one, and an explicit statement of the version range tested |
+| 8 | **Revalidation of Phase 1 guarantees.** Phase 2 adds authenticated paths; the Phase 1 boundary must still hold | `enforcement compiled in false` re-asserted in the build, the read-only mount set unchanged, and `docs/REQUIREMENTS_MATRIX.md` §5 re-applied to every row whose gate inputs Phase 2 touches |
+| 9 | **Carried forward from Phase 1.** The verifier asserts the supplementary group's *value*, not that the gid owns the password file (§6.1) | A host-side check that the secret's owning group is the configured gid, added with its own PRE-FIX CONTROL, and the affected rows renewed |
+| 10 | **Carried forward from Phase 1.** A fork pull request receives no secret and a read-only token (§6.3) | A run triggered from a fork, showing the token's permissions and the absent secret |
+
+Item 5 and item 6 are the two that require a live Pi-hole. Both stay pending a
+reviewed operator procedure; neither is started by this session or by the
+Phase 1 closure.
+
 ---
 
 ## 7. Evidence status, item by item
@@ -2539,20 +2765,23 @@ established claims are listed alongside the outstanding ones, because a table
 of only the gaps invites the reader to assume everything absent from it is
 settled.
 
-**Established at `b6b1769`, and what survives at `aa49797`.** `ef40156` and
-`aa49797` change four gate inputs, so the image-bound rows below lapse under
-`docs/REQUIREMENTS_MATRIX.md` §5. They are kept, with the commit they were
-established at, because deleting them would make the record look thinner than it
-is — but a row tied to `b6b1769` is evidence about `b6b1769`.
+**Established at `b6b1769`, and what survives at `b6e70f4`.** `ef40156` and
+`aa49797` change four gate inputs, so the image-bound rows below lapsed under
+`docs/REQUIREMENTS_MATRIX.md` §5. `72bc84c` then restored two of them by running
+the whole suite, including a build, on a hosted runner; `b6e70f4` changes
+documentation only and restores nothing, because it invalidates nothing. Rows
+are kept with the commit they were established at, because deleting them would
+make the record look thinner than it is — but a row tied to `b6b1769` is
+evidence about `b6b1769`.
 
-| Claim | Basis | Carries to `aa49797`? |
+| Claim | Basis | Carries to `b6e70f4`? |
 | --- | --- | --- |
 | The `b6b1769` image satisfies its runtime hardening assertions | §3.7 | **No.** The verifier and `compose.yaml` both changed; renew per §6.1 |
-| The shipped binary carries no dynamic linking apparatus | §3.6 + §3.7 + §3.8 | **The controls do** — `internal/buildcheck` and the Dockerfile are untouched. The *image-bound* half does not: no image has been built from `aa49797` |
-| The gate suite's exit status matches its printed verdict | `CHECK exit=1` at `aa49797`, 22 passed / 0 failed / 2 BLOCKED. §3.0 | **Yes, re-established directly** |
+| The shipped binary carries no dynamic linking apparatus | §3.6 + §3.7 + §3.8 + §3.12 | **Both halves do, at `72bc84c`.** The controls are untouched and were re-run at `b6e70f4`; the image-bound half is re-established by the passing CI build, which executed the assertion on an uncached runner and produced `sha256:d7c44949…`. §3.12. No *operator-built* image exists from these commits — that is a second artifact for the same claim, not an unmet criterion |
+| The gate suite's exit status matches its printed verdict | `CHECK exit=1` at `b6e70f4`, 22 passed / 0 failed / 2 BLOCKED. §3.0, re-run in §3.13 | **Yes, re-established directly on this tree** |
 | The regression cases discriminate rather than agreeing with the code | §3.5, plus five new PRE-FIX CONTROLS at `ef40156`/`aa49797` (§4.9, §4.10) | **Yes** |
-| The workflow runs on GitHub and runs the same gate list as the local suite | Run 34036997074 at `2a18874`. §3.8 | **Partly.** The workflow changed; the *file* at `aa49797` has never run |
-| The image builds, and its in-build assertions pass, on an unrelated host | CI `docker build` at `2a18874`. §3.8 | **For that source, yes** — `2a18874` is byte-identical to `b6b1769` outside `docs/`. Not for `aa49797` |
+| The workflow runs on GitHub and runs the same gate list as the local suite | Runs 34036997074 (`2a18874`) and **34047025567 (`72bc84c`, passing)**. §3.8, §3.12 | **Yes.** The workflow file as it now stands ran and passed; `b6e70f4` does not touch it |
+| The image builds, and its in-build assertions pass, on an unrelated host | CI `docker build` at `2a18874` (§3.8) and at **`72bc84c`** (§3.12), the latter in a run that passed end to end | **Yes, at `72bc84c`.** `b6e70f4` changes no build input, so it applies to this tree |
 
 **Established at `b6b1769`:**
 
@@ -2565,7 +2794,7 @@ is — but a row tied to `b6b1769` is evidence about `b6b1769`.
 | The `b6b1769` regression cases discriminate rather than merely agreeing with the code | The `0b083cb` verifier fails 50 of the 319 cases. §3.5 |
 | The workflow runs on GitHub, records its tool versions, and runs the same gate list as the local suite | Run 34036997074 at `2a18874`: versions identical to §2.2, gate list identical to §3.0. §3.8 |
 | The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4, at `2a18874` (§3.8) and again at `07154b6` (§3.11). Corroborates §3.7 from a second host |
-| The container hardening assertions hold on a second, independent host | `container runtime verification` PASSED in runs 34045148578 and 34047025567, against CI-built images with CI fixtures, including the three assertions added at `aa49797`. The passing run names the image: `sha256:d7c44949…`. §3.11, §3.12. **It still does not renew SW-P1-05 or SW-P1-20** — CI resolves a different deployment, with `group_add: 65532` rather than the operator's `989`, throwaway fixtures rather than the real CA and password, and an image built on the runner. §3.12 |
+| The container hardening assertions hold on a second, independent host | `container runtime verification` PASSED in runs 34045148578 and 34047025567, against CI-built images with CI fixtures, including the three assertions added at `aa49797`. The passing run names the image: `sha256:d7c44949…`. §3.11, §3.12. **It does not renew SW-P1-05** — CI resolves a different deployment, with `group_add: 65532` rather than the operator's `989`, throwaway fixtures rather than the real CA and password, and an image built on the runner. It *does* close SW-P1-20, whose assertion is about the executable and reads none of those. §3.12 |
 
 **Still not established:**
 
