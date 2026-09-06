@@ -193,6 +193,15 @@ require "secret scan controls"        bash ./scripts/tests/secret-scan-test.sh
 require "independent secret scan self-test" gitleaks bash ./scripts/independent-secret-scan.sh --self-test
 require "independent secret scan"     gitleaks bash ./scripts/independent-secret-scan.sh
 require "container security (static)" bash ./scripts/container-security-check.sh --static
+# The workflow was carrying its security posture on HUMAN REVIEW alone: no
+# pull_request_target, read-only permissions everywhere, SHA-pinned actions, no
+# persisted checkout credential, no repository secret, and no attacker-chosen
+# context reaching a shell. Every one of those is a one-line edit away from
+# being lost, and none of them would have failed a test. This asserts what the
+# file SAYS; what GitHub DOES for a fork pull request still needs a run from a
+# fork (docs/VERIFICATION.md section 6.4 item 10).
+require "workflow policy self-test"   bash ./scripts/workflow-policy-check.sh --self-test
+require "workflow policy"             bash ./scripts/workflow-policy-check.sh
 # A short-circuiting consumer at the end of a pipeline cannot be allowed to
 # decide a condition in a pipefail script: grep -q exits on the first match, the
 # producer takes SIGPIPE, and the pipeline reports 141 — turning a match into a
