@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Gitleaks configuration for ScamWall.
+#
+# This is the INDEPENDENT secret detector. It runs alongside
+# scripts/secret-scan.sh, never instead of it:
+#
+#   * secret-scan.sh knows ScamWall. It knows the Pi-hole password lives at a
+#     fixed path, that a certificate body means the private CA leaked, and
+#     which paths must never be tracked at all.
+#   * gitleaks knows the world. It carries hundreds of vendor credential
+#     formats that a hand-written scanner will never cover.
+#
+# Neither is a superset of the other, so both are required gates.
+#
+# ---------------------------------------------------------------------------
+# ALLOWLISTING POLICY
+#
+# Every entry below is a hole in the detector. Each one therefore states what
+# it exempts and why the exemption is safe. An entry without a justification is
+# not acceptable: if the reason cannot be written down, the entry does not go
+# in.
+#
+# Entries are scoped as narrowly as the tool permits — a specific rule, in a
+# specific file, matching a specific literal, with matchCondition = "AND" so
+# that all three must hold. A blanket path exemption would mean a real
+# credential pasted into that file is never reported, which is precisely the
+# blind spot an attacker would aim for.
+# ---------------------------------------------------------------------------
+
+title = "ScamWall"
+
+[extend]
+useDefault = true
+
+[[rules]]
+  # Pi-hole's application password is the one credential ScamWall handles. It
+  # has no distinctive prefix or checksum, so no generic rule catches it by
+  # shape. What IS catchable is it being assigned to one of the names ScamWall
+  # uses for it. This rule is additive; every upstream rule stays enabled.
+  id = "scamwall-pihole-password"
+  description = "Pi-hole application password assigned to a literal"
+  regex = '''(?i)(pihole[_-]?(app[_-]?)?password)['"]?\s*[:=]\s*['"][^'"\s]{8,}['"]'''
+  keywords = ["pihole"]
+
+  [rules.allowlist]
+    # Documented examples and the compose/env templates must stay writable
+    # without tripping the rule. These are literal placeholder VALUES, not a
+    # path exemption: a real password in the same file is still reported.
+    regexTarget = "match"
+    regexes = [
+      '''(?i)['"](changeme|<[^'"]*>|\$\{[^'"]*\}|example|placeholder|your[_-][^'"]*|redacted)['"]''',
+    ]
+
+# ---------------------------------------------------------------------------
+# Allowlist 1 — the audit logger's redaction test
+# ---------------------------------------------------------------------------
+[[allowlists]]
+  description = """
+internal/audit/audit_test.go asserts that the audit logger REDACTS sensitive
+values. To assert redaction the test must first log something credential-shaped
+— that is the entire point of the test. The value below is an invented constant
+with no corresponding account or session anywhere.
+
+Scoped by rule AND path AND the exact literal, so any other credential in the
+same file, or this literal appearing anywhere else, is still reported."""
+  targetRules = ["generic-api-key"]
+  matchCondition = "AND"
+  paths = ['''internal/audit/audit_test\.go$''']
+  regexTarget = "secret"
+  regexes = ['''^abcdef0123456789$''']
+
+# ---------------------------------------------------------------------------
+# Allowlist 2 — untracked local trust material
+# ---------------------------------------------------------------------------
+[[allowlists]]
+  description = """
+keys/ holds the feed-signing PRIVATE key used to regenerate the test fixture.
+It is untracked, gitignored (/keys/), refused by secret-scan.sh's path denial,
+and mode 0600. It is never published.
+
+This entry exists only because a filesystem scan sees the working directory
+rather than the publishable tree. scripts/independent-secret-scan.sh scans a
+`git archive` of what would actually ship, so in the required gate this path is
+not present at all. The entry is belt-and-braces for anyone who runs
+`gitleaks dir .` by hand against a working copy."""
+  paths = [
+    '''(^|/)keys/''',
+    '''(^|/)\.gitleaks\.toml$''',
+  ]

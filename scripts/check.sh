@@ -54,11 +54,23 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # require <label> <tool> <command...>
 # Runs the command if the tool exists; otherwise records BLOCKED.
+#
+# Output goes to a mktemp file rather than /tmp/gate.$$. A PID-derived name in a
+# world-writable directory is predictable, so another local user can pre-create
+# it as a symlink and redirect this write. mktemp with O_EXCL cannot be
+# hijacked that way.
 require() {
   local label="$1" tool="$2"; shift 2
   if ! have "$tool"; then blocked "$label" "$tool not installed"; return; fi
-  if "$@" >/tmp/gate.$$ 2>&1; then ok "$label"; else bad "$label"; sed 's/^/         /' /tmp/gate.$$ | head -25; fi
-  rm -f /tmp/gate.$$
+  local out
+  out="$(mktemp)" || { blocked "$label" "could not create a temporary file"; return; }
+  if "$@" >"$out" 2>&1; then
+    ok "$label"
+  else
+    bad "$label"
+    sed 's/^/         /' "$out" | head -25
+  fi
+  rm -f "$out"
 }
 
 echo "======================================================"
@@ -85,11 +97,11 @@ if have go; then
   if [ -z "$SUPPORTED_JSON" ]; then
     # Unverifiable is not the same as unsupported. Say so rather than guess.
     blocked "toolchain support status" "could not reach go.dev to verify"
-  elif printf '%s' "$SUPPORTED_JSON" | grep -q "\"${GOV}\""; then
+  elif grep -q "\"${GOV}\"" <<<"$SUPPORTED_JSON"; then
     ok "toolchain $GOV is a currently supported release"
   else
     MAJOR="$(printf '%s' "$GOV" | cut -d. -f1,2)"
-    if printf '%s' "$SUPPORTED_JSON" | grep -q "\"${MAJOR}\."; then
+    if grep -q "\"${MAJOR}\." <<<"$SUPPORTED_JSON"; then
       ok "toolchain major $MAJOR is supported (running a different patch)"
     else
       bad "toolchain $GOV is NOT in the supported release set (no upstream security fixes)"
@@ -114,12 +126,43 @@ require "go test -race ./..." go go test -race -count=1 ./...
 echo
 echo "-- static analysis --"
 require "staticcheck ./..."   staticcheck   staticcheck ./...
-require "govulncheck ./..."   govulncheck   govulncheck ./...
+# --severity=style is the strictest level ShellCheck offers. Findings are fixed
+# rather than silenced; the handful of inline `disable=` directives in this tree
+# each carry a written reason on the line above.
+mapfile -t SHELL_FILES < <(git ls-files '*.sh')
+if [ "${#SHELL_FILES[@]}" -eq 0 ]; then
+  blocked "shellcheck (all scripts)" "no shell scripts are tracked — nothing would be analysed"
+else
+  require "shellcheck (all scripts)" shellcheck \
+    shellcheck --severity=style --shell=bash "${SHELL_FILES[@]}"
+fi
+# The vulnerability gate decides from RESULT CONTENT, not from exit status.
+# `govulncheck -format json` exits 0 even when it has findings, so a gate that
+# trusted the status would report a vulnerable dependency set as clean.
+# scripts/govulncheck-gate.sh parses the stream and treats an unparseable
+# result as UNPROVEN rather than as a pass. Its own --self-test proves it fails
+# on a findings-present stream.
+require "govulncheck self-test"       bash          bash ./scripts/govulncheck-gate.sh --self-test
+require "govulncheck (by content)"    govulncheck   bash ./scripts/govulncheck-gate.sh
 
 echo
 echo "-- repository hygiene --"
+# Two secret scanners, deliberately. The project scanner knows ScamWall (which
+# paths must never be tracked, that the Pi-hole password lives at a fixed
+# location, that a certificate body means the private CA leaked). The
+# independent detector knows the world's credential formats. Neither is a
+# superset of the other, so both are required.
 require "secret scan (tree)"          bash ./scripts/secret-scan.sh --tree
+require "secret scan controls"        bash ./scripts/tests/secret-scan-test.sh
+require "independent secret scan self-test" gitleaks bash ./scripts/independent-secret-scan.sh --self-test
+require "independent secret scan"     gitleaks bash ./scripts/independent-secret-scan.sh
 require "container security (static)" bash ./scripts/container-security-check.sh --static
+# A short-circuiting consumer at the end of a pipeline cannot be allowed to
+# decide a condition in a pipefail script: grep -q exits on the first match, the
+# producer takes SIGPIPE, and the pipeline reports 141 — turning a match into a
+# non-match. It produced a 100% false-clean in the secret scanner for files over
+# the pipe buffer, and a silent false PASS in a regression test.
+require "no SIGPIPE-decided conditions" bash ./scripts/tests/pipefail-sigpipe-test.sh
 
 echo
 echo "-- compose definition --"
