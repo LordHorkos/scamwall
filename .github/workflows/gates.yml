@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# ScamWall quality gates.
+#
+# This workflow runs the same gates as scripts/check.sh. Where a gate cannot run
+# in CI — anything needing the Docker daemon against a built ScamWall image — it
+# is reported as BLOCKED by that script and the job fails, exactly as it does
+# locally. A gate that could not run has proven nothing, and a green CI badge
+# that quietly omits half the suite is worse than a red one.
+#
+# SECURITY POSTURE
+#
+#   * Every action is pinned to a commit SHA, not a tag. A tag is mutable: the
+#     owner (or anyone who compromises the account) can repoint it at different
+#     code, and a pinned tag would silently execute it.
+#   * `permissions` is read-only at the top level and not widened anywhere. The
+#     job needs to read the repository and nothing else.
+#   * The trigger is `pull_request`, never `pull_request_target`.
+#     `pull_request_target` runs the BASE repository's workflow with a
+#     writable token and access to secrets, while checking out the FORK's
+#     code — which hands any contributor who opens a pull request the ability
+#     to run arbitrary code with those privileges. `pull_request` runs fork
+#     contributions with no secrets and a read-only token, which is the point.
+#   * No repository secret is referenced by this workflow at all, so there is
+#     nothing for an untrusted contribution to exfiltrate.
+#   * Tool versions are pinned and echoed into the run log, so a result can be
+#     tied to the toolchain that produced it.
+
+name: gates
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default, and never widened below.
+permissions:
+  contents: read
+
+# A superseded run proves nothing about the current head, so cancel it rather
+# than paying for it.
+concurrency:
+  group: gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so a result is attributable to an exact tool set. Bumping a version
+  # here is a deliberate change that invalidates prior evidence
+  # (docs/REQUIREMENTS_MATRIX.md section 5).
+  GO_VERSION: '1.26.8'
+  STATICCHECK_VERSION: '2026.2.1'
+  GOVULNCHECK_VERSION: 'v1.7.0'
+  SHELLCHECK_VERSION: 'v0.11.0'
+  GITLEAKS_VERSION: '8.30.0'
+
+jobs:
+  gates:
+    name: quality gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out the repository
+        # actions/checkout v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          # Full history: the independent secret scan inspects every commit,
+          # not only the tip. A shallow clone would silently narrow it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        # actions/setup-go v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - name: Install ShellCheck
+        run: |
+          set -euo pipefail
+          url="https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -fsSL --retry 3 -o /tmp/shellcheck.tar.xz "$url"
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tar.gz "$url"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Install Go analysis tools
+        run: |
+          set -euo pipefail
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+
+      - name: Record tool versions
+        # Printed into the run log so any result recorded from this job can be
+        # tied to the exact tools that produced it.
+        run: |
+          set -uo pipefail
+          echo "commit:      ${{ github.sha }}"
+          echo "runner:      $(lsb_release -ds 2>/dev/null || uname -a)"
+          echo "go:          $(go version)"
+          echo "staticcheck: $("$(go env GOPATH)/bin/staticcheck" -version)"
+          echo "govulncheck: $("$(go env GOPATH)/bin/govulncheck" -version | tr '\n' ' ')"
+          echo "shellcheck:  $(shellcheck --version | awk '/^version:/{print $2}')"
+          echo "gitleaks:    $(gitleaks version)"
+          echo "jq:          $(jq --version)"
+          echo "docker:      $(docker --version 2>/dev/null || echo 'not available')"
+
+      - name: Run the gate suite
+        # scripts/check.sh is the single definition of what a gate run is. CI
+        # does not maintain a second list that could drift from the local one.
+        #
+        # The hosted runner does have a Docker daemon, so the image build and
+        # the runtime verification actually execute here — which is more than
+        # the service account can do locally. On any runner without a daemon
+        # those gates report BLOCKED, and BLOCKED fails the suite rather than
+        # being skipped, so this job can never be read as having verified an
+        # image it never built.
+        run: bash ./scripts/check.sh
