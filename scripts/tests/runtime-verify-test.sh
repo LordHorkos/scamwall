@@ -319,10 +319,25 @@ mkdir -p "$FS_SRC/usr/local/bin"
 # The mount sources below are the RESOLVED paths the fake configuration
 # declares. The container fixture must agree with it exactly: that agreement is
 # the property under test.
-CA_SRC="/srv/pihole-ca.crt"
-CONF_SRC="/srv/config.json"
-FEED_SRC="/srv/feed.json"
-SECRET_SRC="/srv/secrets/pihole_app_password"
+#
+# They are REAL files under the test root, not the notional `/srv/...` paths
+# they used to be. The verifier now checks that every approved mount resolves to
+# an existing regular file on the host — because Docker's default is to invent
+# an empty DIRECTORY at a missing bind source and mount that, which satisfies
+# every destination and read-only assertion while leaving the container with no
+# CA and no credential. A fixture that does not exist could not exercise that.
+SRV="$ROOT/srv"
+mkdir -p "$SRV/secrets"
+CA_SRC="$SRV/pihole-ca.crt"
+CONF_SRC="$SRV/config.json"
+FEED_SRC="$SRV/feed.json"
+SECRET_SRC="$SRV/secrets/pihole_app_password"
+printf 'test-only placeholder, not a certificate\n' > "$CA_SRC"
+printf '{}\n' > "$CONF_SRC"
+printf '{}\n' > "$FEED_SRC"
+printf 'test-only-password\n' > "$SECRET_SRC"
+chmod 700 "$SRV/secrets"
+chmod 600 "$SECRET_SRC"
 
 container_json() { # $1 = jq mutation (or "." for none)
   jq "$1" <<JSON
@@ -918,6 +933,100 @@ expect_rc_nonzero "a tmpfs anywhere other than /tmp is unexpected"
 setup_case mounts-claim
 setup_case mounts-claim; run_verifier
 expect_output "readability of the password is explicitly NOT claimed" 'does NOT prove'
+
+# --- 6b. Mount SOURCES on the host --------------------------------------------
+#
+# Everything in section 6 asks whether the CONTAINER's mounts match the resolved
+# configuration. These ask whether the configuration's sources are usable at
+# all. The distinction matters because Docker's default for a missing bind
+# source is to create an empty DIRECTORY and mount that: the container then has
+# a bind mount, at the right destination, read-only, with the right source path
+# — and no CA and no credential behind it. Every assertion in section 6 passes.
+#
+# This is also the class of failure a hosted runner hits first, since the
+# operator's `/etc/scamwall/...` paths do not exist there. CI answers it by
+# materialising throwaway fixtures, never by exempting itself from the check.
+echo
+echo "-- mount sources on the host --"
+
+setup_case source-missing
+compose_config_json '.services.scamwall.volumes |= map(if .target == "/etc/scamwall/certs/pihole-ca.crt" then .source = "'"$ROOT/srv/absent-ca.crt"'" else . end)' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a mount source that does not exist fails"
+expect_output     "the missing source is named"        "absent-ca\.crt' does not exist"
+expect_output     "the destination it would serve is named" '/etc/scamwall/certs/pihole-ca\.crt'
+log_lacks         "nothing is created once a source is known to be missing" '^compose .*create'
+
+setup_case source-directory
+mkdir -p "$ROOT/srv/ca-as-directory"
+compose_config_json '.services.scamwall.volumes |= map(if .target == "/etc/scamwall/certs/pihole-ca.crt" then .source = "'"$ROOT/srv/ca-as-directory"'" else . end)' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a mount source that is a directory fails"
+expect_output     "the directory is reported as such" 'is a directory, not a file'
+log_lacks         "nothing is created for a directory source" '^compose .*create'
+
+setup_case secret-source-missing
+compose_config_json '.secrets.pihole_app_password.file = "'"$ROOT/srv/secrets/absent"'"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a missing password file fails"
+expect_output     "the missing password file is named" "absent' does not exist"
+
+# A world-reachable secret. The fixture must live OUTSIDE the 0700 test root,
+# because reachability is a property of the whole path, not of the file's mode.
+WORLD_DIR="${TMPDIR:-/tmp}/scamwall-rvtest-world.$$"
+mkdir -p "$WORLD_DIR" && chmod 755 "$WORLD_DIR"
+WORLD_SECRET_FILE="$WORLD_DIR/pihole_app_password"
+printf 'test-only-password\n' > "$WORLD_SECRET_FILE" && chmod 644 "$WORLD_SECRET_FILE"
+# shellcheck disable=SC2064  # $WORLD_DIR must expand now, not at trap time
+trap "rm -rf -- '$ROOT' '$WORLD_DIR'" EXIT
+
+setup_case secret-world-readable
+compose_config_json '.secrets.pihole_app_password.file = "'"$WORLD_SECRET_FILE"'"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a world-readable password file fails"
+expect_output     "the exposure is reported" 'readable by every account'
+expect_no_output  "the password itself is never printed" 'test-only-password'
+
+setup_case secret-not-world-readable
+chmod 600 "$WORLD_SECRET_FILE"
+compose_config_json '.secrets.pihole_app_password.file = "'"$WORLD_SECRET_FILE"'"' > "$FAKE_DIR/compose-config.json"
+# The container fixture is moved with it. A source the configuration resolves
+# and a source the container actually has must agree, and that agreement is
+# asserted elsewhere; leaving it out here would fail this case for a reason
+# that has nothing to do with file permissions.
+container_json '(.[0].Mounts[] | select(.Destination == "/run/secrets/pihole_app_password") | .Source) = "'"$WORLD_SECRET_FILE"'"' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_zero   "a password file that is not world-readable passes"
+expect_output    "the check states what it does NOT establish" 'never starts the container'
+chmod 644 "$WORLD_SECRET_FILE"
+
+setup_case secret-source-prohibited
+compose_config_json '.secrets.pihole_app_password.file = "/etc/pihole/setupVars.conf"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a password file taken from a prohibited path fails"
+expect_output     "the prohibited source is named" 'prohibited path.*(/etc/pihole|pihole_app_password)'
+
+# PRE-FIX CONTROL: the superseded prohibited-path expression inspected
+# `.services.<svc>.volumes` only. A secret file pointed at /etc/pihole is
+# declared under `.secrets`, so it was not examined at all — and
+# SCAMWALL_SECRET_FILE is an environment override, which makes it the easiest
+# source in the whole definition to redirect.
+PROHIBITED_FIXTURE="$(compose_config_json '.secrets.pihole_app_password.file = "/etc/pihole/setupVars.conf"')"
+OLD_PROHIBITED="$(jq -r '
+  [ (.services."scamwall".volumes // [])[]
+      | select(((.source // "") | test("docker\\.sock|^/etc/pihole|^/proc|^/sys")))
+      | (.source // "?") ] | join("; ")' <<<"$PROHIBITED_FIXTURE")"
+NEW_PROHIBITED="$(jq -r '
+  [ ((.services."scamwall".volumes // [])[] | { source: (.source // "") }),
+    ((.secrets // {}) | to_entries[] | { source: (.value.file // "") })
+      | select((.source | test("docker\\.sock|^/etc/pihole|^/proc|^/sys")))
+      | .source ] | join("; ")' <<<"$PROHIBITED_FIXTURE")"
+if [ -z "$OLD_PROHIBITED" ] && [ -n "$NEW_PROHIBITED" ]; then
+  pass "PRE-FIX CONTROL: the superseded expression exempted the secret source (the defect)"
+else
+  fail "PRE-FIX CONTROL: the superseded expression exempted the secret source" \
+       "old='$OLD_PROHIBITED' new='$NEW_PROHIBITED'"
+fi
 
 # --- 7. Inspection output that is structurally valid but incomplete ----------
 echo

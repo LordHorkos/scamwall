@@ -118,6 +118,68 @@ jobs:
           echo "jq:          $(jq --version)"
           echo "docker:      $(docker --version 2>/dev/null || echo 'not available')"
 
+      - name: Create disposable deployment fixtures
+        # WHY THIS STEP EXISTS
+        #
+        # deploy/compose/compose.yaml binds a private CA and an application
+        # password from paths that exist on the operator's host and cannot
+        # exist on a fresh runner. Without them the runtime verification cannot
+        # create a container, so the gate that checks the deployment's
+        # hardening never runs at all.
+        #
+        # The alternative — exempting CI from that gate — would leave the same
+        # `check.sh` reporting a green run on evidence it never gathered. A
+        # fixture is acceptable; a skipped assertion is not. The runtime
+        # checker enforces exactly the same properties here as it does on the
+        # operator's host: same mount destinations, same read-only flags, same
+        # exact-set assertion, same permission check on the password file.
+        #
+        # WHAT THESE FILES ARE NOT
+        #
+        #   * Not production material. Nothing is copied from anywhere; both
+        #     files are generated here and deleted below.
+        #   * Not a signing key. The CA fixture is a placeholder, deliberately
+        #     NOT a certificate and NOT a key: the verification it participates
+        #     in is a mount inspection, and the container is never started, so
+        #     nothing parses it. Generating a real key pair would create a
+        #     credential for no verification benefit.
+        #   * Not in the build context. They live under RUNNER_TEMP, outside the
+        #     repository, so `docker build` (context `../..`) cannot see them.
+        #   * Not site configuration. The compose definition's site-specific
+        #     paths come from environment overrides whose defaults are the
+        #     operator's; nothing about this network is written anywhere.
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/scamwall-ci-fixtures"
+          # 0700, and asserted rather than assumed: the runtime verifier checks
+          # that the password file is not reachable by every account on the
+          # host, and a private directory is what makes that true regardless of
+          # the file's own mode.
+          # The mode is set after creation, not with `mkdir -m`: with -p that
+          # mode applies to the deepest component only, and any parent it
+          # created would take the ambient umask instead.
+          rm -rf -- "$dir"
+          mkdir -p -- "$dir"
+          chmod 700 -- "$dir"
+
+          printf '%s\n' \
+            'ScamWall CI fixture. This is NOT a certificate and NOT a key.' \
+            'It exists so that the deployment has a bind source at the path a' \
+            'private CA occupies in a real deployment. The container is never' \
+            'started, so nothing reads or parses it.' > "$dir/pihole-ca.crt"
+          chmod 600 -- "$dir/pihole-ca.crt"
+
+          # A throwaway value, never printed, never compared, never used to
+          # authenticate to anything. Phase 1 in CI does not start the
+          # application; whether the container identity can READ this file is a
+          # separate requirement and is not tested by this run.
+          umask 077
+          head -c 32 /dev/urandom | base64 > "$dir/pihole_app_password"
+          chmod 600 -- "$dir/pihole_app_password"
+
+          # Reported as metadata only. No content is echoed.
+          ls -l -- "$dir"
+
       - name: Run the gate suite
         # scripts/check.sh is the single definition of what a gate run is. CI
         # does not maintain a second list that could drift from the local one.
@@ -128,4 +190,49 @@ jobs:
         # those gates report BLOCKED, and BLOCKED fails the suite rather than
         # being skipped, so this job can never be read as having verified an
         # image it never built.
+        env:
+          # Bind SOURCES only. Every mount DESTINATION is fixed in
+          # compose.yaml and is not overridable, so these redirect where a file
+          # comes from and change nothing the verifier asserts about the
+          # container.
+          SCAMWALL_CA_FILE: ${{ runner.temp }}/scamwall-ci-fixtures/pihole-ca.crt
+          SCAMWALL_SECRET_FILE: ${{ runner.temp }}/scamwall-ci-fixtures/pihole_app_password
+          # Where a failing gate's complete SANITIZED capture is retained, so
+          # the run log's inline view can be bounded without the omitted
+          # material being lost. See scripts/gate-diagnostics.sh.
+          SCAMWALL_GATE_DIAG_DIR: ${{ runner.temp }}/gate-diagnostics
         run: bash ./scripts/check.sh
+
+      - name: Upload gate diagnostics
+        # Runs whatever the outcome, and cannot change it: the gate step above
+        # has already concluded, and a step that only collects evidence must
+        # never be able to turn a red job green.
+        #
+        # Everything here has been through scripts/gate-diagnostics.sh, which
+        # redacts credential-shaped material and is self-tested against decoys
+        # (scripts/tests/gate-diagnostics-test.sh). Nothing unsanitized is
+        # written to this directory.
+        if: always()
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: gate-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gate-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove disposable fixtures
+        # Unconditional, and independent of the gate result. The runner is
+        # discarded after the job, but a fixture that outlives its step is a
+        # fixture something else can pick up, and "the runner goes away" is not
+        # a cleanup procedure.
+        if: always()
+        run: |
+          set -uo pipefail
+          dir="${RUNNER_TEMP}/scamwall-ci-fixtures"
+          rm -rf -- "$dir"
+          if [ -e "$dir" ]; then
+            echo "::error::CI fixtures could not be removed: $dir"
+            exit 1
+          fi
+          echo "CI fixtures removed."

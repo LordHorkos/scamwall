@@ -227,8 +227,19 @@ COMPOSE_ENV=()
 if have docker; then
   require "docker compose config" docker \
     docker compose "${COMPOSE_ENV[@]}" -f "$COMPOSE_FILE" config --quiet
+  # `config --quiet` proves the definition parses. It does NOT prove the
+  # deployment is resolvable anywhere but here: it exits 0 with every bind
+  # source absent, which is why the first hosted CI run passed this gate and
+  # then failed the one that actually creates a container. This resolves the
+  # same definition under the conditions a fresh runner presents — no .env, no
+  # operator paths, the test overrides in the environment — and checks the
+  # result against the verifier's own approved mount set. It needs the Docker
+  # CLI and no daemon.
+  require "compose definition under runner conditions" docker \
+    bash ./scripts/tests/compose-fixture-test.sh
 else
   blocked "docker compose config" "docker CLI not installed"
+  blocked "compose definition under runner conditions" "docker CLI not installed"
 fi
 
 echo

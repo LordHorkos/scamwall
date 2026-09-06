@@ -75,18 +75,34 @@ services:
     # /etc/pihole is NOT mounted. /var/run/docker.sock is NOT mounted.
     # ---------------------------------------------------------------------
     volumes:
+      # SCAMWALL_CA_FILE exists so that a test environment can supply a
+      # throwaway certificate WITHOUT changing where the container sees it, and
+      # without any site path being written into this file. The default is the
+      # operator path; the mount TARGET is fixed either way, so the runtime
+      # verifier asserts the same destination in both environments.
       - type: bind
-        source: /etc/scamwall/certs/pihole-ca.crt
+        source: ${SCAMWALL_CA_FILE:-/etc/scamwall/certs/pihole-ca.crt}
         target: /etc/scamwall/certs/pihole-ca.crt
         read_only: true
+        bind:
+          # A missing bind source is an ERROR, not an invitation. Without this,
+          # the daemon creates an empty DIRECTORY at the source path and mounts
+          # that instead — so a deployment with no CA at all still starts, with
+          # a directory where the trust anchor should be, and every mount
+          # assertion still passes.
+          create_host_path: false
       - type: bind
         source: ${SCAMWALL_CONFIG:-./config.example.json}
         target: /etc/scamwall/config.json
         read_only: true
+        bind:
+          create_host_path: false
       - type: bind
         source: ${SCAMWALL_FEED:-../../testdata/feed.json}
         target: /etc/scamwall/feed.json
         read_only: true
+        bind:
+          create_host_path: false
 
     # The application password is delivered as a Compose secret, which mounts
     # it read-only at /run/secrets/pihole_app_password — the only path ScamWall

@@ -1283,16 +1283,105 @@ for required_dest in /etc/scamwall/certs/pihole-ca.crt /etc/scamwall/config.json
     *) derive_fail "the expected mount set could not be searched for $required_dest" ;;
   esac
 done
+# The secret's source is examined by the SAME prohibited-path rule as the
+# volumes. It was previously exempt, because it is declared under a different
+# key — and it is the one source with an environment override
+# (SCAMWALL_SECRET_FILE), so it is the one most easily pointed somewhere it
+# should not go. `${SCAMWALL_CA_FILE}` is a second such override now, and it
+# lives under .volumes, so it is covered by the existing arm.
 if ! MOUNT_SOURCE_ISSUES="$(cfg "
-  [ (.services.\"$SERVICE\".volumes // [])[]
-      | select(((.source // \"\") | test(\"docker\\\\.sock|^/etc/pihole|^/var/lib/docker|^/var/run/docker|^/proc|^/sys|^/dev(/|\$)|^/\$|^/etc\$|^/root|^/home\$\"))
-               or ((.target // \"\") | test(\"docker\\\\.sock|^/etc/pihole\")))
-      | (.source // \"?\") + \" -> \" + (.target // \"?\") ] | join(\"; \")")"; then
+  [ ((.services.\"$SERVICE\".volumes // [])[] | { source: (.source // \"\"), target: (.target // \"\") }),
+    ((.secrets // {}) | to_entries[] | { source: (.value.file // \"\"), target: (\"secret \" + .key) })
+      | select((.source | test(\"docker\\\\.sock|^/etc/pihole|^/var/lib/docker|^/var/run/docker|^/proc|^/sys|^/dev(/|\$)|^/\$|^/etc\$|^/root|^/home\$\"))
+               or (.target | test(\"docker\\\\.sock|^/etc/pihole\")))
+      | .source + \" -> \" + .target ] | join(\"; \")")"; then
   derive_fail "the configured mount sources could not be examined"
 elif [ -n "$MOUNT_SOURCE_ISSUES" ]; then
   derive_fail "the configuration mounts a prohibited path: $MOUNT_SOURCE_ISSUES"
 else
-  ok "no prohibited path appears in the configured mounts"
+  ok "no prohibited path appears in the configured mounts or in the secret source"
+fi
+
+# --- Mount sources on this host ------------------------------------------------
+#
+# Every approved mount is a FILE. Two ways a deployment can satisfy every
+# assertion so far and still be wrong:
+#
+#   * the source does not exist. Docker's default is to CREATE an empty
+#     directory at a missing bind source and mount that, so a deployment with
+#     no CA and no password file still produces a container whose mount set,
+#     destinations and read-only flags are all exactly as required.
+#     `bind.create_host_path: false` in compose.yaml now refuses that, but the
+#     refusal surfaces as a Compose error part-way through creation; naming the
+#     path here, before anything is created, is what makes it diagnosable.
+#   * the source exists and is a DIRECTORY. `create_host_path` says nothing
+#     about this one: the mount succeeds, and the container gets an empty
+#     directory where its trust anchor or its credential should be.
+#
+# This is the check that makes a hosted runner and the operator's host
+# comparable. Neither environment is exempt from it, and CI passes it by
+# materialising throwaway fixtures rather than by skipping the assertion.
+MOUNT_SOURCE_STATE=""
+while IFS='|' read -r _mtype msource mdest _mmode; do
+  [ -n "${mdest:-}" ] || continue
+  [ -n "${msource:-}" ] || { MOUNT_SOURCE_STATE="${MOUNT_SOURCE_STATE}${MOUNT_SOURCE_STATE:+; }$mdest has no source"; continue; }
+  if [ ! -e "$msource" ]; then
+    MOUNT_SOURCE_STATE="${MOUNT_SOURCE_STATE}${MOUNT_SOURCE_STATE:+; }$mdest <- '$msource' does not exist"
+  elif [ -d "$msource" ]; then
+    MOUNT_SOURCE_STATE="${MOUNT_SOURCE_STATE}${MOUNT_SOURCE_STATE:+; }$mdest <- '$msource' is a directory, not a file"
+  elif [ ! -f "$msource" ]; then
+    MOUNT_SOURCE_STATE="${MOUNT_SOURCE_STATE}${MOUNT_SOURCE_STATE:+; }$mdest <- '$msource' is not a regular file"
+  fi
+done < "$EXPECTED_MOUNTS"
+if [ -z "$MOUNT_SOURCE_STATE" ]; then
+  ok "every approved mount resolves to an existing regular file on this host"
+else
+  derive_fail "a configured mount source is missing or is not a regular file: $MOUNT_SOURCE_STATE"
+fi
+
+# The application password must not be readable by every account on the host.
+#
+# Mode alone is not the answer: a 0644 file inside a 0750 directory is not
+# world-readable, and a 0640 file whose directory is 0777 still is not. What
+# matters is REACHABILITY — the file's own other-read bit AND an
+# other-executable bit on every directory above it — so that is what is
+# computed. `stat` failing is neither verdict: it is reported as undetermined.
+secret_world_reachable() { # <file> -> 0 reachable, 1 not, 2 undetermined
+  local f="$1" mode dir parent
+  mode="$(stat -c '%a' -- "$f" 2>/dev/null)" || return 2
+  [ -n "$mode" ] || return 2
+  case "${mode: -1}" in
+    4|5|6|7) ;;
+    *) return 1 ;;
+  esac
+  dir="$(dirname -- "$f")" || return 2
+  while :; do
+    mode="$(stat -c '%a' -- "$dir" 2>/dev/null)" || return 2
+    [ -n "$mode" ] || return 2
+    case "${mode: -1}" in
+      1|3|5|7) ;;
+      *) return 1 ;;
+    esac
+    [ "$dir" != "/" ] || break
+    parent="$(dirname -- "$dir")" || return 2
+    [ "$parent" != "$dir" ] || break
+    dir="$parent"
+  done
+  return 0
+}
+SECRET_SOURCE="$(cfg '[ (.secrets // {}) | to_entries[] | (.value.file // "") ] | first // ""')" || SECRET_SOURCE=""
+if [ -z "$SECRET_SOURCE" ]; then
+  derive_fail "the application password source could not be read from the resolved configuration"
+else
+  secret_world_reachable "$SECRET_SOURCE"
+  case $? in
+    0) derive_fail "the application password file is readable by every account on this host" ;;
+    1) ok "the application password file is not world-readable through its path" ;;
+    *) derive_fail "the application password file's permissions could not be determined — its exposure is UNPROVEN" ;;
+  esac
+  note "this is a check on the HOST file. Whether the container identity can"
+  note "READ it is a separate requirement, and is not established here: this"
+  note "program never starts the container."
 fi
 
 if [ "$DERIVE_FAILED" -ne 0 ]; then
