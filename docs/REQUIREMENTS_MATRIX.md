@@ -92,7 +92,7 @@ visible rather than silently absent.
 | SW-P1-09 | An independent secret detector runs alongside the project-specific scanner | VERIFIED |
 | SW-P1-10 | Critical Go paths are reviewed and the review is recorded | VERIFIED |
 | SW-P1-11 | govulncheck results are handled by content, not by exit status alone | VERIFIED |
-| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | BLOCKED |
+| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | VERIFIED |
 | SW-P1-13 | Pre-existing functional, security, race, and offline-plan tests are preserved and rerun | VERIFIED |
 | SW-P1-14 | The gate suite is deterministic: no gate passes or fails at random | VERIFIED |
 | SW-P1-15 | The CLI's read-only guarantee is covered by a test | VERIFIED |
@@ -102,22 +102,29 @@ visible rather than silently absent.
 | SW-P1-19 | The deployment's mounts are asserted exactly: presence, type, source, mode, no extras | VERIFIED |
 | SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | IMPLEMENTED-UNVERIFIED |
 
-**Phase 1 is not complete.** Seventeen of twenty requirements are verified at
-`aa49797`. One is BLOCKED and two were demoted by this commit's own changes:
+**Phase 1 is not complete.** Eighteen of twenty requirements are verified at
+`72bc84c`. No requirement is BLOCKED any more — SW-P1-12 closed on a passing
+hosted run — and two remain demoted, awaiting an operator action this account
+cannot perform:
 
 | Row | State | Next step |
 | --- | --- | --- |
-| SW-P1-12 | BLOCKED | Needs a hosted CI run that **passes**. Two have happened and both failed. 34036997074 at `2a18874`: 20 passed, 1 failed, and the log did not say why (§3.8). 34045148578 at `07154b6`: **23 passed, 1 failed, 0 BLOCKED**, and the log said exactly why (§3.11). The second run is materially closer: the container gates executed and PASSED on the runner, and the single failure was in a gate this session added, whose assertion read a Compose field that not every Compose version renders — FINDING-27, fixed. What remains is a run of the corrected workflow |
-| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Demoted by §5: `aa49797` changes `deploy/compose/compose.yaml` **and** `scripts/container-runtime-verify.sh`, and the verifier now makes assertions the `b6b1769` run never evaluated. Renewal is an operator action: `docs/VERIFICATION.md` §6.1 |
-| SW-P1-20 | IMPLEMENTED-UNVERIFIED | Its ELF controls are untouched and still pass (§3.6). Its image-bound half lapsed with SW-P1-05: no image has been built from `aa49797`. Same renewal |
+| SW-P1-12 | **VERIFIED** | Closed at `72bc84c` by run 34047025567: 24 passed, 0 failed, 0 BLOCKED, gate list identical to the local suite's. It took three runs — the first could not be diagnosed at all (FINDING-23), the second diagnosed itself and found FINDING-27 — and the acceptance criterion was never relaxed. `docs/VERIFICATION.md` §3.12 |
+| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Demoted by §5: `aa49797` changes `deploy/compose/compose.yaml` **and** `scripts/container-runtime-verify.sh`, and the verifier now makes assertions the `b6b1769` run never evaluated. The CI run at `72bc84c` passed the same verifier against image `sha256:d7c44949…` and **does not close this**: it resolved a different deployment. Renewal is an operator action: `docs/VERIFICATION.md` §6.1 |
+| SW-P1-20 | IMPLEMENTED-UNVERIFIED | Its ELF controls are untouched and still pass (§3.6), and the in-build assertion executed in three CI builds. Its image-bound half lapsed with SW-P1-05: no image has been built from these commits on the operator's host. Same renewal |
 
 Demoting two rows that were green is the rule working, not a regression. The
 alternative — leaving them VERIFIED because the change "should not affect them"
 — is precisely the assumption §5 exists to forbid.
 
-A blocked required item means the phase does not close, however many of the
-others are green. Seventeen-twentieths is not seventeen-twentieths of a closed
-phase; it is an open phase.
+An unverified required item means the phase does not close, however many of the
+others are green — and "the CI badge is green" is the most tempting reason to
+forget that. Eighteen-twentieths is not eighteen-twentieths of a closed phase;
+it is an open phase. The two open rows are the ones that tie the work to a
+real image and a real deployment, which is precisely the half a passing CI run
+cannot supply: CI verified a container built on the runner, mounting throwaway
+fixtures, with `group_add: 65532` rather than the deployment's `989`
+(`docs/VERIFICATION.md` §3.12).
 
 **Closed since the previous revision**, both by the operator's run at
 `b6b1769` against image `sha256:b95cc07c…` (`docs/VERIFICATION.md` §3.7):
@@ -462,7 +469,7 @@ conflated here, and this row keeps them apart:
 | --- | --- | --- |
 | Implementation review | the workflow file was read property by property against the requirement | DONE — `docs/VERIFICATION.md` §3.4, re-done at `aa49797` for the three new steps |
 | Local simulation | the same gate list was executed locally, as the service account | DONE — `bash scripts/check.sh`, §3.0. This exercises the GATES, not the workflow: it says nothing about `permissions:`, action pinning, runner image, or fork-PR secret handling. `scripts/tests/compose-fixture-test.sh` narrows the gap slightly by resolving the deployment under the runner's conditions (§3.9), and narrows it only slightly: it still runs here |
-| Hosted CI run | the workflow itself executed on GitHub, with a run URL and log | **DONE TWICE, BOTH FAILED** — 34036997074 at `2a18874` (§3.8) and 34045148578 at `07154b6` (§3.11). The second executed the container gates on the runner and they PASSED; its one failure was FINDING-27, in a gate added by this session |
+| Hosted CI run | the workflow itself executed on GitHub, with a run URL and log | **DONE, AND PASSING** — 34047025567 at `72bc84c`, 24 passed / 0 failed / 0 BLOCKED (§3.12). Two earlier runs failed and are retained: 34036997074 (§3.8) and 34045148578 (§3.11) |
 
 **Evidence required.** A hosted run: workflow file at a named commit, a run
 URL, the recorded tool versions from that run's log, and the outcome of each
@@ -474,16 +481,16 @@ amended: option B in `docs/VERIFICATION.md` §6.3 proposed relaxing it to "every
 gate that could run passed", which would have permanently exempted the container
 gates from the only independent host available. Making CI able to satisfy the
 criterion was chosen over making the criterion able to accept CI.
-**Status.** **BLOCKED**, and still the only blocked Phase 1 requirement. The
-workflow has been executed — that half of the row is satisfied — but the run
-failed, and the acceptance criterion requires a run that passes.
+**Status.** **VERIFIED** at `72bc84c` — run 34047025567, 24 passed / 0 failed /
+0 BLOCKED, `RESULT: all required gates passed`, gate list identical to the local
+suite's in content and order. `docs/VERIFICATION.md` §3.12.
 
 | Acceptance component | State |
 | --- | --- |
-| A hosted run exists, with a run URL and log | **Met.** <https://github.com/LordHorkos/scamwall/actions/runs/34036997074>, commit `2a18874` |
-| The run records its tool versions | **Met.** Reproduced in full at `docs/VERIFICATION.md` §3.8; every version matches the local set |
-| Its gate list matches the local suite's | **Met.** Identical gates in identical order; `check.sh` is the single definition and CI keeps no second list |
-| The run passes | **Not met.** 20 passed, 1 failed, 0 BLOCKED — `container runtime verification` failed |
+| A hosted run exists, with a run URL and log | **Met.** <https://github.com/LordHorkos/scamwall/actions/runs/34047025567>, commit `72bc84c` |
+| The run records its tool versions | **Met.** Reproduced in full at `docs/VERIFICATION.md` §3.12; every version matches the local set except Compose, which differs and is now recorded on both sides — that difference is FINDING-27 |
+| Its gate list matches the local suite's | **Met.** 24 gates, identical and in identical order; `check.sh` is the single definition and CI keeps no second list. The only difference in outcome is the two container gates, BLOCKED locally and PASS in CI |
+| The run passes | **Met.** 24 passed, 0 failed, 0 BLOCKED, `RESULT: all required gates passed` |
 
 **A by-product worth recording separately:** `docker build` PASSED on the
 runner, executing the ELF linkage and enforcement-absent assertions on Ubuntu
@@ -502,20 +509,20 @@ operator's host; this is independent corroboration from a second one.
    exempting CI from the container gates. The reasoning for deciding it without
    the old run's cause in hand — including why option B was rejected on its
    merits — is `docs/VERIFICATION.md` §6.3.
-3. **Then a passing run**, recorded against its own commit. **Outstanding.** Run
-   34045148578 exercised the whole corrected pipeline — fixtures, container
-   gates, failure reporting, artifact upload, cleanup — and failed on one
-   assertion, since fixed (FINDING-27). This row is blocked on a run of the
-   corrected workflow.
+3. ~~**Then a passing run**~~ — **DONE at `72bc84c`.** Run 34047025567: 24
+   passed, 0 failed, 0 BLOCKED. §3.12. The sequence took three runs and each
+   one earned its place: the first produced the run URL and FINDING-23, the
+   second produced FINDING-27 and FINDING-28 by diagnosing itself, and the
+   third passed.
 
-**Steps 1 and 2 have now been observed on a runner** — run 34045148578. The
-`::group::` markers, the artifact upload (792 bytes), the fixture step
-(0600 files in a 0700 directory) and its cleanup all behaved as designed, and
-the container gates executed and passed. The caveat that stood here — that all
-of it was a hypothesis about GitHub's behaviour until a run exercised it — was
-well placed: the run also found FINDING-27, an assertion added by this session
-that read a Compose field not every Compose version renders. That is a defect in
-this work, and it was fixed rather than accommodated.
+**All three steps have been observed on a runner.** The `::group::` markers, the
+artifact upload, the fixture step (0600 files in a 0700 directory) and its
+cleanup behaved as designed, and the container gates executed and passed. The
+caveat that stood here — that all of it was a hypothesis about GitHub's
+behaviour until a run exercised it — was well placed: run 34045148578 found
+FINDING-27, an assertion added by this session that read a Compose field not
+every Compose version renders. It was fixed rather than accommodated, and run
+34047025567 then passed.
 
 **Two things this row will still not cover when it closes.** Both are recorded
 now, because the moment a green run exists they become easy to forget:
@@ -550,8 +557,10 @@ Recording the requirement as unsatisfiable and leaving it that way would be the
 one unacceptable outcome, so it is written down here rather than left to be
 rediscovered on each red run.
 
-**Resolved at `aa49797`, and the resolution is narrower than "the problem is
-fixed".** Two of the three statements above have since been tested rather than
+**Resolved, and the resolution is narrower than "the problem is fixed".** The
+acceptance criterion turned out to be satisfiable after all — run 34047025567
+passed at `72bc84c` — and the reasoning below is retained because it is why.
+ Two of the three statements above have since been tested rather than
 reasoned about, by resolving the real definition under runner conditions with no
 `.env` and no operator paths (`docs/VERIFICATION.md` §3.9):
 
@@ -562,9 +571,13 @@ reasoned about, by resolving the real definition under runner conditions with no
 | `docker compose config` does not catch it | **Established.** Exits 0 with every bind source absent |
 | Therefore the `2a18874` run failed for this reason | **Still not established**, and unrecoverable from that run — it kept no artifact and its log holds only the twenty-five lines `head -25` allowed |
 
-The acceptance criterion is now believed satisfiable: CI creates the two
-fixtures it needs, and the verifier makes the same assertions in both
-environments. Believed, not shown — the run has not happened.
+The acceptance criterion **is** satisfiable, and has been satisfied: CI creates
+the two fixtures it needs, the verifier makes the same assertions in both
+environments, and run 34047025567 passed all 24 gates. The heading of this
+paragraph — "probably not satisfiable as written" — was wrong, and is left
+standing rather than rewritten, because a prediction edited after the outcome is
+not a prediction. What made it wrong was adding one environment override and a
+fixture step, neither of which existed when it was written.
 
 ### SW-P1-13 — Pre-existing tests preserved and rerun
 

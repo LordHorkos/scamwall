@@ -84,7 +84,7 @@ around it — ShellCheck, an independent secret detector, content-based
 vulnerability handling, CI — plus the findings this session's own inspection
 raised.
 
-**Status now, at `aa49797`.** Seventeen of twenty verified — the requirement set
+**Status now, at `72bc84c`.** Eighteen of twenty verified — the requirement set
 grew from fifteen to twenty as the work exposed classes that had no requirement
 covering them. `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative; this paragraph
 is a summary and defers to it wherever the two differ.
@@ -99,20 +99,29 @@ cleanup problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7). `ef40156` and
 built from `aa49797`. Renewal is an operator action — `docs/VERIFICATION.md`
 §6.1 — and is expected to pass; expected is not observed.
 
-**SW-P1-12 is the one BLOCKED requirement, so the phase does not close.** Two
-hosted runs have been executed with operator approval, and both failed.
+**SW-P1-12 is now VERIFIED.** Three hosted runs were executed, each with
+operator approval for its specific push, and the third passed: run 34047025567
+at `72bc84c`, **24 passed, 0 failed, 0 BLOCKED**, gate list identical to the
+local suite's (`docs/VERIFICATION.md` §3.12). The acceptance criterion was
+never relaxed; CI was made able to meet it.
 
-Run 34036997074 at `2a18874`: 20 passed, 1 failed, and the log did not say why
-(`docs/VERIFICATION.md` §3.8). Run 34045148578 at `07154b6`: 23 passed, 1
-failed, 0 BLOCKED (§3.11) — and this one is materially different. The container
-gates executed on the runner and **passed**, which is what the fixture work was
-for; the failure reporting worked, so the single failure was diagnosed from the
-run's own log; and that failure was FINDING-27, a defect in an assertion this
-session added rather than anything about the deployment. It is fixed.
+Each run earned its place. The first (§3.8) produced the run URL and tool
+versions — and FINDING-23, because its failure could not be diagnosed from its
+own log. The second (§3.11) ran the container gates on the runner for the first
+time and they passed, and it diagnosed its own single failure, which turned out
+to be FINDING-27 and FINDING-28 — both defects in this session's work. The third
+passed.
 
-The row is blocked on a run of the corrected workflow, and on nothing else.
+**The phase still does not close.** SW-P1-05 and SW-P1-20 are
+`IMPLEMENTED-UNVERIFIED`, and a passing CI run does not renew them: CI verified
+a container built on the runner, mounting throwaway fixtures, resolving
+`group_add: 65532` rather than the deployment's `989`. It corroborates the
+deployment's shape on an independent host and says nothing about the operator's
+configuration or the artifact the operator would deploy. That needs
+`docs/VERIFICATION.md` §6.1, which only the operator can run.
 
-Twenty-eight findings were raised and resolved along the way. The most serious
+Twenty-eight findings were raised and resolved along the way, five of them by
+hosted CI runs that a local suite could not have produced. The most serious
 were a `pipefail`/SIGPIPE race that made the secret scanner report a planted
 private key as clean 200 times out of 200 in a 1 MB file
 (`docs/VERIFICATION.md` §4.1), and seventeen false-pass defects in the runtime
@@ -247,14 +256,14 @@ Phase 1 is complete when, at one commit:
 * existing deployment resources survive checker execution;
 * remaining evidence gaps are explicitly `BLOCKED`, with operator commands.
 
-Three of these are outstanding at `aa49797`, and none of them is satisfiable
-from the service account:
+Two of these are outstanding at `72bc84c`, and neither is satisfiable from the
+service account:
 
 | Outstanding | Why | Who |
 | --- | --- | --- |
-| A hosted run that passes | SW-P1-12's acceptance criterion, unchanged. Two runs, both failed; the second reached 23 passed / 1 failed with the container gates green, and its one failure is fixed | Needs an approved push; the run follows automatically from the branch filter |
-| Runtime assertions tied to an image ID | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition | Operator — `docs/VERIFICATION.md` §6.1 |
-| Deployment resources survive checker execution | Demonstrated against the scripted fake at `aa49797` (336 cases) but not re-demonstrated against a real daemon since `b6b1769` | Same operator run |
+| ~~A hosted run that passes~~ | **Done** — run 34047025567 at `72bc84c`, 24 passed / 0 failed / 0 BLOCKED | — |
+| Runtime assertions tied to an image ID | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition. CI verified `sha256:d7c44949…`, but against a different deployment — throwaway fixtures, `group_add: 65532` — so it corroborates rather than renews | Operator — `docs/VERIFICATION.md` §6.1 |
+| Deployment resources survive checker execution | Demonstrated against the scripted fake at `72bc84c` (336 cases) and against a real daemon in CI — where there is no coexisting deployment to survive, which is the whole point of the check. Not re-demonstrated on a host that HAS one since `b6b1769` | Same operator run |
 
 ### 3.4 Previous-state validation
 
