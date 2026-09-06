@@ -105,9 +105,9 @@ visible rather than silently absent.
 `b6b1769`. One is BLOCKED, and it needs an operator action rather than more
 code:
 
-| Blocked | Needs | Operator procedure |
+| Blocked | Needs | Next step |
 | --- | --- | --- |
-| SW-P1-12 | one actual hosted CI run — the workflow executed on GitHub, with a run URL and log | `docs/VERIFICATION.md` §6.3, which now carries the exact push and trigger sequence, **proposed and awaiting approval; nothing has been pushed** |
+| SW-P1-12 | a hosted CI run that **passes** | The run has happened — <https://github.com/LordHorkos/scamwall/actions/runs/34036997074>, `docs/VERIFICATION.md` §3.8 — and failed: 20 passed, 1 failed, 0 BLOCKED. Closing the row now needs FINDING-23 fixed first (§4.9), then the fixture decision in §6.3 |
 
 A blocked required item means the phase does not close, however many of the
 others are green. Nineteen-twentieths is not nineteen-twentieths of a closed
@@ -130,7 +130,9 @@ carried on assumption:
 | Evidence renewal after `b6b1769` changed `scripts/*.sh` | **Done.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11 and SW-P1-14 on any `scripts/*.sh` change; the suite was re-run at `b6b1769` and those rows rest on the new transcript, not the `0b083cb` one |
 | The six defects fixed in `b6b1769` | **Recorded** as FINDING-17 … FINDING-22, `docs/VERIFICATION.md` §4.8, with the pre-fix comparison in §3.5 — the `0b083cb` verifier fails 50 of the 319 cases |
 | Determinism (SW-P1-14) at the new suite size | **Partly renewed.** 30 consecutive runs of the 319-case suite at `b6b1769`, 0 failures — against 500 runs for the 237-case suite at `0b083cb`. Shorter by design and stated as such, not merged into one figure. `docs/VERIFICATION.md` §3.3 |
-| Fork-pull-request secret handling | **Not demonstrated**, and not demonstrable by the proposed push. Reviewed only. It is registered in `docs/VERIFICATION.md` §7 so it is not lost when SW-P1-12 closes |
+| Hosted CI execution | **Done, and it failed.** Run 34036997074 at `2a18874`. What it established: the workflow runs, its recorded tool versions match §2.2 exactly, its gate list matches the local suite's, and `docker build` passes on an independent host. What it did not: a passing run. `docs/VERIFICATION.md` §3.8 |
+| Diagnosability of a failed CI gate | **Broken, and newly found.** FINDING-23: `check.sh` prints a failing gate's output with `head -25`, so the runtime verifier's verdict and cleanup report — the last lines it writes — are discarded. The CI log shows twenty-four `PASS` lines and no reason for the failure. Not fixed: it is a gate input, outside this session's authorisation. `docs/VERIFICATION.md` §4.9 |
+| Fork-pull-request secret handling | **Not demonstrated**, and not demonstrable by a branch push. Reviewed only. It is registered in `docs/VERIFICATION.md` §7 so it is not lost when SW-P1-12 closes |
 | Runtime password access, live authentication, destination connectivity and TLS verification through the `pi.hole` pin | **Not established, and out of Phase 1 scope.** Phase 2 — SW-P2-02 and SW-P2-04. `docs/VERIFICATION.md` §6.2 |
 
 ### SW-P1-01 — Runtime verification is built from checked operations
@@ -453,17 +455,33 @@ gate in it.
 **Dependencies.** SW-P1-08, SW-P1-09, SW-P1-11.
 **Acceptance.** The hosted run exists and passes, and its gate list matches the
 local suite's.
-**Status.** **BLOCKED**, and now the only blocked Phase 1 requirement. "Reviewed,
-not executed" is not verified CI execution, so this row is not carried as
-VERIFIED with a caveat. Running the workflow requires a push, which is outside
-the authorisation for this work.
+**Status.** **BLOCKED**, and now the only blocked Phase 1 requirement. The
+workflow has been executed — that half of the row is satisfied — but the run
+failed, and the acceptance criterion requires a run that passes.
 
-**Operator action.** `docs/VERIFICATION.md` §6.3 carries the exact push and
-trigger sequence, written out in full and **proposed for approval only —
-nothing has been pushed, and no merge is proposed.** In outline: the branch is
-`feat/phase-1-core`, the workflow's `push` filter matches `feat/**`, so a plain
-non-forced `git push origin feat/phase-1-core` starts a run by itself; no pull
-request and no `workflow_dispatch` is needed for a first result.
+| Acceptance component | State |
+| --- | --- |
+| A hosted run exists, with a run URL and log | **Met.** <https://github.com/LordHorkos/scamwall/actions/runs/34036997074>, commit `2a18874` |
+| The run records its tool versions | **Met.** Reproduced in full at `docs/VERIFICATION.md` §3.8; every version matches the local set |
+| Its gate list matches the local suite's | **Met.** Identical gates in identical order; `check.sh` is the single definition and CI keeps no second list |
+| The run passes | **Not met.** 20 passed, 1 failed, 0 BLOCKED — `container runtime verification` failed |
+
+**A by-product worth recording separately:** `docker build` PASSED on the
+runner, executing the ELF linkage and enforcement-absent assertions on Ubuntu
+24.04.4 with Docker 28.0.4. SW-P1-20 was already closed by §3.7 against the
+operator's host; this is independent corroboration from a second one.
+
+**The blocking sequence**, which is now more specific than "run CI":
+
+1. **Fix FINDING-23** (`docs/VERIFICATION.md` §4.9). `check.sh` truncates a
+   failing gate's output to its first 25 lines, so the CI log contains twenty-four
+   `PASS` lines from the runtime verifier and no statement of what failed. A red
+   run that cannot be diagnosed from its log is not a usable gate.
+2. **Then decide the fixture question** in `docs/VERIFICATION.md` §6.3 — option A
+   (materialise throwaway fixtures in CI) or B (amend this acceptance criterion).
+   It cannot be decided first: choosing a remedy for a cause nobody has observed
+   is guesswork.
+3. **Then a passing run**, recorded against its own commit.
 
 **Two things this row will still not cover when it closes.** Both are recorded
 now, because the moment a green run exists they become easy to forget:
@@ -479,23 +497,24 @@ now, because the moment a green run exists they become easy to forget:
   with `docs/VERIFICATION.md` §3.7 about builds of the same commit, and it takes
   precedence over closing this row.
 
-**The acceptance criterion above is not satisfiable as written, and that was
-established before any push.** `deploy/compose/compose.yaml` binds
+**Why the acceptance criterion is probably not satisfiable as written.** This was
+set out before the push and the run is consistent with it, but it is a
+hypothesis and is labelled as one. `deploy/compose/compose.yaml` binds
 `/etc/scamwall/certs/pihole-ca.crt` — a literal absolute path with no
 environment override — and a secret file defaulting to
 `/etc/scamwall/secrets/pihole_app_password`. Neither can exist on a fresh hosted
-runner, so `compose create` fails there, the runtime verification reports
-`BLOCKED` or `FAIL`, and `check.sh` exits 1. `docker compose config` does not
-catch it: tested against a nonexistent secret path, it exits 0. The analysis is
-`docs/VERIFICATION.md` §6.3.
+runner, so `compose create` should fail there. `docker compose config` does not
+catch it: tested against a nonexistent secret path, it exits 0.
 
-This row therefore closes only after a decision the operator has not yet been
-asked to make: materialise throwaway fixtures in CI so the container gates
-genuinely run there (which edits a gate input and re-opens §3.4's review), or
-amend this acceptance criterion to "the workflow ran, its gate list matched the
-local suite, and every gate that could run passed". Recording the requirement as
-unsatisfiable and leaving it that way would be the one unacceptable outcome, so
-it is written down here rather than discovered on a red run.
+**The run neither confirmed nor refuted this.** It failed at the right gate, and
+FINDING-23 means the log does not say why. A prediction that matches an outcome
+has not thereby been shown to match the mechanism, and this row will not record
+that it has until a log shows the verifier's own verdict. `docs/VERIFICATION.md`
+§3.8 and §6.3.
+
+Recording the requirement as unsatisfiable and leaving it that way would be the
+one unacceptable outcome, so it is written down here rather than left to be
+rediscovered on each red run.
 
 ### SW-P1-13 — Pre-existing tests preserved and rerun
 

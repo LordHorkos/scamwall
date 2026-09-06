@@ -61,6 +61,7 @@ Commits between the two:
 | `0b083cb` | fix(verify): attribute resources and complete the runtime assertions |
 | `7c639c2` | docs: record the eleven verifier findings and correct the evidence status |
 | `b6b1769` | fix(verify): check list processing, name scope, mounts, numbers and fields |
+| `2a18874` | docs: record the verified image and close the Docker and ELF blockers — the commit CI ran against (§3.8) |
 
 All results in §3 were produced against `b6b1769`, the last commit that changes
 any gate input. They are **not** valid for earlier commits: §4.1 – §4.5
@@ -627,6 +628,94 @@ them, and any rebuild produces a new image ID that has not been verified.
 
 ---
 
+### 3.8 Hosted CI run (SW-P1-12)
+
+The workflow was executed. This is the first hosted run of `gates.yml`; the
+branch was pushed with operator approval, and nothing was merged.
+
+| | |
+| --- | --- |
+| Run | <https://github.com/LordHorkos/scamwall/actions/runs/34036997074> |
+| Commit reported by the run | `2a18874ab84de80f145e3c57cae083d5dfcba71b` |
+| Trigger | `push` to `feat/phase-1-core` |
+| Runner | Ubuntu 24.04.4 LTS |
+| Duration | 3m01s |
+| Job conclusion | **failure** |
+
+**Tool versions, from the run's own `Record tool versions` step.** This is what
+makes the result attributable, and it is reproduced in full rather than
+summarised:
+
+```
+commit:      2a18874ab84de80f145e3c57cae083d5dfcba71b
+runner:      Ubuntu 24.04.4 LTS
+go:          go version go1.26.8 linux/amd64
+staticcheck: staticcheck 2026.2.1 (0.8.1)
+govulncheck: Go: go1.26.8 Scanner: govulncheck@v1.7.0 DB: https://vuln.go.dev DB updated: 2026-09-02 19:12:04 +0000 UTC
+shellcheck:  0.11.0
+gitleaks:    8.30.0
+jq:          jq-1.7
+docker:      Docker version 28.0.4, build b8034c0
+```
+
+Every version matches the set in §2.2 — the same Go toolchain, the same
+analysers, the same vulnerability database timestamp. Two hosts, one toolchain:
+that is the reproducibility claim SW-P1-12 exists to test, and this run is the
+first evidence for it.
+
+**Per-gate outcome.**
+
+| Gate | Local (§3.0) | CI |
+| --- | --- | --- |
+| toolchain (2 gates), gofmt, build, vet, `go test -race` | PASS | PASS |
+| staticcheck, shellcheck, govulncheck self-test, govulncheck by content | PASS | PASS |
+| secret scan tree / controls, independent scan self-test / scan, container security, SIGPIPE | PASS | PASS |
+| `docker compose config` | PASS | PASS |
+| runtime-verify regression tests | PASS | PASS |
+| **`docker build`** | BLOCKED (no daemon) | **PASS** |
+| **container runtime verification** | BLOCKED (no daemon) | **FAIL** |
+| working tree clean | PASS | PASS |
+| **Summary** | 19 passed, 0 failed, 2 BLOCKED | **20 passed, 1 failed, 0 BLOCKED, 0 optional-skipped** |
+
+The gate list is identical on both hosts, which is the second thing this row
+asks for. `check.sh` is the single definition of a gate run and CI maintains no
+parallel list, so the lists cannot drift — this run demonstrates that rather
+than assuming it.
+
+**`docker build` passed on the runner, and that is worth separating out.** It is
+an independent second-host execution of the ELF linkage assertion and the
+enforcement-absent assertion, on a different Docker version (28.0.4 against the
+operator's 29.8.0), from a clean checkout, by an account unrelated to the
+operator's. SW-P1-20 was already closed by §3.7; this corroborates it rather
+than establishing it, and corroboration from an independent host is the thing
+§3.7's "form of the evidence" note said was missing.
+
+**The runtime verification failed, and the log does not say why.** It reached
+image identity — the image resolved to `sha256:1e3c716e…`, a different build of
+the same source on a different host, and `SCAMWALL_EXPECTED_IMAGE_ID` is not set
+in CI, so the tag was trusted — and the output stops there. It stops because
+`scripts/check.sh` truncates a failing gate's captured output to its first 25
+lines (§4.9). Everything visible in the run log is a `PASS`; the failure itself
+is below the cut.
+
+So the honest reading of this row is narrower than it first appears:
+
+| Claim | State |
+| --- | --- |
+| The workflow executed on GitHub, with a run URL and log | **Established** |
+| The recorded tool versions match the local set | **Established** |
+| CI's gate list matches the local suite's | **Established** |
+| `docker build` succeeds on an independent host | **Established** |
+| The run passes | **No** — it failed, as predicted in §6.3 |
+| The runtime verification failed *because the deployment's host paths are absent on the runner* | **Predicted in §6.3, NOT confirmed.** The prediction anticipated `BLOCKED` or `FAIL`, and `FAIL` occurred — but a correct prediction of the outcome is not evidence of the cause, and the cause is not in the log |
+
+That last row is the one to hold the line on. The prediction and the result
+agree, the explanation is plausible, and nothing observed here tests it. It
+stays a hypothesis until §4.9 is fixed and a run shows the verifier's actual
+verdict.
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
@@ -897,8 +986,10 @@ part worth removing; an inline suppression would have kept it.
 
 ### 4.6 Observations carried forward, not fixed here
 
-None belongs to Phase 1 as a code defect; each is registered against the row or
-phase that owns it so it is not lost.
+Neither of the last two belongs to Phase 1 as a code defect; each observation
+here is registered against the row or phase that owns it so it is not lost. The
+one Phase 1 code defect found and left unfixed has its own section — FINDING-23,
+§4.9.
 
 **The CI job cannot pass on a hosted runner as configured (SW-P1-12).**
 `deploy/compose/compose.yaml` binds `/etc/scamwall/certs/pihole-ca.crt`, a
@@ -908,10 +999,13 @@ fresh `ubuntu-24.04` runner, so the runtime verification cannot get past
 `compose create` there — while `docker compose config`, which the suite runs
 first, exits 0 even when the secret path does not exist (tested directly). The
 consequence is that SW-P1-12's acceptance criterion, "the hosted run exists and
-passes", is not satisfiable by pushing the branch as it stands. This was found
-by reading the workflow and the compose file against each other before
-proposing the push, not by watching a run go red; the options are set out in
-§6.3 and the choice is the operator's.
+passes", is expected not to be satisfiable by pushing the branch as it stands.
+This was found by reading the workflow and the compose file against each other
+before proposing the push, not by watching a run go red. The run has since
+happened and failed at that gate (§3.8), which is consistent with this reading
+but does not establish it: FINDING-23 (§4.9) keeps the verifier's own verdict
+out of the log. The options are set out in §6.3 and the choice is the
+operator's.
 
 **Domain validity is conflated with maliciousness (SW-P3-05).**
 `domain.Normalize` rejects mixed-script labels as *invalid*, and one rejected
@@ -1127,6 +1221,53 @@ The regression suite grew from 47 cases to 319 across the same work. The pattern
 in almost every finding is identical: an operation whose failure was
 indistinguishable from a clean result. That is the class worth looking for
 first in anything else that reports on security properties.
+
+---
+
+### 4.9 FINDING-23 — a failing gate's output is truncated from the wrong end
+
+**Severity: medium. Found by the CI run in §3.8, and not yet fixed.**
+
+`scripts/check.sh` captures each gate's output and, on failure, prints it:
+
+```bash
+    bad "$label"
+    sed 's/^/         /' "$out" | head -25
+```
+
+`head -25` keeps the *first* twenty-five lines. For a gate that reports
+progressively — checking prerequisites, then identity, then assertions, then
+cleanup, then a verdict — the first twenty-five lines are the part that
+succeeded, and the failure, the cleanup result and the verdict are all below the
+cut. The longer and more thorough the gate, the more completely its diagnosis is
+discarded.
+
+This is not hypothetical. In §3.8 the `container runtime verification` gate
+failed, and the run log contains exactly twenty-four lines of it: seven
+prerequisite `PASS`es, the image-identity explanation, and three more `PASS`es.
+Nothing in the visible output indicates any problem at all. The reason the gate
+failed does not appear anywhere in the log.
+
+**Why it matters more here than in a typical suite.** `container-runtime-
+verify.sh` exists to distinguish *passed*, *failed* and *could not run*, and to
+name what it could not clean up (SW-P1-16, SW-P1-03). Its verdict line and its
+cleanup report are the last things it prints. A truncation that keeps the head
+therefore removes precisely the output that requirement was written to produce —
+and on a hosted runner, where the log is the only artifact, it removes it
+permanently.
+
+It also degrades quietly. Locally, with two container gates BLOCKED rather than
+FAILED, the truncation never fired, so eleven gate runs across this session gave
+no sign of it. It took a host where the gate could actually fail to expose it.
+
+**Not fixed here.** `scripts/check.sh` is a gate input: changing it demotes
+eleven requirement rows under `docs/REQUIREMENTS_MATRIX.md` §5 and requires the
+suite to be re-run and re-recorded. That is a small cost and the fix is small —
+print the tail, or raise the cap, or print the whole capture for a gate that
+reports a verdict — but it is a code change, and the authorisation for this
+session covers documentation and the approved push. It is registered here so the
+next session does not rediscover it, and SW-P1-12 cannot close until it is done:
+without it, a CI run cannot report *why* a gate failed.
 
 ---
 
@@ -1464,21 +1605,33 @@ credential access, it is *no* evidence of it. Both remain unverified until a
 Phase 2 run under the actual container identity says otherwise, and that run is
 operator-initiated, never automatic.
 
-### 6.3 CI execution (SW-P1-12) — **STILL BLOCKED**
+### 6.3 CI execution (SW-P1-12) — **EXECUTED, STILL BLOCKED**
 
-The workflow is reviewed (§3.4) but has never been executed. Running it requires
-a push, which is outside the authorisation for this work. This is the one Phase 1
-blocker that §3.7 does not touch, and it is the reason Phase 1 does not close.
+The workflow has now been executed, with operator approval, by the procedure
+below. **The run failed** — as predicted — so the row does not close. The result
+is §3.8; what it did and did not establish is tabulated there.
 
 A local `scripts/check.sh` run does not substitute — §3.0 is not evidence for
 this row. It exercises the gate list, not the workflow, and says nothing about
 `permissions:`, action pinning, the runner image, or fork-pull-request secret
 handling.
 
-#### Proposed procedure — awaiting approval, not executed
+**What now stands between this row and closure**, in the order the work has to
+happen:
 
-Nothing below has been run. It is written out in full so the operator is
-approving an exact sequence rather than a description of one.
+1. **FINDING-23 (§4.9)** — `check.sh` truncates a failing gate's output from the
+   head, so the CI log does not contain the reason the runtime verification
+   failed. Until this is fixed, a red CI run cannot be diagnosed from its own
+   log. This is a prerequisite, not a nicety.
+2. **The fixture decision** — option A or B below, which cannot be made
+   responsibly until step 1 makes the actual failure visible.
+3. **A passing run**, or an amended acceptance criterion.
+
+#### The procedure, as approved and executed
+
+Run once against `2a18874`. Recorded here because a procedure that was followed
+is more useful than one that was proposed, and re-running it is how this row is
+eventually closed.
 
 **What the push triggers.** `.github/workflows/gates.yml` fires on
 `push` to `main` or `feat/**`, on `pull_request`, and on `workflow_dispatch`.
@@ -1487,7 +1640,7 @@ second action is needed, and a pull request is not required to obtain the
 evidence.
 
 **Pre-push checks**, in order. Each one exists because of a specific way this
-push could produce a misleading result:
+push could produce a misleading result. All four passed before the push:
 
 ```bash
 cd "$SCAMWALL_REPO"   # the checkout; path not recorded here
@@ -1511,10 +1664,12 @@ git merge-base --is-ancestor origin/feat/phase-1-core HEAD && echo "fast-forward
 
 ```bash
 git push origin feat/phase-1-core
+#   66aff2e..2a18874  feat/phase-1-core -> feat/phase-1-core
+#   PUSH exit=0
 ```
 
-`--force` and `--force-with-lease` are deliberately absent. `main` is not
-pushed, nothing is merged, and no tag is created.
+`--force` and `--force-with-lease` are deliberately absent. `main` was not
+pushed, nothing was merged, and no tag was created.
 
 **If a run must be re-triggered** without a new commit — for example after a
 transient runner failure — use the workflow's `workflow_dispatch` entry rather
@@ -1534,10 +1689,17 @@ gh workflow run gates.yml --ref feat/phase-1-core
    `check.sh` transcript, including its summary line;
 4. the job's conclusion and its exit status.
 
-#### This run will not be green, and the reason is not a defect
+#### The prediction, and how it actually turned out
 
-Predicted before the fact, so that the prediction can be checked against the
-result rather than constructed afterwards to fit it.
+Written before the push, so that it could be checked against the result rather
+than constructed afterwards to fit it. **Outcome: the direction was right and
+the cause is still unconfirmed.** The job failed and the runtime verification
+reported `FAIL` rather than `BLOCKED` — but §4.9 means the log does not say why,
+so the specific cause below remains a hypothesis. Recording it as "confirmed"
+would be exactly the error this document is written to avoid: a prediction that
+matches an outcome is not thereby shown to have matched the mechanism.
+
+The prediction as written:
 
 The hosted runner has a Docker daemon, so `docker build` and the container
 runtime verification will *attempt* to run rather than report `BLOCKED` for a
@@ -1559,26 +1721,34 @@ surfaces later, at `compose create`, and the verifier reports it as `BLOCKED` or
 
 **This collides with SW-P1-12's acceptance criterion**, which reads "the hosted
 run exists and **passes**". As things stand it cannot pass, so the push alone
-does not close the row. Three ways forward; the choice belongs to the operator
-and is not made here:
+does not close the row — and §3.8 bears that out. Two ways forward remain; the
+choice belongs to the operator and is not made here. **Neither can be evaluated
+until FINDING-23 (§4.9) is fixed**, because until then the run log does not say
+what the verifier actually objected to, and choosing a remedy for an unobserved
+cause is guesswork:
 
 | Option | What it costs | What it buys |
 | --- | --- | --- |
 | **A — materialise the fixtures in CI.** Add a workflow step before `check.sh` that writes a throwaway CA certificate and password file to those paths, and exports `SCAMWALL_SECRET_FILE` | Edits `.github/workflows/gates.yml`, which is a gate input: it demotes SW-P1-12's review evidence (§3.4) and needs the file re-reviewed | The strongest result — the container gates genuinely execute on a second, independent host, from a clean checkout. It also makes CI reproduce §3.7 rather than merely coexist with it |
 | **B — let the container gates report `BLOCKED` in CI and amend the acceptance criterion** so SW-P1-12 closes on "the workflow ran, its gate list matched the local suite, and every gate that could run passed" | Requires amending a requirement to match an observation, which needs saying out loud rather than doing quietly | Closes the row honestly without touching a gate input. The container evidence stays where it already is — §3.7 |
-| **C — push as-is first, and decide afterwards** | One red run on the record | Confirms the prediction above against a real log before anything is changed, and produces the run URL and tool-version output that requirements 1 and 2 below ask for |
+| **C — push as-is first, and decide afterwards** | One red run on the record | Produces the run URL and tool-version output, and tests the prediction before anything is changed |
 
-C then A is the sequence that assumes least. Nothing is changed until the
-prediction has been tested.
+**C has been done** (§3.8), and it earned its place: it produced the run URL,
+the tool versions, the demonstration that both hosts run an identical gate list,
+an independent `docker build`, and FINDING-23 — which would otherwise have been
+found much later, by someone trying to diagnose a red CI run and finding nothing
+in the log. It did *not* confirm the cause above, which is why A and B are not
+yet decidable.
 
-**Reading the result, once there is one:**
+**Reading the result — retained for the next run, once §4.9 makes the verdict
+visible:**
 
 | Outcome | Meaning |
 | --- | --- |
-| The container gates report `BLOCKED` or `FAIL` on missing host paths | As predicted above. An environment gap, not a defect, and no reflection on §3.7 |
-| Every gate passes | The prediction was wrong and the runner supplied something unanticipated. Establish what before recording anything |
-| A container gate fails on a **hardening assertion** — a mount set, a bound, a pin | Do not treat this as a CI problem. It is a disagreement with §3.7 about builds of the same commit, and it takes precedence over closing this row |
-| A non-container gate fails | The gate list disagrees between the two hosts. That is a reproducibility defect, which is what this requirement exists to detect |
+| The runtime verification fails or blocks on missing host paths | The hypothesis above, then confirmed. An environment gap, not a defect, and no reflection on §3.7 |
+| Every gate passes | The hypothesis was wrong and the runner supplied something unanticipated. Establish what before recording anything |
+| It fails on a **hardening assertion** — a mount set, a bound, a pin | Do not treat this as a CI problem. It is a disagreement with §3.7 about builds of the same commit, and it takes precedence over closing this row |
+| A non-container gate fails | The gate list disagrees between the two hosts. That is a reproducibility defect, which is what this requirement exists to detect. It did not happen in §3.8: all eighteen non-container gates passed on both |
 
 **Fork pull requests are not exercised by this push**, and the workflow's most
 security-relevant property — that a fork PR receives no secret and a read-only
@@ -1608,13 +1778,17 @@ settled.
 | Enforcement is not compiled into the shipped binary | The build's own assertion, executed in the same build. §3.7 |
 | The gate suite's exit status matches its printed verdict | `CHECK exit=1` observed directly at `b6b1769`, with two gates BLOCKED on this host. §3.0 |
 | The `b6b1769` regression cases discriminate rather than merely agreeing with the code | The `0b083cb` verifier fails 50 of the 319 cases. §3.5 |
+| The workflow runs on GitHub, records its tool versions, and runs the same gate list as the local suite | Run 34036997074 at `2a18874`: versions identical to §2.2, gate list identical to §3.0. §3.8 |
+| The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4. Corroborates §3.7 from a second host. §3.8 |
 
 **Still not established:**
 
 | Claim | Status |
 | --- | --- |
 | The image built by the operator from `b469c59` is verified | **Not established, and superseded.** `sha256:d3c4ed2c…` is an identity on record. No verifier ran against it, and it predates all seventeen findings in §4.7 and §4.8. Do not deploy or cite it |
-| CI passes | **Not established, and not achievable by the proposed push.** The workflow has never been executed, and as configured it cannot go green on a hosted runner: two of the deployment's bind sources cannot exist there. §4.6 and §6.3. This is the only Phase 1 blocker remaining |
+| CI passes | **Not established.** The workflow has now been executed — run 34036997074 — and **failed**: 20 passed, 1 failed, 0 BLOCKED. §3.8. This is the only Phase 1 blocker remaining |
+| Why the CI runtime verification failed | **Not established.** The predicted cause is the deployment's absent bind sources (§4.6, §6.3), and the outcome is consistent with it — but `check.sh` truncates a failing gate's output from the head, so the reason appears nowhere in the run log. §4.9 |
+| A red CI run can be diagnosed from its own log | **Not established, and currently false.** FINDING-23, §4.9. Fixing it is a prerequisite for closing SW-P1-12 |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4; demonstrating it needs a fork PR, which even a successful branch run does not provide. §6.3 |
 | The container identity can read the mounted secret | **Not established.** File modes are configured; no process has been observed reading it. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read — and §3.7 does not weaken this, because the container was never started |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |

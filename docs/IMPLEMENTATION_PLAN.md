@@ -95,8 +95,12 @@ executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup
 problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7).
 
 **SW-P1-12 is the one requirement still blocked, so the phase does not close.**
-It needs one hosted CI run; the push and trigger procedure is written out at
-`docs/VERIFICATION.md` §6.3 and is proposed rather than executed.
+The workflow has now been executed with operator approval — run 34036997074 at
+`2a18874` — and it failed: 20 passed, 1 failed, 0 BLOCKED
+(`docs/VERIFICATION.md` §3.8). The run established that CI works, records its
+tool versions, runs the same gate list as the local suite, and builds the image
+on an independent host; it did not produce a passing run. Closing the row now
+needs FINDING-23 fixed first (§4.9), then the fixture decision in §6.3.
 
 Twenty-two findings were raised and resolved along the way. The most serious
 were a `pipefail`/SIGPIPE race that made the secret scanner report a planted
