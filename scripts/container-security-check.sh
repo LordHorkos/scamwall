@@ -131,6 +131,16 @@ require "multi-stage build"              "[ \$(grep -cE '^FROM ' $DOCKERFILE_NC)
 require "final stage is scratch"         "grep -qE '^FROM scratch' $DOCKERFILE_NC"
 require "USER is non-root numeric"       "grep -qE '^USER 65532:65532' $DOCKERFILE_NC"
 require "CGO disabled (static binary)"   "grep -q 'CGO_ENABLED=0' $DOCKERFILE_NC"
+# CGO_ENABLED=0 is an INTENTION. The proof that the produced binary is actually
+# static is a checked ELF inspection of the artifact, which the build runs and
+# whose failure fails the build.
+require "static linkage proven by ELF inspection" "grep -qE '^RUN .*elfcheck' $DOCKERFILE_NC"
+require "the ELF checker exists"         "[ -f internal/buildcheck/elfcheck/main.go ]"
+require "the ELF checker has controls"   "[ -f internal/buildcheck/elfcheck/main_test.go ]"
+# `! ldd BIN | grep -q '=>'` passed for a static binary, a missing binary, a
+# corrupt binary, and a missing ldd alike, and ldd may execute what it inspects.
+absent  "no ldd-based linkage assertion" "grep -qE '^RUN .*ldd ' $DOCKERFILE_NC"
+absent  "no producer-to-grep -q pipeline" "grep -qE '\| *grep -q' $DOCKERFILE_NC"
 require "trimpath set"                   "grep -q 'trimpath' $DOCKERFILE_NC"
 require "buildid stripped"               "grep -q 'buildid=' $DOCKERFILE_NC"
 absent  "no secret copied into image"    "grep -qE '^COPY .*(secret|password|\.key|\.pem)' $DOCKERFILE_NC"

@@ -69,12 +69,42 @@ RUN go build \
 # Fail the build rather than ship a dynamically linked binary: a dynamic
 # binary would not run in the scratch stage, and discovering that at run time
 # is worse than discovering it here.
-RUN ! ldd /out/scamwall 2>/dev/null | grep -q "=>" || (echo "binary is not static" && exit 1)
+#
+# The previous form of this assertion was:
+#
+#   RUN ! ldd /out/scamwall 2>/dev/null | grep -q "=>" || (echo ... && exit 1)
+#
+# which proved nothing. `ldd` exits nonzero and prints nothing useful for a
+# static binary, for a MISSING binary, for a corrupt one, and when `ldd` itself
+# is absent — all four produced "no => lines", i.e. a pass. It also may execute
+# the object it is asked about.
+#
+# elfcheck parses the ELF structure with debug/elf and asserts the intended
+# properties positively: an executable object type, no PT_INTERP and no
+# .interp, no PT_DYNAMIC and no SHT_DYNAMIC, and no DT_NEEDED library. A file
+# that cannot be opened or parsed is a FAILURE. It needs no tool beyond the Go
+# toolchain this stage already has, so there is no "checker was not installed"
+# path that silently passes. Its positive and negative controls are
+# internal/buildcheck/elfcheck/main_test.go.
+#
+# Scope: this proves the binary carries no dynamic linking apparatus. It does
+# not prove the binary is safe, secret-free, or built from this source.
+RUN go run ./internal/buildcheck/elfcheck /out/scamwall
 
 # Verify the binary runs and reports enforcement as absent. This is a build-time
 # assertion of the Phase 1 boundary.
-RUN /out/scamwall version | grep -qE "enforcement compiled in[[:space:]]+false" \
-      || (echo "enforcement must not be compiled in" && exit 1)
+#
+# The output is captured to a file first and matched afterwards. `producer |
+# grep -q` lets grep exit at the first match and the producer take SIGPIPE,
+# which under a pipefail-enabled shell turns a satisfied assertion into a
+# failed one (docs/VERIFICATION.md 4.1). RUN uses /bin/sh without pipefail
+# today, so the bug was latent rather than active — but the form is the one
+# this repository has already been burned by, so it is not used anywhere.
+RUN /out/scamwall version > /out/version.txt \
+      && grep -qE "enforcement compiled in[[:space:]]+false" /out/version.txt \
+      || (echo "enforcement must not be compiled in; observed:" \
+          && cat /out/version.txt \
+          && exit 1)
 
 # =============================================================================
 # Final stage: scratch.
