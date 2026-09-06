@@ -14,6 +14,16 @@
 #   scripts/secret-scan.sh --all      # scan tracked + untracked (excl. ignored)
 #
 # Exit codes: 0 clean, 1 findings, 2 usage/environment error.
+#
+# A NOTE ON `grep -q`
+#
+# Every content test below reads from a HERESTRING, never from a pipe. Under
+# `set -o pipefail`, `producer | grep -q PATTERN` is a race: `grep -q` exits at
+# the first match, the producer takes SIGPIPE, and the pipeline reports 141 —
+# so a test that DID match is read as "no match". In this script that failure
+# mode is a false CLEAN: a private key present in a large file would go
+# unreported. It was observed in practice (docs/VERIFICATION.md 4.1), so the
+# pipe is not used here at all.
 
 set -euo pipefail
 
@@ -22,7 +32,7 @@ case "${1:-}" in
   ""|--staged) MODE="staged" ;;
   --tree)      MODE="tree" ;;
   --all)       MODE="all" ;;
-  -h|--help)   sed -n '3,17p' "$0"; exit 0 ;;
+  -h|--help)   sed -n '3,26p' "$0"; exit 0 ;;
   *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 
@@ -61,7 +71,7 @@ PATH_DENY='(^|/)(secrets?|keys?|state|logs|data)/|\.(key|pem|crt|cer|der|p12|pfx
 for f in "${FILES[@]}"; do
   # An Ed25519 *public* key fixture is safe and required as a committed trust anchor.
   case "$f" in testdata/*.pub|testdata/*_public*) continue ;; esac
-  if printf '%s' "$f" | grep -qE "$PATH_DENY"; then
+  if grep -qE "$PATH_DENY" <<<"$f"; then
     fail "forbidden path staged: $f"
     note "why" "credentials, trust material, logs, or runtime state must never be committed"
   fi
@@ -77,10 +87,10 @@ CERT_RE="${BEGIN_MARK}CERTIFICATE-----"
 for f in "${FILES[@]}"; do
   c="$(content_of "$f")"
   [ -n "$c" ] || continue
-  if printf '%s' "$c" | grep -qE -- "$PRIV_RE"; then
+  if grep -qE -- "$PRIV_RE" <<<"$c"; then
     fail "private key material in $f"
   fi
-  if printf '%s' "$c" | grep -qE -- "$CERT_RE"; then
+  if grep -qE -- "$CERT_RE" <<<"$c"; then
     fail "certificate body in $f"
     note "why" "the Pi-hole CA is installation-specific; test CAs are generated at test time"
   fi
@@ -101,7 +111,7 @@ for f in "${FILES[@]}"; do
   i=0
   while [ $i -lt ${#TOKEN_PATTERNS[@]} ]; do
     pat="${TOKEN_PATTERNS[$i]}"; desc="${TOKEN_PATTERNS[$((i+1))]}"
-    if printf '%s' "$c" | grep -qE -- "$pat"; then
+    if grep -qE -- "$pat" <<<"$c"; then
       fail "$desc detected in $f"
     fi
     i=$((i + 2))
@@ -121,9 +131,11 @@ for f in "${FILES[@]}"; do
   [ -n "$hits" ] || continue
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if printf '%s' "$line" | grep -qiE "$PLACEHOLDER"; then continue; fi
-    # Struct tags and JSON schema keys are declarations, not values.
-    if printf '%s' "$line" | grep -qE '`json:|`yaml:|"type"[[:space:]]*:|omitempty'; then continue; fi
+    if grep -qiE "$PLACEHOLDER" <<<"$line"; then continue; fi
+    # Struct tags and JSON schema keys are declarations, not values. The
+    # pattern is a literal regex; single quotes are required, not an oversight.
+    # shellcheck disable=SC2016  # intentional literal regex, no expansion wanted
+    if grep -qE '`json:|`yaml:|"type"[[:space:]]*:|omitempty' <<<"$line"; then continue; fi
     fail "possible credential literal in $f"
     note "line" "$(printf '%s' "$line" | cut -c1-100)"
   done <<< "$hits"

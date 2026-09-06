@@ -93,6 +93,8 @@ WORK_DIR=""
 VERIFY_PROJECT=""
 CREATED_CONTAINERS=()
 
+# Invoked through the EXIT/INT/TERM traps below, never by name.
+# shellcheck disable=SC2329  # reached indirectly via trap
 cleanup() {
   local c
   for c in ${CREATED_CONTAINERS[@]+"${CREATED_CONTAINERS[@]}"}; do

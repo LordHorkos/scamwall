@@ -184,20 +184,50 @@ run_verifier() {
   return 0
 }
 
+# matches: does $OUT contain the extended regex $1?
+#
+# The match reads from a HERESTRING, never from `printf ... | grep -q`. Under
+# `set -o pipefail` that pipeline is a race: `grep -q` exits at the first match,
+# printf takes SIGPIPE, and the pipeline reports 141 — so a pattern that IS
+# present is read as absent. Observed here as intermittent false FAILs in
+# expect_output, and, far worse, as a silent false PASS in expect_no_output,
+# where a pattern that appeared early would be reported as absent. See
+# docs/VERIFICATION.md 4.1.
+#
+# grep's own exit status is also distinguished from an execution error: 0 is a
+# match, 1 is no match, anything else means grep itself failed and the test
+# result is UNPROVEN rather than either verdict.
+matches() { # pattern -> 0 match, 1 no match, 2 grep failed
+  local rc
+  grep -qE "$1" <<<"$OUT"
+  rc=$?
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *)   return 2 ;;
+  esac
+}
+
 expect_rc_nonzero() { # label
   if [ "$RC" -ne 0 ]; then pass "$1"; else fail "$1" "expected nonzero exit, got 0"; fi
 }
 expect_rc_zero() { # label
-  if [ "$RC" -eq 0 ]; then pass "$1"; else fail "$1" "expected exit 0, got $RC. Output: $(printf '%s' "$OUT" | tail -5 | tr '\n' '|')"; fi
+  if [ "$RC" -eq 0 ]; then pass "$1"; else fail "$1" "expected exit 0, got $RC. Output: $(tail -5 <<<"$OUT" | tr '\n' '|')"; fi
 }
 expect_output() { # label pattern
-  if printf '%s' "$OUT" | grep -qE "$2"; then pass "$1"
-  else fail "$1" "output did not match /$2/. Tail: $(printf '%s' "$OUT" | tail -5 | tr '\n' '|')"; fi
+  matches "$2"
+  case $? in
+    0) pass "$1" ;;
+    1) fail "$1" "output did not match /$2/. Tail: $(tail -5 <<<"$OUT" | tr '\n' '|')" ;;
+    *) fail "$1" "grep failed while testing /$2/ — result UNPROVEN" ;;
+  esac
 }
 expect_no_output() { # label pattern
-  if printf '%s' "$OUT" | grep -qE "$2"; then
-    fail "$1" "output unexpectedly matched /$2/"
-  else pass "$1"; fi
+  matches "$2"
+  case $? in
+    0) fail "$1" "output unexpectedly matched /$2/" ;;
+    1) pass "$1" ;;
+    *) fail "$1" "grep failed while testing /$2/ — result UNPROVEN" ;;
+  esac
 }
 
 echo "== container-runtime-verify.sh regression tests =="
@@ -361,7 +391,14 @@ if grep -qE '^rm -f fsc1111111111$' "$FAKE_DIR/log" && grep -qE '^rm -f depc2222
 else
   fail "containers created by this run are removed" "log: $(tr '\n' '|' < "$FAKE_DIR/log")"
 fi
-if grep -E '^compose .*down' "$FAKE_DIR/log" | grep -qvE '\-p scamwall-verify-[0-9]+'; then
+# Both intermediate results are captured into variables first. `producer |
+# grep -q...` would race: the short-circuiting grep exits at the first match and
+# the producer takes SIGPIPE, which pipefail turns into a nonzero pipeline
+# status. Here the consumer is `grep -qv`, which short-circuits on the first
+# NON-matching line — so the race would have turned an unscoped `compose down`
+# into a silent PASS.
+DOWN_CMDS="$(grep -E '^compose .*down' "$FAKE_DIR/log" || true)"
+if [ -n "$DOWN_CMDS" ] && grep -qvE '\-p scamwall-verify-[0-9]+' <<<"$DOWN_CMDS"; then
   fail "compose down is always scoped to the private project" "an unscoped down was issued"
 else
   pass "compose down is always scoped to the private project"
@@ -403,7 +440,8 @@ if [ -s "$FAKE_DIR/git-log" ]; then
 else
   pass "git is never invoked by the Docker verification path"
 fi
-if grep -rn 'git ' "$VERIFIER" | grep -vE '^\s*[0-9]+:\s*#' | grep -qE '(^|[^a-z-])git (rev-parse|status|config|ls-files)'; then
+GIT_LINES="$(grep -rn 'git ' "$VERIFIER" | grep -vE '^\s*[0-9]+:\s*#' || true)"
+if [ -n "$GIT_LINES" ] && grep -qE '(^|[^a-z-])git (rev-parse|status|config|ls-files)' <<<"$GIT_LINES"; then
   fail "the verifier contains no git invocation" "a git command appears outside comments"
 else
   pass "the verifier contains no git invocation"

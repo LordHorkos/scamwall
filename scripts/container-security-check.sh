@@ -68,6 +68,21 @@ DOCKERFILE_NC="$STRIPPED/Dockerfile"
 sed 's/#.*$//' "$COMPOSE"    > "$COMPOSE_NC"
 sed 's/#.*$//' "$DOCKERFILE" > "$DOCKERFILE_NC"
 
+# Extractions used by more than one assertion are computed ONCE, into variables,
+# and matched with herestrings. They are deliberately not written as
+# `grep ... FILE | grep -q ...`: under `set -o pipefail` the short-circuiting
+# `grep -q` exits at the first match, the upstream grep takes SIGPIPE, and the
+# pipeline reports 141 — so a satisfied assertion is read as unsatisfied. That
+# race was observed in this repository (docs/VERIFICATION.md 4.1).
+# These are consumed inside the `eval`-ed assertion strings below, which
+# ShellCheck cannot follow. The reference is real; only the analysis is blind.
+# shellcheck disable=SC2034  # used via eval in require/absent
+CAP_DROP_BLOCK="$(grep -A2 -E '^[[:space:]]*cap_drop:' "$COMPOSE_NC" 2>/dev/null || true)"
+# shellcheck disable=SC2034  # used via eval in require/absent
+TMPFS_LINES="$(grep '/tmp:' "$COMPOSE_NC" 2>/dev/null || true)"
+# shellcheck disable=SC2034  # used via eval in require/absent
+FINAL_STAGE="$(awk '/^FROM scratch/,0' "$DOCKERFILE_NC" 2>/dev/null || true)"
+
 PASS=0
 FAIL=0
 ok()  { printf '\033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -82,12 +97,12 @@ echo "== compose: required hardening =="
 require "read_only: true"                "grep -qE '^[[:space:]]*read_only:[[:space:]]*true' $COMPOSE_NC"
 require "privileged: false"              "grep -qE '^[[:space:]]*privileged:[[:space:]]*false' $COMPOSE_NC"
 require "init: true"                     "grep -qE '^[[:space:]]*init:[[:space:]]*true' $COMPOSE_NC"
-require "cap_drop includes ALL"          "grep -A2 -E '^[[:space:]]*cap_drop:' $COMPOSE_NC | grep -qE '^[[:space:]]*-[[:space:]]*ALL'"
+require "cap_drop includes ALL"          "grep -qE '^[[:space:]]*-[[:space:]]*ALL' <<< \"\$CAP_DROP_BLOCK\""
 require "no-new-privileges:true"         "grep -q 'no-new-privileges:true' $COMPOSE_NC"
 require "runs as non-root 65532:65532"   "grep -qE '^[[:space:]]*user:[[:space:]]*\"65532:65532\"' $COMPOSE_NC"
-require "tmpfs /tmp has noexec"          "grep '/tmp:' $COMPOSE_NC | grep -q noexec"
-require "tmpfs /tmp has nosuid"          "grep '/tmp:' $COMPOSE_NC | grep -q nosuid"
-require "tmpfs /tmp has nodev"           "grep '/tmp:' $COMPOSE_NC | grep -q nodev"
+require "tmpfs /tmp has noexec"          "grep -q noexec <<< \"\$TMPFS_LINES\""
+require "tmpfs /tmp has nosuid"          "grep -q nosuid <<< \"\$TMPFS_LINES\""
+require "tmpfs /tmp has nodev"           "grep -q nodev <<< \"\$TMPFS_LINES\""
 require "memory limit set"               "grep -qE '^[[:space:]]*mem_limit:' $COMPOSE_NC"
 require "pids limit set"                 "grep -qE '^[[:space:]]*pids_limit:' $COMPOSE_NC"
 require "cpu limit set"                  "grep -qE '^[[:space:]]*cpus:' $COMPOSE_NC"
@@ -120,7 +135,7 @@ require "trimpath set"                   "grep -q 'trimpath' $DOCKERFILE_NC"
 require "buildid stripped"               "grep -q 'buildid=' $DOCKERFILE_NC"
 absent  "no secret copied into image"    "grep -qE '^COPY .*(secret|password|\.key|\.pem)' $DOCKERFILE_NC"
 absent  "no ADD from a URL"              "grep -qE '^ADD +https?://' $DOCKERFILE_NC"
-absent  "no apt-get in final stage"      "awk '/^FROM scratch/,0' $DOCKERFILE_NC | grep -q 'apt-get'"
+absent  "no apt-get in final stage"      "grep -q 'apt-get' <<< \"\$FINAL_STAGE\""
 
 echo
 echo "== build context =="
