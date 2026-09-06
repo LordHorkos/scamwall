@@ -46,7 +46,13 @@ trap 'rm -rf "$ROOT"' EXIT
 # the superseded implementation grepped .env directly and stripped quotes by
 # hand, so it would derive ENV_GID and disagree with the container.
 ENV_GID="4242"
-CONFIG_GID="5150"
+# The resolved gid is the running account's own primary group. The verifier
+# now checks that the supplementary group actually owns the password file, so
+# a fixture gid this account cannot chgrp to would make every case fail on an
+# unrelated assertion. The ENV_GID above stays different, which is what keeps
+# the "expected settings come from compose config, not from .env" property
+# under test.
+CONFIG_GID="$(id -g)"
 IMAGE_ID="sha256:1111111111111111111111111111111111111111111111111111111111111111"
 OTHER_ID="sha256:2222222222222222222222222222222222222222222222222222222222222222"
 MANIFEST_ID="sha256:3333333333333333333333333333333333333333333333333333333333333333"
@@ -167,7 +173,14 @@ if [ "${1:-}" = "compose" ]; then
 fi
 
 case "${1:-}" in
-  info) exit "$(rc_for info)" ;;
+  info)
+    r="$(rc_for info)"; [ "$r" -ne 0 ] && exit "$r"
+    # `docker info --format` is how the verifier asks the daemon whether it
+    # remaps user namespaces. A case that wants a particular answer writes it
+    # to info-security; the default is silence, which the verifier treats as
+    # "could not be asked" rather than as "no remapping".
+    [ -f "$D/info-security" ] && cat "$D/info-security"
+    exit 0 ;;
   image)
     shift; [ "${1:-}" = "inspect" ] && shift
     ref=""
@@ -337,7 +350,10 @@ printf '{}\n' > "$CONF_SRC"
 printf '{}\n' > "$FEED_SRC"
 printf 'test-only-password\n' > "$SECRET_SRC"
 chmod 700 "$SRV/secrets"
-chmod 600 "$SECRET_SRC"
+# 0640, not 0600: the container joins CONFIG_GID as a supplementary group and
+# reads the file through the group class, so a fixture with no group-read bit
+# would model a deployment whose credential the container cannot open.
+chmod 640 "$SECRET_SRC"
 
 container_json() { # $1 = jq mutation (or "." for none)
   jq "$1" <<JSON
@@ -988,7 +1004,10 @@ expect_output     "the exposure is reported" 'readable by every account'
 expect_no_output  "the password itself is never printed" 'test-only-password'
 
 setup_case secret-not-world-readable
-chmod 600 "$WORLD_SECRET_FILE"
+# 0640, not 0600: the verifier now also judges whether the container identity
+# could read the file, and a file with no group-read bit fails that for a
+# reason unrelated to world-reachability, which is what this case is about.
+chmod 640 "$WORLD_SECRET_FILE"
 compose_config_json '.secrets.pihole_app_password.file = "'"$WORLD_SECRET_FILE"'"' > "$FAKE_DIR/compose-config.json"
 # The container fixture is moved with it. A source the configuration resolves
 # and a source the container actually has must agree, and that agreement is
@@ -999,6 +1018,81 @@ run_verifier
 expect_rc_zero   "a password file that is not world-readable passes"
 expect_output    "the check states what it does NOT establish" 'never starts the container'
 chmod 644 "$WORLD_SECRET_FILE"
+
+# --- The supplementary group and the file it is supposed to open --------------
+#
+# Carried forward from Phase 1 as work-order item 9: the verifier asserted the
+# supplementary group's VALUE and never related it to the password file's
+# ownership. A deployment could therefore satisfy every assertion while the
+# container identity had no permission to read its own credential.
+#
+# Each case below is a world in which the superseded checks are satisfied. The
+# PRE-FIX CONTROL states that explicitly rather than leaving it implied: it
+# asserts that the two assertions the verifier used to make — the group is a
+# valid non-root gid, and the file is not world-readable — both still report
+# PASS in the very world the new assertion rejects.
+NOGROUP_SRC="$SRV/secrets/no-group-read"
+printf 'test-only-password\n' > "$NOGROUP_SRC"
+chmod 600 "$NOGROUP_SRC"
+
+setup_case secret-group-not-owner
+# A gid that is valid, non-root, and is NOT the gid that owns the file.
+compose_config_json '.services.scamwall.group_add = ["4242"]' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a supplementary group that does not own the password file fails"
+expect_output     "the mismatch is reported as a readability failure" 'would NOT be readable by the container identity'
+expect_output     "the observed ownership is reported as metadata" 'gid=[0-9]+ mode=[0-7]{4}'
+expect_no_output  "the password itself is never printed" 'test-only-password'
+expect_output     "PRE-FIX CONTROL: the group is still a valid non-root gid (the superseded assertion)" \
+                  'supplementary group resolves to a single valid non-root gid \(4242\)'
+expect_output     "PRE-FIX CONTROL: the file is still not world-readable (the superseded assertion)" \
+                  'not world-readable through its path'
+log_lacks         "nothing is created when the credential is unreadable" '^compose .*create'
+
+setup_case secret-no-group-read
+# The right group owns it, and the group-read bit is unset. This is the case a
+# gid-equality check alone would pass.
+compose_config_json '.secrets.pihole_app_password.file = "'"$NOGROUP_SRC"'"' > "$FAKE_DIR/compose-config.json"
+container_json '(.[0].Mounts[] | select(.Destination == "/run/secrets/pihole_app_password") | .Source) = "'"$NOGROUP_SRC"'"' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_nonzero "a password file with no group-read bit fails"
+expect_output     "the unset group-read bit is reported" 'group-read bit is unset'
+
+setup_case secret-owner-read
+# The other way a read can legitimately be granted: the file's OWNER is the
+# container's uid. The configuration is mutated so that the container identity
+# is this account, which owns the fixture.
+compose_config_json '.services.scamwall.user = "'"$(id -u)"':'"$(id -g)"'" | .secrets.pihole_app_password.file = "'"$NOGROUP_SRC"'"' > "$FAKE_DIR/compose-config.json"
+container_json '(.[0].Mounts[] | select(.Destination == "/run/secrets/pihole_app_password") | .Source) = "'"$NOGROUP_SRC"'"' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_zero   "a password file owned by the container uid passes on the owner class"
+expect_output    "the granting permission class is named" "the file's owner uid"
+
+setup_case secret-user-not-numeric
+compose_config_json '.services.scamwall.user = "scamwall"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a non-numeric container identity blocks the run"
+expect_output     "the unusable identity is reported" 'not a single numeric uid:gid'
+
+setup_case secret-userns-remap
+# A daemon that remaps user namespaces makes the host metadata describe
+# different ids than the container sees, so the judgement above cannot stand.
+printf '[name=seccomp,profile=builtin name=userns]\n' > "$FAKE_DIR/info-security"
+run_verifier
+expect_rc_nonzero "a user-namespace-remapping daemon invalidates the readability judgement"
+expect_output     "the remapping is reported" 'user-namespace remapping'
+
+setup_case secret-rootless
+printf '[name=rootless name=seccomp,profile=builtin]\n' > "$FAKE_DIR/info-security"
+run_verifier
+expect_rc_nonzero "a rootless daemon invalidates the readability judgement"
+expect_output     "the rootless daemon is reported" 'rootless'
+
+setup_case secret-userns-absent
+printf '[name=seccomp,profile=builtin name=cgroupns]\n' > "$FAKE_DIR/info-security"
+run_verifier
+expect_rc_zero   "a daemon that reports no remapping is accepted"
+expect_output    "the absence of remapping is recorded" 'no user-namespace remapping'
 
 setup_case secret-source-prohibited
 compose_config_json '.secrets.pihole_app_password.file = "/etc/pihole/setupVars.conf"' > "$FAKE_DIR/compose-config.json"

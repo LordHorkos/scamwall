@@ -187,7 +187,17 @@ jobs:
           # separate requirement and is not tested by this run.
           umask 077
           head -c 32 /dev/urandom | base64 > "$dir/pihole_app_password"
-          chmod 600 -- "$dir/pihole_app_password"
+          # 0640, and owned by a group the deployment names below.
+          #
+          # The runtime verifier now checks that the supplementary group in the
+          # deployment is the group that OWNS the password file, and that the
+          # group-read bit is set — the relationship the group exists to
+          # provide, which was previously asserted only as a bare gid value.
+          # CI satisfies that relationship the same way the operator's host
+          # does, by pointing the deployment at the group that really owns the
+          # fixture, rather than by exempting the runner from the assertion.
+          chmod 640 -- "$dir/pihole_app_password"
+          echo "SCAMWALL_SECRET_GID=$(id -g)" >> "$GITHUB_ENV"
 
           # Reported as metadata only. No content is echoed.
           ls -l -- "$dir"

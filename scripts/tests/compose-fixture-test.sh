@@ -75,7 +75,12 @@ FIX="$ROOT/fixtures"
 mkdir -p "$FIX" && chmod 700 "$FIX"
 printf 'ScamWall test fixture. Not a certificate and not a key.\n' > "$FIX/pihole-ca.crt"
 printf 'throwaway-not-a-real-password\n' > "$FIX/pihole_app_password"
-chmod 600 "$FIX/pihole-ca.crt" "$FIX/pihole_app_password"
+# The password is 0640, as the workflow creates it: the verifier checks that
+# the deployment's supplementary group is the group that OWNS this file and
+# that the group-read bit is set, so a 0600 fixture would model a deployment
+# whose credential the container identity cannot open.
+chmod 600 "$FIX/pihole-ca.crt"
+chmod 640 "$FIX/pihole_app_password"
 
 # --- The verifier's own expectations, lifted rather than restated -------------
 #
@@ -87,9 +92,11 @@ eval "$(sed -n '/^APPROVED_MOUNT_DESTS=/,/pihole_app_password.$/p' "$VERIFIER")"
 eval "$(sed -n '/^APPROVED_MOUNT_COUNT=/p' "$VERIFIER")"
 eval "$(sed -n '/^approved_mount_problems()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^secret_world_reachable()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^secret_identity_read()/,/^}$/p' "$VERIFIER")"
 [ -n "${APPROVED_MOUNT_DESTS:-}" ] || { printf 'fatal: could not lift the approved mount set from the verifier\n' >&2; exit 2; }
 declare -F approved_mount_problems >/dev/null || { printf 'fatal: could not lift approved_mount_problems\n' >&2; exit 2; }
 declare -F secret_world_reachable  >/dev/null || { printf 'fatal: could not lift secret_world_reachable\n' >&2; exit 2; }
+declare -F secret_identity_read   >/dev/null || { printf 'fatal: could not lift secret_identity_read\n' >&2; exit 2; }
 
 SERVICE="scamwall"
 
@@ -101,6 +108,7 @@ resolve() {
     env -i PATH="$PATH" HOME="$HOME" \
       ${SCAMWALL_CA_FILE:+SCAMWALL_CA_FILE="$SCAMWALL_CA_FILE"} \
       ${SCAMWALL_SECRET_FILE:+SCAMWALL_SECRET_FILE="$SCAMWALL_SECRET_FILE"} \
+      ${SCAMWALL_SECRET_GID:+SCAMWALL_SECRET_GID="$SCAMWALL_SECRET_GID"} \
       docker compose -f compose.yaml config --format json > "$1" 2> "$2" )
 }
 
@@ -166,6 +174,11 @@ fi
 # --- 3. With the CI fixtures, the resolved definition is exactly right --------
 export SCAMWALL_CA_FILE="$FIX/pihole-ca.crt"
 export SCAMWALL_SECRET_FILE="$FIX/pihole_app_password"
+# The workflow writes this into GITHUB_ENV after creating the fixtures, so that
+# the deployment names the group that really owns them. Reproduced here rather
+# than assumed: without it CI would resolve the default 65532 and the
+# readability assertion below would be checking a relationship CI never has.
+export SCAMWALL_SECRET_GID="$(id -g)"
 if ! resolve "$ROOT/ci.json" "$ROOT/ci.err"; then
   fail "the definition resolves under CI conditions" "$(tr '\n' '|' < "$ROOT/ci.err")"
 else
@@ -311,7 +324,27 @@ else
   # The permission property the verifier enforces, checked against the fixtures
   # the workflow actually creates.
   secret_world_reachable "$FIX/pihole_app_password"
-  case $? in
+  WORLD_RC=$?
+
+  # The relationship the supplementary group exists to provide: the group named
+  # by the resolved deployment must be the group that owns the password file,
+  # and the group-read bit must be set. Judged with the verifier's own
+  # function, against the fixtures the workflow actually creates, so that CI is
+  # held to the assertion rather than exempted from it.
+  CI_UID="$(jq -r '.services.scamwall.user // "" | split(":")[0]' < "$ROOT/ci.json")"
+  CI_PGID="$(jq -r '.services.scamwall.user // "" | split(":")[1] // ""' < "$ROOT/ci.json")"
+  CI_SGID="$(jq -r '(.services.scamwall.group_add // [])[0] // ""' < "$ROOT/ci.json")"
+  if [ -z "$CI_UID" ] || [ -z "$CI_SGID" ]; then
+    fail "the CI deployment names a group that owns the password fixture" "the identity or the group could not be read from the resolved configuration"
+  else
+    secret_identity_read "$FIX/pihole_app_password" "$CI_UID" "$CI_PGID" "$CI_SGID"
+    case $? in
+      0) pass "the CI deployment names a group that owns the password fixture (granted by $SECRET_READ_PATH)" ;;
+      1) fail "the CI deployment names a group that owns the password fixture" "$SECRET_META, container uid $CI_UID groups $CI_PGID/$CI_SGID" ;;
+      *) fail "the CI deployment names a group that owns the password fixture" "the fixture's ownership could not be determined" ;;
+    esac
+  fi
+  case $WORLD_RC in
     1) pass "the CI password fixture is not readable by every account on the host" ;;
     0) fail "the CI password fixture is not readable by every account on the host" "it is world-reachable" ;;
     *) fail "the CI password fixture is not readable by every account on the host" "its permissions could not be determined" ;;

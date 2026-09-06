@@ -1156,6 +1156,25 @@ else
   ok "supplementary group resolves to a single valid non-root gid ($EXPECTED_GID)"
 fi
 
+# Container identity. Derived from the resolved configuration rather than
+# assumed: the readability judgement made below is a judgement ABOUT this
+# identity, so a guessed uid would make it assert nothing. Anything other than
+# a numeric "uid:gid" is refused rather than defaulted — a name would have to
+# be resolved inside the image, which this program never starts.
+EXPECTED_UID=""
+EXPECTED_PRIMARY_GID=""
+USER_SPEC="$(cfg ".services.\"$SERVICE\".user // \"\" | tostring")" || USER_SPEC=""
+case "$USER_SPEC" in
+  *:*) EXPECTED_UID="${USER_SPEC%%:*}"; EXPECTED_PRIMARY_GID="${USER_SPEC#*:}" ;;
+esac
+if ! is_uint "${EXPECTED_UID:-x}" 1 65535 || ! is_uint "${EXPECTED_PRIMARY_GID:-x}" 1 65535; then
+  derive_fail "the container identity is not a single numeric uid:gid (observed '${USER_SPEC:-none}')"
+  EXPECTED_UID=""
+  EXPECTED_PRIMARY_GID=""
+else
+  ok "container identity resolves to a numeric non-root uid:gid ($EXPECTED_UID:$EXPECTED_PRIMARY_GID)"
+fi
+
 # Hostname pinning. Compose renders extra_hosts as "host=addr" (and older
 # versions as a "host:addr" list, or as a map); all three are accepted, and
 # anything else is rejected rather than defaulted.
@@ -1379,10 +1398,147 @@ else
     1) ok "the application password file is not world-readable through its path" ;;
     *) derive_fail "the application password file's permissions could not be determined — its exposure is UNPROVEN" ;;
   esac
-  note "this is a check on the HOST file. Whether the container identity can"
-  note "READ it is a separate requirement, and is not established here: this"
-  note "program never starts the container."
 fi
+
+# --- Can the container identity read the application password? ----------------
+#
+# This is a METADATA judgement, and the distinction is load-bearing.
+#
+# What it establishes: that the file's owner, owning group and permission bits
+# are such that a process running as the configured uid, with the configured
+# primary and supplementary groups, WOULD be granted read by the ordinary UNIX
+# permission check. That is the property the supplementary group exists to
+# provide, and until now the verifier asserted the group's VALUE without ever
+# relating it to the file the group is supposed to open.
+#
+# What it does NOT establish: that a read actually succeeds inside the
+# container. This program never starts one. Four assumptions stand between the
+# metadata and the outcome, and each is checked or stated rather than ignored:
+#
+#   * POSIX ACLs. An ACL mask can reduce the effective group permission below
+#     what the mode bits show, and a named ACL entry can grant access the mode
+#     bits do not. Both are examined where `getfacl` is available; where it is
+#     not, and the file carries an extended ACL, the result is UNDETERMINED
+#     rather than a pass.
+#   * User-namespace remapping. Under `userns-remap`, the uid and gid inside
+#     the container map to different host ids, so host metadata no longer
+#     predicts container access. Asked of the daemon below rather than assumed.
+#   * Rootless Docker. The same shift applies, by a different mechanism.
+#   * Path traversal. Not a factor for the container: the daemon resolves the
+#     bind source as root before the mount exists, so the ancestor directory
+#     modes gate the HOST, not the container. They are checked above for a
+#     different reason — world-reachability — and not re-checked here.
+#
+# The actual read, performed by a started container against a disposable
+# deployment, is Phase 2 work order item 5 and stays open.
+
+# secret_identity_read <file> <uid> <primary-gid> <supplementary-gid>
+#   0 read would be granted   1 read would be refused   2 undetermined
+# On success SECRET_READ_PATH names which permission class granted it.
+SECRET_READ_PATH=""
+SECRET_META=""
+secret_identity_read() {
+  local f="$1" uid="$2" gid1="$3" gid2="$4"
+  local statline fu fg fmode owner group
+  SECRET_READ_PATH=""
+  statline="$(stat -c '%u %g %a' -- "$f" 2>/dev/null)" || return 2
+  read -r fu fg fmode <<<"$statline"
+  [ -n "${fu:-}" ] && [ -n "${fg:-}" ] && [ -n "${fmode:-}" ] || return 2
+  # Normalise to four octal digits so the positional extraction is exact:
+  # `stat -c %a` prints "640", not "0640", and prints four digits when a
+  # setuid, setgid or sticky bit is present.
+  while [ "${#fmode}" -lt 4 ]; do fmode="0$fmode"; done
+  owner="${fmode: -3:1}"
+  group="${fmode: -2:1}"
+  SECRET_META="uid=$fu gid=$fg mode=$fmode"
+  if [ "$fu" = "$uid" ]; then
+    case "$owner" in
+      4|5|6|7) SECRET_READ_PATH="the file's owner uid ($uid)"; return 0 ;;
+    esac
+  fi
+  if [ "$fg" = "$gid1" ] || [ "$fg" = "$gid2" ]; then
+    case "$group" in
+      4|5|6|7) SECRET_READ_PATH="the owning group gid ($fg)"; return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+# secret_acl_verdict <file>
+#   0 no extended ACL, or one that does not change the answer
+#   1 an ACL mask strips read from the group class
+#   2 undetermined: an extended ACL is present and cannot be read
+# ACL_NOTE carries a printable summary; it contains permission metadata only.
+ACL_NOTE=""
+secret_acl_verdict() {
+  local f="$1" lsline acl mask
+  ACL_NOTE=""
+  lsline="$(ls -ld -- "$f" 2>/dev/null)" || return 2
+  case "$lsline" in
+    ??????????+*) ;;
+    *) ACL_NOTE="no extended ACL"; return 0 ;;
+  esac
+  command -v getfacl >/dev/null 2>&1 || { ACL_NOTE="an extended ACL is present and getfacl is not installed"; return 2; }
+  acl="$(getfacl -c -- "$f" 2>/dev/null)" || { ACL_NOTE="an extended ACL is present and could not be read"; return 2; }
+  mask="$(sed -n 's/^mask::\(.*\)$/\1/p' <<<"$acl" | head -n 1)"
+  if [ -z "$mask" ]; then
+    ACL_NOTE="an extended ACL is present with no mask entry"
+    return 0
+  fi
+  ACL_NOTE="extended ACL present, mask::$mask"
+  case "$mask" in
+    r*) return 0 ;;
+    *)  return 1 ;;
+  esac
+}
+
+if [ -n "${SECRET_SOURCE:-}" ] && [ -n "${EXPECTED_UID:-}" ] && [ -n "${EXPECTED_GID:-}" ]; then
+  secret_identity_read "$SECRET_SOURCE" "$EXPECTED_UID" "$EXPECTED_PRIMARY_GID" "$EXPECTED_GID"
+  case $? in
+    0)
+      secret_acl_verdict "$SECRET_SOURCE"
+      case $? in
+        0) ok "the application password would be readable by the container identity through $SECRET_READ_PATH ($SECRET_META; $ACL_NOTE)" ;;
+        1) derive_fail "an ACL mask on the application password strips read from the group class, so $SECRET_READ_PATH does not in fact grant it ($SECRET_META; $ACL_NOTE)" ;;
+        *) derive_fail "the application password's effective permissions are UNPROVEN: $ACL_NOTE ($SECRET_META)" ;;
+      esac
+      ;;
+    1)
+      derive_fail "the application password would NOT be readable by the container identity: $SECRET_META, but the container runs as uid $EXPECTED_UID with groups $EXPECTED_PRIMARY_GID and $EXPECTED_GID — the supplementary group does not own the file, or the file's group-read bit is unset"
+      ;;
+    *)
+      derive_fail "the application password's ownership and mode could not be determined — its readability by the container identity is UNPROVEN"
+      ;;
+  esac
+  note "this is a judgement on HOST METADATA. It says the permission check"
+  note "would grant a read; it does not say a read was performed. This"
+  note "program never starts the container, so nothing here opens the file."
+else
+  derive_fail "the application password's readability could not be judged: one of the secret source, the container uid or the supplementary gid was not derived"
+fi
+
+# User-namespace remapping shifts every id between the host and the container,
+# which would invalidate the judgement above. The daemon reports it, so it is
+# asked rather than assumed. A daemon that cannot be asked leaves the
+# assumption stated rather than checked.
+USERNS_MODE="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || USERNS_MODE=""
+case "$USERNS_MODE" in
+  *userns*)
+    derive_fail "this daemon reports user-namespace remapping, so host uid/gid metadata does not describe what the container identity can read"
+    ;;
+  "")
+    note "the daemon could not be asked about user-namespace remapping; the"
+    note "readability judgement above assumes host ids are container ids."
+    ;;
+  *)
+    ok "the daemon reports no user-namespace remapping, so host ids are container ids"
+    ;;
+esac
+case "$USERNS_MODE" in
+  *rootless*)
+    derive_fail "this daemon is rootless, so the bind source is presented under a shifted id map and the readability judgement above does not apply"
+    ;;
+esac
 
 if [ "$DERIVE_FAILED" -ne 0 ]; then
   blocked "expected settings could not be derived from the resolved configuration — container assertions would compare against guesses"
