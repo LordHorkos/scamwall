@@ -59,7 +59,14 @@ COND_PIPE='(^|[[:space:]])(if|elif|&&|\|\|)[[:space:]].*\|[[:space:]]*(grep[[:sp
 VIOLATIONS=0
 CHECKED=0
 
-mapfile -t SCRIPTS < <(git ls-files '*.sh')
+# Tracked scripts AND untracked-but-not-ignored ones.
+#
+# `git ls-files` alone lists only what is in the index. A script added to the
+# working tree but not yet staged would then be invisible to this check, and
+# the check would report a clean result over a smaller file set than the reader
+# assumes. That happened during Phase 1: two new scripts were analysed as clean
+# while they were untracked, and one of them was in violation.
+mapfile -t SCRIPTS < <( { git ls-files '*.sh'; git ls-files --others --exclude-standard '*.sh'; } | sort -u )
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   printf 'fatal: no shell scripts are tracked — nothing was checked\n' >&2
   exit 2

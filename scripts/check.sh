@@ -129,7 +129,10 @@ require "staticcheck ./..."   staticcheck   staticcheck ./...
 # --severity=style is the strictest level ShellCheck offers. Findings are fixed
 # rather than silenced; the handful of inline `disable=` directives in this tree
 # each carry a written reason on the line above.
-mapfile -t SHELL_FILES < <(git ls-files '*.sh')
+# Tracked scripts AND untracked-but-not-ignored ones. `git ls-files` alone
+# lists only the index, so a new script would be analysed as clean simply by
+# not having been staged yet — a check that quietly narrows its own scope.
+mapfile -t SHELL_FILES < <( { git ls-files '*.sh'; git ls-files --others --exclude-standard '*.sh'; } | sort -u )
 if [ "${#SHELL_FILES[@]}" -eq 0 ]; then
   blocked "shellcheck (all scripts)" "no shell scripts are tracked — nothing would be analysed"
 else

@@ -204,6 +204,12 @@ VERDICT=$?
 
 if [ "$VERDICT" -eq 2 ]; then
   printf '          govulncheck exit status was %d\n' "$GV_RC"
-  [ -s "$ERR" ] && sed 's/^/          /' "$ERR" | head -15
+  if [ -s "$ERR" ]; then
+    # Written as a plain block rather than `[ -s ... ] && sed ... | head`: a
+    # pipeline after `&&` is an action, but it reads like a condition, and
+    # scripts/tests/pipefail-sigpipe-test.sh cannot tell the difference. The
+    # ambiguity is the problem, so it is removed rather than annotated.
+    sed 's/^/          /' "$ERR" | head -15
+  fi
 fi
 exit "$VERDICT"
