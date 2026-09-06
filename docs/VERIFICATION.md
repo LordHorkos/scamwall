@@ -1,15 +1,4 @@
-| `8d49971` | fix(gates): test govulncheck output for validity, not truthiness |
-| `cff75be` | fix(gates): require the gitleaks finding count to be a number |
-| `cff75be` | fix(gates): require the gitleaks finding count to be a number |
-### 3.1 Detail by requirement
-
-Section numbers written as "suite §N" below refer to the numbered case groups
-inside `scripts/tests/runtime-verify-test.sh`, not to sections of this document.
-
-Section numbers written as "suite §N" below refer to the numbered case groups
-inside `scripts/tests/runtime-verify-test.sh`, not to sections of this document.
-
-| Requirement |# ScamWall Verification Record
+# ScamWall Verification Record
 
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
@@ -51,7 +40,7 @@ Three rules govern what may appear here.
 | --- | --- |
 | Branch | `feat/phase-1-core` |
 | Session start | `2edb95a07567f4ebf9d6bc1bcb6c1ff01f5decc8` (tree `546ad23`) |
-| Evidence commit | `54b56abfbdb876cfe7296e559dd65031cf2c71f9` |
+| Evidence commit | `0b083cbf` — *fix(verify): attribute resources and complete the runtime assertions* |
 
 Commits between the two:
 
@@ -65,10 +54,15 @@ Commits between the two:
 | `8d49971` | fix(gates): test govulncheck output for validity, not truthiness |
 | `cff75be` | fix(gates): require the gitleaks finding count to be a number |
 | `54b56ab` | fix(gates): broaden the SIGPIPE guard, and stop it exempting itself |
+| `b469c59` | docs: add the phased plan, requirements matrix, and verification record |
+| `204fd4d` | build: prove static linkage by checked ELF inspection |
+| `0b083cb` | fix(verify): attribute resources and complete the runtime assertions |
 
-All results in §3 were produced against `54b56ab`, the last commit that changes
-any gate input. They are **not** valid for `2edb95a`; §4.1, §4.2, §4.3 and §4.5
-describe defects present at that commit.
+All results in §3 were produced against `0b083cb`, the last commit that changes
+any gate input. They are **not** valid for earlier commits: §4.1 – §4.5
+describe defects present at `2edb95a`, and §4.7 describes ten defects present
+at `b469c59` — including in the runtime verifier as it stood there, which is
+the version an operator would have run had it been executed.
 
 The commit carrying this document changes documentation only. That does not
 invalidate the results above, and the rule is worth stating rather than
@@ -110,9 +104,11 @@ independent-scanner evidence exists for earlier commits.
 
 ### 2.3 Test inventory
 
-124 Go test functions across all seven packages, plus three shell test suites
-(runtime-verify, secret-scan controls, pipefail/SIGPIPE). No fuzz targets exist
-yet; fuzzing is a Phase 3 requirement (SW-P3-08).
+129 Go test functions across eight packages, plus three shell test suites
+(runtime-verify with 237 cases, secret-scan controls, pipefail/SIGPIPE). The
+counts moved this session: `internal/buildcheck/elfcheck` is new (5 functions,
+the ELF controls), and the runtime-verify suite grew from 47 cases to 237. No
+fuzz targets exist yet; fuzzing is a Phase 3 requirement (SW-P3-08).
 
 ---
 
@@ -120,10 +116,12 @@ yet; fuzzing is a Phase 3 requirement (SW-P3-08).
 
 ### 3.0 Run identity
 
-Run against a fresh `--local` clone of commit **`54b56ab`** on
+Run against a fresh `--local` clone of commit **`0b083cb`** on
 `feat/phase-1-core`, with the tools in §2.2, as user `scamwall`. A clone is used
 so the working-tree gate is evaluated against a genuinely clean checkout rather
-than against a tree holding this document.
+than against a tree holding this document. The deployment `.env` is gitignored,
+so it is copied into the clone; it is the same file the operator's deployment
+uses, and it contains a group id and nothing else.
 
 Command: `bash scripts/check.sh`
 
@@ -183,44 +181,66 @@ See §6.
 
 ### 3.1 Detail by requirement
 
-Section numbers written as "suite §N" below refer to the numbered case groups
-inside `scripts/tests/runtime-verify-test.sh`, not to sections of this document.
+Case groups in `scripts/tests/runtime-verify-test.sh` are named, not numbered;
+they are referred to below by the title printed when the suite runs.
 
 | Requirement | Evidence | Verdict |
 | --- | --- | --- |
-| SW-P1-01 | `scripts/tests/runtime-verify-test.sh`, 61 cases, all passing | VERIFIED |
-| SW-P1-02 | Same suite §11: the verifier succeeds with a `git` on `PATH` that exits 128 on every call, and the git-log fixture stays empty | VERIFIED |
-| SW-P1-03 | Same suite §3–§4: failed inspect, history, export, create, and both malformed and empty JSON each produce a nonzero verifier exit | VERIFIED |
-| SW-P1-04 | Same suite §4: `[]` and non-JSON are rejected before any field is read | VERIFIED |
-| SW-P1-05 | Same suite §5–§7 against the scripted fake — **but no run against a real image** | Partly VERIFIED, BLOCKED on §6.1 |
-| SW-P1-06 | Same suite §2, §9: the command log shows removal of exactly the two containers this run created, every `compose down` scoped to `scamwall-verify-<pid>`, and no reference to the pre-existing container | VERIFIED |
-| SW-P1-07 | Coverage map in §3.2 | VERIFIED |
+| SW-P1-01 | `scripts/tests/runtime-verify-test.sh`, 237 cases, all passing | VERIFIED |
+| SW-P1-02 | *no git dependency*: the verifier succeeds with a `git` on `PATH` that exits 128 on every call, the git-log fixture stays empty, and no git command appears in the comment-stripped source | VERIFIED |
+| SW-P1-03 | *absence versus search failure*: failed inspect, history, export, `docker create`, `compose ps`, container listing, configuration resolution, and both malformed and empty JSON each produce a nonzero exit | VERIFIED |
+| SW-P1-04 | *incomplete and malformed inspection data*: `[]`, non-JSON, a non-array image inspection, a non-digest image identifier, and twelve structurally valid documents with a required field deleted are each rejected before any conclusion is drawn | VERIFIED |
+| SW-P1-05 | *image identity*, *mounts*, *tmpfs bounds*, *logging bounds*, *API hostname pinning*, *supplementary group*, *hardening regressions* against the scripted fake — **but no run against a real image** | Partly VERIFIED, BLOCKED on §6.1 |
+| SW-P1-06 | *resource ownership* and *cleanup as a verdict*: the command log shows removal of exactly the resources this run created, every listing filtered by a label unique to this invocation, no `compose down` at all, and no reference to any pre-existing resource | VERIFIED |
+| SW-P1-07 | Coverage map in §3.2; pre-fix comparison in §3.5 | VERIFIED |
 | SW-P1-08 | `shellcheck --severity=style` over all 10 tracked scripts, clean | VERIFIED |
 | SW-P1-09 | §4.2 | VERIFIED |
 | SW-P1-10 | §5 | VERIFIED |
 | SW-P1-11 | §4.3 | VERIFIED |
-| SW-P1-12 | `.github/workflows/gates.yml`, reviewed in §3.4 | VERIFIED as written; never executed |
-| SW-P1-13 | `go test -race -count=1 ./...` passes; 124 test functions; no test removed or weakened | VERIFIED |
+| SW-P1-12 | `.github/workflows/gates.yml`, reviewed in §3.4. Review is not execution | **BLOCKED** on §6.3 |
+| SW-P1-13 | `go test -race -count=1 ./...` passes; 129 test functions; no test removed or weakened | VERIFIED |
 | SW-P1-14 | §4.1 | VERIFIED |
 | SW-P1-15 | `cmd/scamwall/main_test.go`, 15 test functions, all passing | VERIFIED |
+| SW-P1-16 | *cleanup as a verdict*: ordering (cleanup precedes the verdict line), failed container removal, failed network removal, TERM mid-run, mid-run verification failure, and exactly one removal attempt per resource | VERIFIED |
+| SW-P1-17 | *resource ownership*: container and network collisions block creation; a coexisting deployment is never listed or touched; partial creation is cleaned up by attribution; an unattributable resource is preserved and reported | VERIFIED |
+| SW-P1-18 | *consistent Compose configuration*: all three Compose operations carry the same `--env-file` and project name; a `.env` value deliberately different from the resolved value is not used; resolution and parse failures block the run | VERIFIED |
+| SW-P1-19 | *mounts*: thirteen cases covering empty, absent, missing, extra, duplicated, writable, wrong-source, wrong-type and prohibited mounts, plus a pre-fix control | VERIFIED |
+| SW-P1-20 | §3.6 — the ELF controls pass; the in-build assertion has never been executed | **BLOCKED** on §6.1 |
 
 ### 3.2 SW-P1-07 coverage map
 
-Each required false-pass class, and the case that reproduces it:
+Each required false-pass class, and the case that reproduces it. "Case group"
+is the heading the suite prints.
 
 | Required class | Case |
 | --- | --- |
-| Failed create with existing containers | §2 — `compose create` fails while `ps -aq` would return a container; nonzero exit, no container assertion claimed, the existing container neither adopted nor removed |
-| Failed inspect | §3 — `docker inspect` exits 1 |
-| Failed history | §3 — `docker history` exits 1 **and writes benign text to stdout**, so a verifier reading output rather than status would have passed |
-| Failed export | §3 — `docker export` exits 1; reported as path absence UNPROVEN |
-| Failed parsing | §4 — unparseable container JSON, empty array, unparseable image JSON |
-| Image mismatch | §5 — container `.Image` differs from the resolved ID; and resolved ID differs from `SCAMWALL_EXPECTED_IMAGE_ID` |
-| Forbidden mounts | §6 — `docker.sock` and `/etc/pihole` visible only through `.Mounts` and **not** through `.HostConfig.Binds`, which is the representation the earlier Binds-only check missed; plus a writable mount |
-| Daemon unavailability | §10 — `docker info` fails, and a missing compose plugin |
-| Cleanup safety | §9 — containers created by the run are removed, `compose down` is always project-scoped, the deployment project is never targeted, and cleanup still runs when verification fails part-way |
-
-Plus 13 hardening regressions (§7) and three filesystem-enumeration cases (§8).
+| Forbidden paths without a leading `./` | *filesystem path matching* — six archives whose members are written unprefixed (`bin/sh`, `usr/bin/bash`, `etc/shadow`, `etc/passwd`, `usr/sbin/apt-get`, `bin/busybox`); each is detected |
+| Forbidden paths with a leading `./` | Same group — an archive written as `./bin/sh` |
+| Look-alike paths must not match | Same group — `usr/local/bin/scamwall-helper`, `opt/sh`, `etc/passwd.bak`, `etc/shadow.example`, `usr/share/doc/bash/README`, `home/someone/bin/sh.txt`, `var/lib/apt-cache`: the run passes and absence is still asserted |
+| Failed cleanup | *cleanup as a verdict* — `docker rm` and `docker network rm` each made to fail; the run exits nonzero and names what remains |
+| Interruption cleanup | Same group — the fake daemon delivers SIGTERM mid-inspection; cleanup runs once and the exit is nonzero |
+| Idempotent cleanup | Same group — exactly one removal attempt per resource across EXIT and TERM |
+| Resource-name collision | *resource ownership* — a container, and separately a network, already carrying this invocation's project label: nothing is created, nothing is deleted |
+| Unrelated resource preservation | Same group — a coexisting deployment resource; no unfiltered listing is ever performed, and the deployment project is never named |
+| Partial Compose creation | Same group — `compose create` fails after the network exists; the network is removed by attribution, no container assertion is claimed |
+| Failed create with an existing container | Same group — a pre-existing container is neither adopted nor removed |
+| Consistent `.env` handling | *consistent Compose configuration* — every Compose operation carries the same `--env-file` and project |
+| Interpolation from structured configuration | Same group — the `.env` gid (4242) differs from the resolved gid (5150); the resolved value must be used |
+| Isolation-escaping configuration | Same group — `container_name`, an external network, an extra service, and a lost ownership label each block creation |
+| Missing / additional / duplicated / writable / incorrect mounts | *mounts* — thirteen cases, plus a pre-fix control showing empty `.Mounts` satisfied the superseded assertions |
+| Missing inspection fields | *incomplete and malformed inspection data* — twelve required fields deleted one at a time |
+| Malformed JSON | Same group — non-JSON, `[]`, a non-array image inspection |
+| Image tag movement | *image identity* — the container records a different image than the tag resolved to |
+| Image identity mismatch | Same group — mismatch, malformed pin, non-digest identifier; and an equivalent identifier that resolves to the same image is accepted with both values reported |
+| Immutable identity used throughout | Same group — the log shows `history` and `docker create` addressed by image ID, and no image operation using the tag |
+| Failed history search | *absence versus search failure* — `docker history` exits 1 **and writes benign text to stdout**, so a verifier reading output rather than status would have passed |
+| Other search errors | Same group — `search_file` returns three distinct outcomes, and `count_matches` reports a failed search rather than a zero count; both with pre-fix controls |
+| Missing / incorrect hostname pinning | *API hostname pinning* — absent, wrong address, a second conflicting entry, absent in configuration, a different hostname; an IPv6 pin is accepted |
+| Missing, invalid or unbounded logging | *logging bounds* — nine configuration cases and two container-disagreement cases |
+| Invalid tmpfs bounds | *tmpfs bounds* — ten cases, including three that contain the literal `size=` and are still rejected |
+| Static and dynamic ELF controls | `internal/buildcheck/elfcheck/main_test.go`; §3.6 |
+| No application execution | *no application execution* — the log contains no start, up, run or exec; five state mutations are each detected; the comment-stripped verifier contains no start operation |
+| Daemon unavailability | *daemon availability* — `docker info` fails, and a missing compose plugin |
 
 ### 3.3 Determinism (SW-P1-14)
 
@@ -252,8 +272,17 @@ environment cannot run GitHub Actions.
 The YAML was parsed with `gopkg.in/yaml.v3` to confirm it is well-formed and
 that `permissions` resolves to `map[contents:read]`.
 
-**Not evidence of a passing CI run.** No run has occurred. Pushing is outside
-the authorisation for this work.
+**This is a review, and a review is not an execution.** Three things are
+routinely conflated, so they are separated here:
+
+| Level | State |
+| --- | --- |
+| Implementation review — the file read property by property against the requirement | DONE, above |
+| Local simulation — the same GATE LIST executed locally by `scripts/check.sh` (§3.0) | DONE, and it says nothing about `permissions:`, action pinning, the runner image, or fork-PR secret handling, because none of those exist locally |
+| Hosted CI run — the workflow itself executed on GitHub, with a run URL and log | **NOT DONE** |
+
+SW-P1-12 is therefore **BLOCKED**, not "VERIFIED as written". No run has
+occurred; pushing is outside the authorisation for this work. §6.3.
 
 ### 3.5 Deliberate failure injection
 
@@ -299,6 +328,95 @@ without checking the input — and doing so here would have meant weakening a
 working control to satisfy a broken test.
 
 ---
+
+**The runtime-verify suite run against the PRE-FIX implementation.** A suite
+that passes proves only that the code agrees with itself. To show these 237
+cases actually discriminate, the corrected suite was run against the verifier
+as it stood at `b469c59` — the version an operator would have executed had the
+pasted candidate been verified.
+
+Method: a tree containing `b469c59`'s `scripts/container-runtime-verify.sh`,
+`container/Dockerfile` and `deploy/compose/compose.yaml`, with the corrected
+`scripts/tests/runtime-verify-test.sh` and the same `.env`.
+
+| Run | Result |
+| --- | --- |
+| Corrected verifier, corrected suite (`0b083cb`) | **237 cases, 0 failed** |
+| Pre-fix verifier, corrected suite, fixtures unchanged | **237 cases, 61 failed** |
+| Pre-fix verifier, corrected suite, fixtures neutralised so its own baseline is clean | **236 cases, 112 failed** |
+
+The second row understates the picture: with the `.env`/resolved-configuration
+divergence in place the pre-fix verifier fails every run for that one reason,
+which masks its other defects behind an unrelated failure. The third row
+removes that mask — the `.env` gid is made to agree, and the runtime-managed
+`/tmp` entry (which the pre-fix verifier had no concept of) is removed from the
+container fixture — so the pre-fix baseline passes and each remaining failure
+is a defect of its own. Those 112 include, as **false passes** that the pre-fix
+implementation did not detect at all:
+
+* all six unprefixed forbidden paths — `bin/sh`, `usr/bin/bash`, `etc/shadow`,
+  `etc/passwd`, `usr/sbin/apt-get`, `bin/busybox`;
+* an empty `.Mounts`, a missing configuration mount, a missing password mount,
+  an extra mount, a duplicated destination, a wrong source, a wrong type;
+* every tmpfs bound case, including `size=0`, `size=999g`, `size=`, `size=abc`
+  and an `exec` option re-enabling execution;
+* every logging case — no logging configuration, an unbounded remote driver, a
+  missing, zero, oversized or non-numeric bound, and a container disagreeing
+  with the configuration;
+* every hostname-pinning case — absent, wrong, duplicated, or absent from the
+  configuration;
+* a non-numeric and a multiple supplementary group;
+* a container reported as running, with a pid, with a start time, or with a
+  restart count;
+* a project-label collision, an isolation-escaping `container_name`, an
+  external resource, an extra service, and a lost ownership label;
+* a failed cleanup, an interrupted cleanup, and cleanup ordering;
+* a failed container listing reported as "no containers".
+
+The full transcript of both runs is reproducible with the method above; the
+recorded outcome is the three rows in the table.
+
+### 3.6 ELF linkage controls (SW-P1-20)
+
+`go test ./internal/buildcheck/elfcheck/` — 5 test functions, 5 subtests, all
+passing, run as part of `go test -race ./...` in §3.0.
+
+| Control | Input | Expected | Observed |
+| --- | --- | --- | --- |
+| positive | a `CGO_ENABLED=0` Go build, compiled by the test | accepted | accepted |
+| negative | a hand-built ELF64 executable carrying `PT_INTERP` | rejected, naming the interpreter property | as expected |
+| negative | a hand-built ELF64 executable carrying `PT_DYNAMIC` | rejected, naming the dynamic-segment property | as expected |
+| negative | a dynamically linked system binary, when the host has one | rejected | as expected (`/bin/ls`) |
+| malformed | missing file, empty file, non-ELF bytes, truncated ELF header, a directory | each rejected | as expected |
+
+Observed directly against real artifacts, outside the test:
+
+```
+$ go run ./internal/buildcheck/elfcheck <CGO_ENABLED=0 build of ./cmd/scamwall>
+  ok   object type is executable    observed: ET_EXEC
+  ok   no PT_INTERP segment         observed: none
+  ok   no .interp section           observed: none
+  ok   no PT_DYNAMIC segment        observed: none
+  ok   no SHT_DYNAMIC section       observed: none
+  ok   no DT_NEEDED entries         observed: none
+  ok   no imported libraries        observed: none
+exit 0
+
+$ go run ./internal/buildcheck/elfcheck /bin/ls
+  FAIL no PT_INTERP segment         observed: PT_INTERP present
+  FAIL no DT_NEEDED entries         observed: [libselinux.so.1 libcap.so.2 libc.so.6]
+exit 1
+```
+
+**Scope.** This proves the inspected file carries no dynamic interpreter and no
+dynamic linking apparatus. It does not prove the binary is safe, contains no
+embedded secret, or was built from this source.
+
+**What is still missing.** The assertion has never run inside a `docker build`,
+because no build can be executed from this account. Until it has, SW-P1-20 is
+BLOCKED: the controls prove the checker works, not that the shipped build ran
+it.
+
 
 ## 4. Findings raised by this session
 
@@ -589,6 +707,123 @@ exist yet. Deliberately excluding per-run timestamps from the digest is correct
 and should survive: a digest that changed without the plan changing would be
 useless for review.
 
+### 4.7 FINDING-06 … FINDING-16 — the runtime verifier at `b469c59`
+
+Eleven defects found by review of the verifier as it stood at `b469c59`, before
+it had ever been executed against a real image. Every one of the first ten is a
+FALSE PASS: the program could report a security property as satisfied without
+having observed it. Each was reproduced as a regression case first; §3.5 records
+the pre-fix comparison.
+
+**FINDING-06 — the filesystem absence expressions could not match an ordinary
+archive entry.** *Severity: high.* Every absence pattern began with `^\./?`,
+which REQUIRES a leading dot. `docker export | tar -t` writes members either as
+`./bin/sh` or as `bin/sh` depending on how the archive was produced, and for the
+unprefixed shape the patterns matched nothing at all: "no shell at checked
+paths", "no busybox", "no package manager", "no libc", "no /etc/passwd" and "no
+/etc/shadow" all passed while the files were present. The trust anchor did not
+help — it used the same permissive alternation and matched either shape.
+*Fixed:* the listing is normalised once (leading `./` or `/` removed) and
+matched against unprefixed patterns. Six unprefixed cases, one prefixed case, a
+seven-path look-alike control set, and a pre-fix control that asserts the
+superseded expression misses `bin/sh`.
+
+**FINDING-07 — cleanup was not part of the verdict.** *Severity: high.* The
+success summary was printed BEFORE cleanup ran, and every cleanup error was
+discarded (`docker rm -f ... >/dev/null 2>&1`, `return 0`). A run that left
+containers and a network behind reported "all required runtime checks passed"
+and exited 0. *Fixed:* cleanup completes first, its failures count towards the
+verdict and force a nonzero exit, remaining resources are named by identifier
+only, and at most one destructive attempt is made per resource across
+EXIT/INT/TERM.
+
+**FINDING-08 — resources were deleted on the strength of a PID.** *Severity:
+high.* `scamwall-verify-$$` is not proof of ownership: PIDs are small, reused
+and guessable, so a stale or unrelated resource could carry this run's project
+name and be destroyed by `compose down -p`. Worse, `compose create` ADOPTS a
+container that already carries the project label rather than creating one, so a
+colliding container could have been inspected in place of the verifier's own.
+*Fixed:* 128 bits from `/dev/urandom`, recorded resource IDs, a per-invocation
+ownership label applied through a Compose override, a pre-creation snapshot that
+turns any collision into a refusal to create or delete anything, removal by
+exact ID after re-verifying the label, and no project-wide deletion at all.
+
+**FINDING-09 — configuration features that escape project isolation were never
+examined.** *Severity: medium.* A private project name isolates only what
+Compose names after the project. `container_name`, `external: true` networks,
+volumes or secrets, and additional services do not follow that rule. The
+verifier neither checked for them nor would have attributed the resources they
+produce. *Fixed:* the resolved configuration is inspected for all of them, and
+any occurrence blocks the run before anything is created.
+
+**FINDING-10 — creation and cleanup used different Compose arguments.**
+*Severity: medium.* Creation passed `--env-file`; cleanup did not. The two
+commands could therefore be describing different deployments — and the one that
+DELETES was the one running with less information. *Fixed:* one argument set
+resolves, creates and lists, and cleanup no longer uses Compose at all.
+
+**FINDING-11 — expected settings were re-derived by grepping `.env`.**
+*Severity: medium.* The expected supplementary group was extracted with `grep`,
+`${line#*=}` and hand-rolled quote stripping. That reimplements Compose's
+interpolation — shell environment over `.env`, `${VAR:-default}` forms,
+quoting, precedence — and gets it wrong in exactly the cases that matter,
+silently producing an expectation the deployment never had. *Fixed:* every
+expected value is read from `docker compose config` and then validated
+separately against the security requirement. The regression suite sets the
+`.env` value (4242) DIFFERENT from the resolved value (5150) so a return to the
+old method fails immediately.
+
+**FINDING-12 — an absent or empty `.Mounts` satisfied every mount
+assertion.** *Severity: high.* "Every mount is read-only" and "no prohibited
+mounts" were both computed as "the filtered list is empty", so a container with
+no `.Mounts` at all passed both without a single mount being examined — and
+nothing checked that the configuration, feed, CA and password mounts were
+present. *Fixed:* `.Mounts` must be a non-empty array, and the observed set must
+equal the set derived from the resolved configuration — type, resolved source,
+destination, read-only status — with no missing, extra or duplicated
+destination. The runtime-managed `/tmp` tmpfs is the one named exception and is
+validated separately from `HostConfig.Tmpfs`.
+
+**FINDING-13 — image operations used the mutable tag after resolving the
+immutable ID.** *Severity: medium.* The ID was resolved and then `docker
+history` and `docker create` were both given the TAG again, so a tag repointed
+between operations would have had a different image scanned and enumerated
+while the report named the first. *Fixed:* the resolved ID is validated as a
+sha256 digest and used for every later operation; the container's `.Image` is
+compared against it; a difference is re-resolved through the daemon before
+being called a mismatch, because image stores do not all record the same
+identifier for the same image; and what each identifier means is printed.
+
+**FINDING-14 — a search that could not run was reported as a clean result.**
+*Severity: high.* `grep -qiE ... "$HISTORY_OUT"` treated exit 2 — grep itself
+failing — identically to exit 1, so an unperformed credential scan produced
+"PASS no credential pattern in image build instructions". The same shape
+appeared in the filesystem trust anchor. *Fixed:* every search distinguishes
+matched / did not match / could not search, and the third is a failure. The
+helper is exercised directly, with a pre-fix control showing the superseded
+shape collapsing the third outcome into the second.
+
+**FINDING-15 — several required deployment properties were unasserted, and
+others were asserted by substring.** *Severity: medium.* The API hostname pin
+was never checked against the container at all. The log driver and its bounds
+were never checked. `test("size=")` proved only that three letters were present:
+`size=0`, `size=999g`, `size=` and `size=abc` all passed. The supplementary
+group was compared but never validated, so `0` — root's group — would have been
+accepted from a malformed `.env`. Nothing asserted positively that no
+application had run. *Fixed:* pinning is asserted exactly against the resolved
+address, tmpfs and log options are parsed and bounded, the group must be a
+single non-root numeric gid, and created-not-running is asserted through five
+independent fields. Missing required fields fail rather than being defaulted.
+
+**FINDING-16 — the verification record's own file was corrupted.** *Severity:
+low, but it is a record of evidence.* `docs/VERIFICATION.md` as committed at
+`b469c59` began with eleven stray lines — fragments of the §2.1 commit table and
+the §3.1 heading, duplicated — and its title line had been concatenated onto a
+`| Requirement |` fragment. The document rendered as a broken table before its
+own heading. *Fixed:* the stray prefix is removed and the title restored; no
+other content was lost, since every fragment was a duplicate of text that
+appears correctly later in the file.
+
 ---
 
 ## 5. Critical Go path review (SW-P1-10)
@@ -774,7 +1009,7 @@ bound, so that a later change does not quietly step outside them.
 
 ## 6. Blocked items and operator commands
 
-### 6.1 Runtime verification against a real image (SW-P1-05)
+### 6.1 Runtime verification against a real image (SW-P1-05, SW-P1-20)
 
 **Blocker.** The service account is not in the `docker` group and has no
 passwordless sudo. By operator decision this stays that way: `docker` group
@@ -783,41 +1018,100 @@ filesystem into a container. Docker operations are operator-executed.
 
 **Consequence.** Every runtime assertion is currently evidenced against a
 scripted fake Docker. That proves the *verifier* behaves correctly. It does not
-prove anything about a built ScamWall image.
+prove anything about a built ScamWall image. The same applies to the ELF
+linkage assertion (SW-P1-20): its controls pass, but it has never run inside a
+build.
 
-**Operator commands.** Run from the repository root. The verifier needs no git,
-so root can run it in this `scamwall`-owned tree without a `safe.directory`
-exception — do not add one.
+**About the image already built.** `sha256:d3c4ed2c…`, built from source
+`b469c592`, is recorded in `docs/REQUIREMENTS_MATRIX.md` §2. It is not evidence
+for anything here: it predates every fix in `0b083cb`, and no verifier was run
+against it. Build again from the current commit.
+
+**Two accounts, deliberately.** Git metadata is read as `scamwall`, because the
+repository is owned by `scamwall` and git refuses to operate in another user's
+tree; Docker is used by the operator, because only the operator can reach the
+daemon. Neither side is given the other's access: **do not** add a
+`safe.directory` exception, change repository ownership, or put `scamwall` in
+the `docker` group.
 
 ```bash
-cd /home/scamwall/scamwall
+# Run as the operator (the account with Docker access), from anywhere.
+set -u
+REPO=/home/scamwall/scamwall
 
-# 1. Build.
+# ---- 1. Source identity, read AS scamwall -------------------------------
+# git is run under the owning account so no ownership exception is needed.
+COMMIT="$(sudo -u scamwall git -C "$REPO" rev-parse HEAD)"
+DESCRIBE="$(sudo -u scamwall git -C "$REPO" describe --tags --always --dirty)"
+DIRTY="$(sudo -u scamwall git -C "$REPO" status --porcelain | wc -l)"
+printf 'SOURCE COMMIT=%s\nDESCRIBE=%s\nUNCOMMITTED FILES=%s\n' \
+  "$COMMIT" "$DESCRIBE" "$DIRTY"
+# UNCOMMITTED FILES must be 0. A dirty tree means the image cannot be tied
+# to a commit, and the evidence would be untraceable.
+
+# ---- 2. Build, through the operator's Docker access ----------------------
 docker build \
-  -f container/Dockerfile \
+  -f "$REPO/container/Dockerfile" \
   -t scamwall:local \
-  --build-arg VERSION="$(git describe --tags --always --dirty)" \
-  --build-arg COMMIT="$(git rev-parse --short HEAD)" \
+  --build-arg VERSION="$DESCRIBE" \
+  --build-arg COMMIT="$COMMIT" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  .
+  "$REPO"
+printf 'BUILD exit=%s\n' "$?"
+# This build EXECUTES the ELF linkage assertion (SW-P1-20). A dynamically
+# linked binary fails the build here rather than at run time.
 
-# 2. Record the image ID. Evidence is tied to this, not to the tag.
-docker image inspect -f '{{.Id}}' scamwall:local
+# ---- 3. Image identity --------------------------------------------------
+IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)"
+printf 'IMAGE ID=%s\n' "$IMAGE_ID"
+# Evidence is tied to this, not to the tag.
 
-# 3. Verify, pinning the expected ID so a stale local tag cannot stand in.
-SCAMWALL_EXPECTED_IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)" \
-  bash scripts/container-runtime-verify.sh
-echo "VERIFY exit=$?"
+# ---- 4. Verify, pinned to that image ------------------------------------
+# The pin means a tag that moves between these two commands cannot substitute
+# another image. The verifier creates a container but never starts one: it
+# uses `docker compose create` and `docker create` only, so the authenticated
+# application does not run and no credential is used.
+SCAMWALL_EXPECTED_IMAGE_ID="$IMAGE_ID" \
+  bash "$REPO/scripts/container-runtime-verify.sh" 2>&1 | tee /tmp/scamwall-verify.log
+VERIFY_RC="${PIPESTATUS[0]}"
+printf 'VERIFY exit=%s\n' "$VERIFY_RC"
 ```
 
-Exit 0 means every required check ran and passed. Any nonzero exit means at
-least one check failed **or could not run**; the output distinguishes the two.
-The verifier creates its inspection container under a Compose project private to
-the invocation and removes only what it created, so a running deployment is not
-disturbed.
+`VERIFY_RC` is the exit status of the verifier itself, not of `tee` — that is
+what `PIPESTATUS[0]` is for. Reading `$?` after a pipeline would report `tee`'s
+status, which is 0 almost always, and would turn a failed verification into a
+green result.
 
-Please return: the image ID from step 2, and the complete output plus exit
-status from step 3. Both will be recorded here against that image ID.
+**What the verifier does to the host.** It creates two containers and one
+network under a Compose project named `scamwall-verify-<128 random bits>`,
+starts neither, and removes exactly what it created. It refuses to create
+anything if a resource already carries that project name, it never issues a
+project-wide `compose down`, every resource query is filtered by a label unique
+to the invocation, and any resource it cannot attribute to itself is left in
+place and reported. **A running deployment is not stopped, removed, inspected,
+or adopted.** If the run is interrupted, cleanup still completes; if cleanup
+fails, the exit status is nonzero and the remaining identifiers are printed.
+
+**Interpreting the result.**
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | every required check ran and passed, AND cleanup completed |
+| 1 | at least one check failed, could not run, or required cleanup failed — the output distinguishes `FAIL`, `BLOCKED` and `CLEANUP` |
+| 2 | the script was invoked wrongly, or the directory is not a ScamWall checkout |
+
+**Please return, verbatim:**
+
+1. the `SOURCE COMMIT`, `DESCRIBE` and `UNCOMMITTED FILES` lines from step 1;
+2. the `BUILD exit` line, and the last ~40 lines of build output — they contain
+   the ELF assertion's report, which is SW-P1-20's evidence;
+3. the `IMAGE ID` line from step 3;
+4. the complete contents of `/tmp/scamwall-verify.log`, and the `VERIFY exit`
+   line.
+
+All four will be recorded here against that image ID. Partial output is not
+usable: the verifier's value is that it distinguishes "passed", "failed" and
+"could not run", and a truncated log loses exactly that distinction.
 
 ### 6.2 Live Pi-hole read (SW-P2-04, and Phase 2 generally)
 
@@ -828,8 +1122,14 @@ permissions**, explicitly not proven access — see `docs/SECURITY_BOUNDARIES.md
 
 ### 6.3 CI execution (SW-P1-12)
 
-The workflow is reviewed but never executed. Running it requires a push, which
-is outside the authorisation for this work.
+The workflow is reviewed (§3.4) but never executed. Running it requires a push,
+which is outside the authorisation for this work.
+
+To close SW-P1-12 an operator must push the branch and return the run URL, the
+tool-version step's output, and the per-gate outcome from that run's log. A
+local `scripts/check.sh` run does not substitute: it exercises the gates, not
+the workflow, and says nothing about `permissions:`, action pinning, the runner
+image, or fork-pull-request secret handling.
 
 ---
 
@@ -839,10 +1139,12 @@ Stated plainly so that nothing here is read as more than it is.
 
 | Claim | Status |
 | --- | --- |
-| The ScamWall container image satisfies its runtime hardening assertions | **Not established.** Verifier behaviour is proven; the image is not. §6.1 |
+| The ScamWall container image satisfies its runtime hardening assertions | **Not established.** Verifier behaviour is proven against a scripted daemon; no image has been verified. The corrected verifier has never been run at all. §6.1 |
+| The shipped binary is statically linked | **Not established.** The ELF checker and its controls pass (§3.6); the assertion has never run inside a `docker build`. §6.1 |
+| The image built by the operator from `b469c59` is verified | **Not established.** Its identity is recorded; no verifier ran against it, and it predates every fix in `0b083cb` |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |
-| The container identity can read the mounted secret | **Not established.** File modes are configured; no process has been observed reading it |
-| CI passes | **Not established.** Never run |
+| The container identity can read the mounted secret | **Not established.** File modes are configured; no process has been observed reading it. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read |
+| CI passes | **Not established.** Never run. §6.3 |
 | ScamWall detects scam domains accurately | **Not established, and not claimed.** `testdata/feed.json` is a synthetic fixture. It is evidence about signature verification and parsing, and about nothing else. Detection accuracy is Phase 4 and has not begun |
 
 The last row is the one most easily misread, so it is stated twice: a signed

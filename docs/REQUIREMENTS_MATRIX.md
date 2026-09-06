@@ -56,8 +56,9 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Item | Value |
 | --- | --- |
 | Branch | `feat/phase-1-core` |
-| Baseline commit | `2edb95a` — *fix(verify): rebuild runtime verification around checked operations* |
-| Baseline tree | `546ad23` |
+| Session baseline | `2edb95a` — *fix(verify): rebuild runtime verification around checked operations* (tree `546ad23`) |
+| Evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions* |
+| Operator-built candidate | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier has been run against this image.** It predates every fix in `0b083cb`, so it is an identity on record, not evidence |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -79,23 +80,36 @@ visible rather than silently absent.
 | --- | --- | --- |
 | SW-P1-01 | Container runtime verification is built from checked operations | VERIFIED |
 | SW-P1-02 | Repository verification and operator Docker verification are separate programs | VERIFIED |
-| SW-P1-03 | Every command and parse failure is checked explicitly | VERIFIED |
+| SW-P1-03 | Every command, search and parse failure is checked explicitly | VERIFIED |
 | SW-P1-04 | Assertions read only successfully captured structured output | VERIFIED |
-| SW-P1-05 | Exact image identity and deployment settings are verified | BLOCKED |
+| SW-P1-05 | Exact image identity and deployment settings are verified against a real image | BLOCKED |
 | SW-P1-06 | Inspection resources are isolated; only this invocation's resources are removed | VERIFIED |
 | SW-P1-07 | Regression tests cover the enumerated false-pass classes | VERIFIED |
 | SW-P1-08 | Shell scripts pass ShellCheck as a required gate | VERIFIED |
 | SW-P1-09 | An independent secret detector runs alongside the project-specific scanner | VERIFIED |
 | SW-P1-10 | Critical Go paths are reviewed and the review is recorded | VERIFIED |
 | SW-P1-11 | govulncheck results are handled by content, not by exit status alone | VERIFIED |
-| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | VERIFIED as written, never executed |
+| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | BLOCKED |
 | SW-P1-13 | Pre-existing functional, security, race, and offline-plan tests are preserved and rerun | VERIFIED |
 | SW-P1-14 | The gate suite is deterministic: no gate passes or fails at random | VERIFIED |
 | SW-P1-15 | The CLI's read-only guarantee is covered by a test | VERIFIED |
+| SW-P1-16 | Cleanup is part of the verdict: it completes first, it is idempotent, and its failure is nonzero | VERIFIED |
+| SW-P1-17 | Every resource is attributed to this invocation before it is deleted; pre-existing resources are preserved | VERIFIED |
+| SW-P1-18 | One resolved Compose configuration drives creation, listing and expectation | VERIFIED |
+| SW-P1-19 | The deployment's mounts are asserted exactly: presence, type, source, mode, no extras | VERIFIED |
+| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | BLOCKED |
 
-**Phase 1 is not complete.** Fourteen of fifteen requirements are verified;
-SW-P1-05 is BLOCKED on Docker daemon access, and a blocked required gate means
-the phase does not close. Operator commands: `docs/VERIFICATION.md` §6.1.
+**Phase 1 is not complete.** Seventeen of twenty requirements are verified.
+Three are BLOCKED and each needs an operator action, not more code:
+
+| Blocked | Needs | Operator command |
+| --- | --- | --- |
+| SW-P1-05 | a run of the verifier against a real built image, recording the image ID | `docs/VERIFICATION.md` §6.1 |
+| SW-P1-12 | one actual hosted CI run | `docs/VERIFICATION.md` §6.3 |
+| SW-P1-20 | one `docker build`, which executes the ELF assertion inside the build | `docs/VERIFICATION.md` §6.1 |
+
+A blocked required item means the phase does not close, however many of the
+others are green.
 
 ### SW-P1-01 — Runtime verification is built from checked operations
 
@@ -104,7 +118,7 @@ Docker operation as fallible. A failed operation produces `FAIL` or `BLOCKED`
 and a nonzero exit; it is never indistinguishable from a satisfied assertion.
 
 **Source.** `scripts/container-runtime-verify.sh`
-**Tests.** `scripts/tests/runtime-verify-test.sh` §3, §4, §10
+**Tests.** `scripts/tests/runtime-verify-test.sh` — the *absence versus search failure*, *incomplete and malformed inspection data* and *daemon availability* case groups
 **Evidence required.** The regression suite passes, and each deliberate failure
 injection yields a nonzero verifier exit.
 **Dependencies.** None.
@@ -123,7 +137,7 @@ needs no Docker group membership.
 **Source.** `scripts/container-security-check.sh` (repository, uses git);
 `scripts/container-runtime-verify.sh` (daemon, derives the repository root from
 `BASH_SOURCE` and confirms it by required files)
-**Tests.** `scripts/tests/runtime-verify-test.sh` §11 — the verifier is run with
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *no git dependency*: the verifier is run with
 a `git` on `PATH` that refuses every invocation, and must still succeed; a
 static check asserts no git command appears outside comments.
 **Evidence required.** Both assertions pass.
@@ -142,7 +156,7 @@ because assertions run over captured JSON rather than over command output.
 
 **Source.** `scripts/container-runtime-verify.sh` — `assert_eq`, `assert_true`,
 `assert_empty_list`, and the guarded capture sites.
-**Tests.** `scripts/tests/runtime-verify-test.sh` §3 (failed operations), §4
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *absence versus search failure* (failed operations and failed searches), *incomplete and malformed inspection data*
 (unparseable and empty JSON).
 **Evidence required.** Each injected failure yields nonzero exit and a report
 that names the operation, and no assertion is claimed as passed.
@@ -159,7 +173,7 @@ single-element JSON array before any field is read.
 
 **Source.** `scripts/container-runtime-verify.sh` — `CJSON`/`IMAGE_JSON`
 capture and the `jq -e 'type == "array" and length == 1'` gate.
-**Tests.** `scripts/tests/runtime-verify-test.sh` §4.
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *incomplete and malformed inspection data*.
 **Evidence required.** `[]` and non-JSON both produce nonzero exit.
 **Dependencies.** SW-P1-03.
 **Acceptance.** As above.
@@ -167,18 +181,32 @@ capture and the `jq -e 'type == "array" and length == 1'` gate.
 
 ### SW-P1-05 — Exact image identity and deployment settings
 
-**Intended behavior.** The requested image is resolved to its immutable image
-ID; the inspected container's `.Image` must equal that ID; and when
-`SCAMWALL_EXPECTED_IMAGE_ID` is set the resolved ID must equal it. Deployment
-settings — user, groups, capabilities, `no-new-privileges`, seccomp/AppArmor,
-init, read-only rootfs, mount read-only-ness, prohibited mounts, tmpfs flags,
-network mode, port bindings, and resource limits — are asserted against that
-container.
+**Intended behavior.** The requested image is resolved ONCE to its immutable
+image ID; that ID — never the tag — is used for image history and for creating
+the filesystem-enumeration container; the inspected deployment container's
+`.Image` must equal it; and when `SCAMWALL_EXPECTED_IMAGE_ID` is set the
+resolved ID must equal it. Deployment settings — user, supplementary group,
+capabilities, `no-new-privileges`, seccomp/AppArmor, init, read-only rootfs,
+the exact mount set, tmpfs options, hostname pinning, network mode, port
+bindings, log bounds and resource limits — are asserted against that container,
+against values derived from the resolved configuration.
+
+Compose creates from the tag written in the compose file, so the container's
+recorded image is what detects a tag repointed between resolution and creation.
+A difference is not assumed to be a mismatch: Docker's image stores do not all
+record the same identifier for the same image, so the container's identifier is
+re-resolved through the daemon and compared. Equivalence is accepted with both
+identifiers reported; anything else fails. What each field means — `.Id` the
+local image identifier, `.RepoDigests` registry manifest digests, a manifest
+list a different identifier entirely — is printed rather than assumed.
 
 **Source.** `scripts/container-runtime-verify.sh` — "image identity" and
 "deployment container" sections.
-**Tests.** `scripts/tests/runtime-verify-test.sh` §5 (identity), §6 (prohibited
-mounts through `.Mounts`), §7 (thirteen hardening regressions).
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *image identity* (mismatch,
+tag movement, equivalent identifier, malformed and non-digest identifiers, and
+a log assertion that no image operation uses the mutable tag), *mounts*,
+*tmpfs bounds*, *logging bounds*, *API hostname pinning*, *supplementary
+group*, *hardening regressions*.
 **Evidence required.** Two distinct artifacts:
 1. the regression suite against the scripted fake — *available now*; and
 2. **a real run against a real built image, recording the image ID** — this is
@@ -191,44 +219,84 @@ against.
 daemon and, by operator decision, will not be granted it. Operator commands:
 `docs/VERIFICATION.md` §6.1. (1) is VERIFIED.
 
-### SW-P1-06 — Isolated inspection resources and scoped cleanup
+*Note on the pasted candidate.* The operator's build of `b469c592` produced
+image `sha256:d3c4ed2c…`, and that is recorded. No verifier has been run
+against it. An image ID is an identity, not a result: until the corrected
+verifier is executed against that ID and its output returned, this row stays
+BLOCKED.
 
-**Intended behavior.** The verifier creates its inspection container under a
-Compose project name private to the invocation, and removes only resources that
-invocation created — including on failure and on interruption. A pre-existing
-deployment container is never stopped, removed, adopted, or inspected in place
-of the verifier's own.
+### SW-P1-06 — Attributable inspection resources and scoped cleanup
 
-**Source.** `scripts/container-runtime-verify.sh` — `VERIFY_PROJECT`,
-`CREATED_CONTAINERS`, `cleanup`, `trap ... EXIT INT TERM`.
-**Tests.** `scripts/tests/runtime-verify-test.sh` §2 (a failed create is not
-masked by an existing container, and that container is neither adopted nor
-removed) and §9 (cleanup scope, including mid-run failure).
-**Evidence required.** The fake-Docker command log shows removal of exactly the
-containers this run created, every `compose down` scoped to the private
-project, and no reference to the pre-existing container.
+**Intended behavior.** Every resource this invocation creates is attributable
+to it before it is deleted, and nothing else is touched.
+
+* The invocation identifier is UNPREDICTABLE (128 bits from `/dev/urandom`),
+  not `$$`. A PID is small, reused and guessable, so a stale resource could
+  carry a colliding project name.
+* Created resource IDs are recorded as they are created, and a per-invocation
+  ownership label is applied through a Compose override, so a resource left by
+  a partially completed creation is still attributable.
+* A snapshot is taken BEFORE anything is created. Any resource already carrying
+  the invocation's labels is a collision: nothing is created and nothing is
+  deleted, and the ambiguity is reported.
+* Removal is by exact ID after re-verifying the label. There is no
+  `compose down -p <project>`: project-wide deletion trusts a name.
+* Configuration features that escape project isolation — `container_name`,
+  externally named networks, volumes or secrets, additional services — block
+  the run before anything is created.
+* A resource whose ownership cannot be established is PRESERVED and reported.
+
+**Source.** `scripts/container-runtime-verify.sh` — `INVOCATION`,
+`VERIFY_PROJECT`, the ownership override, `snapshot_kind`, `label_query`,
+`owned_by_this_invocation`, `remove_owned`, `sweep`, `run_cleanup`.
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *resource ownership*
+(container and network collisions, unrelated-resource preservation, partial
+creation, a pre-existing container never adopted), *consistent Compose
+configuration* (isolation-escaping features), *cleanup as a verdict*.
+**Evidence required.** The fake daemon's command log shows removal of exactly
+the resources this run created, every listing filtered by a label unique to
+this invocation, no `compose down`, and no reference to any other resource.
 **Dependencies.** SW-P1-01.
-**Acceptance.** As above.
-**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1.
-
+**Acceptance.** As above, plus: a collision blocks creation, and an
+unattributable resource is preserved rather than removed.
+**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Behaviour against a real
+daemon rides on SW-P1-05.
 ### SW-P1-07 — Regression tests for the false-pass classes
 
 **Intended behavior.** Each historical false pass is reproduced deliberately
-and asserted to produce a nonzero result. Required classes: failed create with
-an existing container; failed inspect; failed history; failed export; failed
-parsing; image mismatch; forbidden mounts; daemon unavailability; cleanup
-safety.
+and asserted to produce a nonzero result. Required classes: forbidden paths
+with and without a leading `./`; failed cleanup and interrupted cleanup;
+resource-name collision and unrelated-resource preservation; partial Compose
+creation; consistent `.env` handling and interpolation; missing, additional,
+duplicated, writable and incorrect mounts; missing inspection fields and
+malformed JSON; image tag movement and identity mismatch; failed history search
+and other search errors; missing or incorrect hostname pinning; missing,
+invalid or unbounded logging settings; invalid tmpfs bounds; static and
+dynamically linked ELF controls; and the absence of any application-start
+operation in the inspection workflow.
 
-**Source / Tests.** `scripts/tests/runtime-verify-test.sh`; wired into
-`scripts/check.sh` as a required gate that needs no daemon.
+A passing suite proves only that the code agrees with itself unless the tests
+DISCRIMINATE. Two mechanisms provide that:
+
+* **Pre-fix controls in the suite.** Where a fix changed an expression, the
+  superseded expression is applied to the same fixture and asserted to exhibit
+  the defect — the `^\./?` path anchor missing `bin/sh`, an unperformed grep
+  looking like a clean result, empty `.Mounts` satisfying the old read-only and
+  prohibited-mount assertions.
+* **The whole suite run against the pre-fix implementation.** Recorded in
+  `docs/VERIFICATION.md` §3.5.
+
+**Source / Tests.** `scripts/tests/runtime-verify-test.sh` (237 cases); the ELF
+controls are `internal/buildcheck/elfcheck/main_test.go`. Both are wired into
+`scripts/check.sh` as required gates that need no daemon.
 **Evidence required.** All cases present and passing; the suite is a required
-gate.
-**Dependencies.** SW-P1-01 … SW-P1-06.
-**Acceptance.** Every listed class has at least one case, and the suite runs on
-every gate run as the service account.
+gate; and each targeted case is shown to fail against the pre-fix
+implementation.
+**Dependencies.** SW-P1-01 … SW-P1-06, SW-P1-16 … SW-P1-20.
+**Acceptance.** Every listed class has at least one case; the suite runs on
+every gate run as the service account; the pre-fix comparison is recorded.
 **Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Coverage map in
-`docs/VERIFICATION.md` §3.2.
-
+`docs/VERIFICATION.md` §3.2; pre-fix comparison in §3.5.
 ### SW-P1-08 — ShellCheck as a required gate
 
 **Intended behavior.** Every shell script in the repository is analysed by
@@ -322,17 +390,26 @@ tool versions in the run log; and **no secret exposure to untrusted
 contributions** — meaning fork pull requests get no repository secrets and no
 elevated token.
 
-**Source.** New: `.github/workflows/*.yml`
-**Tests.** The workflow is its own artifact; correctness is reviewed, not
-executed here.
-**Evidence required.** Workflow file present with the properties above, each
-verifiable by reading it; and the local gate suite and CI gate list agree.
+**Source.** `.github/workflows/gates.yml`
+**Tests.** None can substitute for running it. Three different things are often
+conflated here, and this row keeps them apart:
+
+| Level | Meaning | State |
+| --- | --- | --- |
+| Implementation review | the workflow file was read property by property against the requirement | DONE — `docs/VERIFICATION.md` §3.4 |
+| Local simulation | the same gate list was executed locally, as the service account | DONE — `bash scripts/check.sh`, §3.0. This exercises the GATES, not the workflow: it says nothing about `permissions:`, action pinning, runner image, or fork-PR secret handling |
+| Hosted CI run | the workflow itself executed on GitHub, with a run URL and log | **NOT DONE** |
+
+**Evidence required.** A hosted run: workflow file at a named commit, a run
+URL, the recorded tool versions from that run's log, and the outcome of each
+gate in it.
 **Dependencies.** SW-P1-08, SW-P1-09, SW-P1-11.
-**Acceptance.** As above. Actual CI execution is out of this environment's
-reach and is recorded as such.
-**Status.** VERIFIED as written, never executed — `.github/workflows/gates.yml`,
-reviewed property by property in `docs/VERIFICATION.md` §3.4. No run has
-occurred; pushing is outside the authorisation for this work.
+**Acceptance.** The hosted run exists and passes, and its gate list matches the
+local suite's.
+**Status.** **BLOCKED.** "Reviewed, not executed" is not verified CI execution,
+so this row is no longer carried as VERIFIED with a caveat. Running the
+workflow requires a push, which is outside the authorisation for this work.
+Operator action: `docs/VERIFICATION.md` §6.3.
 
 ### SW-P1-13 — Pre-existing tests preserved and rerun
 
@@ -384,6 +461,144 @@ codes, and the absence of an enforcement path.
 **Acceptance.** Tests present and passing.
 **Status.** VERIFIED — `cmd/scamwall/main_test.go`, 15 test functions, all
 passing. Detail in `docs/VERIFICATION.md` §4.4.
+
+
+### SW-P1-16 — Cleanup is part of the verdict
+
+**Intended behavior.** Required cleanup completes BEFORE success is reported;
+its failures count towards the verdict; a failed required cleanup makes the
+exit status nonzero and names every remaining resource by identifier, without
+printing configuration, environment or credential content; the handler runs on
+EXIT, INT and TERM without repeating a destructive operation; and it is
+idempotent — a resource already removed is not an error, and at most one
+removal is attempted per resource however many handlers fire.
+
+At the baseline the success summary was printed first and every cleanup error
+was discarded, so a run that left containers behind reported success.
+
+**Source.** `scripts/container-runtime-verify.sh` — `run_cleanup`, `on_exit`,
+`on_signal`, `remove_owned`, `HANDLED_RESOURCES`, `summary_and_exit`.
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *cleanup as a verdict*:
+ordering (the cleanup section precedes the verdict line), a failed container
+removal, a failed network removal, a TERM delivered mid-run, a mid-run
+verification failure, and a run whose inspections fail so ownership cannot be
+established.
+**Evidence required.** Each case produces a nonzero exit; the fake daemon's log
+shows exactly one removal attempt per resource; leftovers are named.
+**Dependencies.** SW-P1-17.
+**Acceptance.** As above.
+**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1.
+
+### SW-P1-17 — Resource ownership is established before deletion
+
+Requirement text and evidence: see SW-P1-06, which this row makes explicit as
+its own acceptance item so that a future change to the cleanup path cannot
+quietly weaken it. The properties held separately here are:
+
+* the invocation identifier is unpredictable, not derived from the PID;
+* every created resource ID is recorded, and a per-invocation ownership label
+  is applied;
+* pre-existing resources are preserved, including any that coincidentally
+  carry a matching label, and their presence blocks creation;
+* deletion is by exact ID after re-verifying ownership, never project-wide;
+* partial creation is cleaned up by attribution, and unattributable resources
+  are preserved and reported.
+
+**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Behaviour against a real
+daemon rides on SW-P1-05.
+
+### SW-P1-18 — One resolved Compose configuration
+
+**Intended behavior.** A single argument set — private project name, explicit
+`--env-file`, the compose file, and the ownership override — resolves the
+configuration, creates the container and lists it. Configuration resolution and
+parsing failures are checked explicitly and block the run. Expected
+interpolated settings are derived from `docker compose config`, Compose's own
+interpolation, and then validated separately against the security requirements;
+they are never re-derived by grepping `.env` and stripping quotes by hand. The
+rendered configuration is kept in a mode-700 temporary directory and is never
+printed.
+
+At the baseline creation passed `--env-file` and cleanup did not, so the two
+commands could describe different deployments; and the expected supplementary
+group came from a hand-rolled `.env` parse that reimplements — and gets wrong —
+Compose's precedence rules.
+
+**Source.** `scripts/container-runtime-verify.sh` — `COMPOSE_ARGS`,
+`CONFIG_JSON`, `cfg`, the derived-settings section.
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *consistent Compose
+configuration*: every Compose operation carries the same `--env-file` and
+project name; a `.env` value deliberately DIFFERENT from the resolved value
+must not be used; resolution failure and unparseable output block the run.
+**Evidence required.** As above, plus the mode-700 directory assertion in the
+verifier's own output.
+**Dependencies.** SW-P1-03.
+**Acceptance.** As above.
+**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1.
+
+### SW-P1-19 — The mount set is asserted exactly
+
+**Intended behavior.** `.Mounts` must be a non-empty array before any statement
+is made about mounts. The observed set must EQUAL the set derived from the
+resolved configuration — mount type, expected resolved source, destination and
+read-only status — with nothing missing, nothing extra, and no duplicated
+destination. The one runtime-managed exception, the scratch tmpfs at `/tmp`, is
+named explicitly and validated separately from `HostConfig.Tmpfs`, where Docker
+records its options. Prohibited sources and destinations are rejected.
+
+At the baseline an absent or empty `.Mounts` satisfied both "every mount is
+read-only" and "no prohibited mounts" without a single mount being examined,
+and nothing checked that the configuration, feed, CA and password mounts were
+present at all.
+
+**Scope.** A read-only mount at `/run/secrets/pihole_app_password` does not
+prove the container identity can READ it; that depends on the host file's
+owner, group and mode. The verifier prints this, and no row here claims it.
+
+**Source.** `scripts/container-runtime-verify.sh` — `EXPECTED_MOUNTS`,
+`OBSERVED_MOUNTS`, the mount comparison and tmpfs validation.
+**Tests.** `scripts/tests/runtime-verify-test.sh` — *mounts*: empty, absent,
+missing configuration mount, missing password mount, extra, duplicated,
+writable, wrong source, wrong type, `docker.sock`, `/etc/pihole`, a tmpfs
+somewhere other than `/tmp`; plus a pre-fix control showing empty `.Mounts`
+satisfied the superseded assertions.
+**Evidence required.** Each case produces a nonzero exit and names the mount.
+**Dependencies.** SW-P1-18.
+**Acceptance.** As above.
+**Status.** VERIFIED — `docs/VERIFICATION.md` §3.1. Against a real container:
+SW-P1-05.
+
+### SW-P1-20 — Static linkage proven by ELF inspection
+
+**Intended behavior.** The build asserts the intended executable properties of
+the artifact it produced by parsing its ELF structure: an executable object
+type, no `PT_INTERP` and no `.interp` section, no `PT_DYNAMIC` and no
+`SHT_DYNAMIC` section, and no `DT_NEEDED` shared library. A missing inspection
+tool, an unreadable file, an empty file or a malformed executable is a FAILURE.
+
+At the baseline the assertion was `! ldd BIN 2>/dev/null | grep -q "=>"`, which
+passed for a static binary, a missing binary, a corrupt binary and a missing
+`ldd` alike.
+
+**Scope.** This proves the binary carries no dynamic linking apparatus. It does
+not prove the binary is safe, secret-free, or built from this source.
+
+**Source.** `internal/buildcheck/elfcheck/main.go`; invoked by
+`container/Dockerfile` in the build stage.
+**Tests.** `internal/buildcheck/elfcheck/main_test.go` — positive control (a
+`CGO_ENABLED=0` build compiled by the test), negative controls (hand-built ELF
+objects carrying `PT_INTERP` and `PT_DYNAMIC`, a dynamically linked system
+binary where one is present), and malformed inputs (missing, empty, non-ELF,
+truncated header, a directory). `scripts/container-security-check.sh` asserts
+the Dockerfile still invokes it and that no `ldd`-based assertion returns.
+**Evidence required.** The controls pass, AND the assertion is observed to run
+inside a real `docker build`.
+**Dependencies.** Docker daemon access for the second part.
+**Acceptance.** Both.
+**Status.** **BLOCKED** on the build. The controls are VERIFIED —
+`docs/VERIFICATION.md` §3.6 — but no `docker build` has been executed from this
+account, so the in-build assertion has never run. Operator command:
+`docs/VERIFICATION.md` §6.1.
 
 ---
 
@@ -449,6 +664,12 @@ rejects mixed-script labels inside `Normalize`, and a rejected record makes the
 whole feed fail to load. That conflates "this name is not a valid domain" with
 "this name is suspicious", which SW-P3-05 forbids. The homograph signal must
 become a classification input with its own reason code, not a validity verdict.
+
+Writing this paragraph does not fix it. SW-P3-05 stays **MISSING**, and it is
+deliberately not restated as a Phase 1 item or closed by documentation: the
+conflation is in `internal/domain/domain.go`, and only a code change removes
+it. Recording a defect and resolving it are different acts, and this matrix
+distinguishes them everywhere.
 
 *Plan binding gap.* `policy.Plan` at the baseline binds format version, feed
 ID, manifest version, entries, and exclusions. SW-P3-10 additionally requires
