@@ -52,9 +52,20 @@ REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$REPO_ROOT" ] || { printf 'fatal: could not determine the repository root\n' >&2; exit 2; }
 cd "$REPO_ROOT" || { printf 'fatal: could not enter %s\n' "$REPO_ROOT" >&2; exit 2; }
 
-# A pipeline ending in a short-circuiting consumer, used as a CONDITION:
-# after `if`, `elif`, `&&`, `||`, or `!`.
-COND_PIPE='(^|[[:space:]])(if|elif|&&|\|\|)[[:space:]].*\|[[:space:]]*(grep[[:space:]]+-[a-zA-Z]*q|head)([[:space:]]|$)'
+# Two rules, because the two consumers differ in intent.
+#
+# QUIET_PIPE — any pipeline into `grep -q`. The ONLY reason to pass -q is to
+# use grep's exit status, so such a pipeline is always status-driven and always
+# exposed to the race. No condition context needs to be inferred, which also
+# means multi-line pipelines and `while`/`until`/`!` forms are covered without
+# enumerating them.
+QUIET_PIPE='\|[[:space:]]*grep([[:space:]]+-[a-zA-Z]*)*[[:space:]]+-[a-zA-Z]*q'
+
+# COND_HEAD — a pipeline into `head` used as a CONDITION. `head` is usually a
+# diagnostic ("print the first 20 lines of the error log"), where the pipeline
+# status is discarded and the race is harmless. It is only a problem when its
+# status decides something.
+COND_HEAD='(^|[[:space:]])(if|elif|while|until|&&|\|\||!)[[:space:]].*\|[[:space:]]*head([[:space:]]|$)'
 
 VIOLATIONS=0
 CHECKED=0
@@ -81,7 +92,8 @@ for f in "${SCRIPTS[@]}"; do
 
   # Comment lines are excluded: this file, and several others, DESCRIBE the bad
   # pattern in prose so that nobody reintroduces it out of ignorance.
-  hits="$(grep -nE "$COND_PIPE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+  hits="$( { grep -nE "$QUIET_PIPE" "$f"; grep -nE "$COND_HEAD" "$f"; } \
+           | sort -t: -k1,1n -u | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
   if [ -n "$hits" ]; then
     printf 'FAIL %s\n' "$f"
     while IFS= read -r line; do
@@ -101,15 +113,19 @@ fi
 #
 # A checker that never fires is indistinguishable from a clean tree. Prove the
 # pattern is actually detected before trusting a clean result.
+#
+# The bad line is ASSEMBLED FROM FRAGMENTS. Writing it literally would make this
+# file its own first violation, and the obvious "fix" — exempting this path —
+# would blind the checker to the one script most able to disable it. The same
+# discipline is used in scripts/secret-scan.sh and the secret-scan controls.
 CTRL="$(mktemp)" || { printf 'fatal: could not create a control file\n' >&2; exit 2; }
 trap 'rm -f "$CTRL"' EXIT
 {
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
-  # shellcheck disable=SC2016  # the control is a literal bad-pattern sample
-  echo 'if printf "%s" "$x" | grep -q needle; then echo yes; fi'
+  printf 'if some_producer %s %s needle; then echo yes; fi\n' '|' 'grep -q'
 } > "$CTRL"
-if grep -qE "$COND_PIPE" "$CTRL"; then
+if grep -qE "$QUIET_PIPE" "$CTRL"; then
   CONTROL="ok"
 else
   CONTROL="BROKEN"
