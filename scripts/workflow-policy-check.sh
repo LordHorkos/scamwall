@@ -83,7 +83,7 @@ check_no_privileged_trigger() {
 # the workflow file gives no sign of it.
 check_top_level_permissions() {
   local f="$1" body="$2"
-  if printf '%s\n' "$body" | grep -qE '^permissions[[:space:]]*:'; then
+  if grep -qE '^permissions[[:space:]]*:' <<<"$body"; then
     satisfied "$f: declares a top-level permissions block"
     return 0
   fi
