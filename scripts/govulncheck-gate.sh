@@ -86,7 +86,9 @@ evaluate() {
     return 2
   fi
   # Every record must parse. A partially written stream is not a clean stream.
-  if ! jq -e . < "$out" >/dev/null 2>&1; then
+  # Plain `jq .`, not `jq -e .`: validity is the question here, and -e would
+  # additionally fail on a stream whose last value is null or false.
+  if ! jq . < "$out" >/dev/null 2>&1; then
     printf 'UNPROVEN  %s: output is not valid JSON — the scan cannot be evaluated\n' "$label"
     return 2
   fi
