@@ -59,6 +59,11 @@ CHECKOUT="$ROOT/checkout"
 mkdir -p "$CHECKOUT/scripts" "$CHECKOUT/container" "$CHECKOUT/deploy/compose"
 cp "$VERIFIER" "$CHECKOUT/scripts/container-runtime-verify.sh"
 chmod +x "$CHECKOUT/scripts/container-runtime-verify.sh"
+# The verifier sanitizes any captured Compose error through this before printing
+# it, and prints nothing at all if it is absent. Copying it in means the cases
+# below exercise the path an operator and CI actually take, rather than the
+# fail-closed branch.
+cp "$REPO/scripts/gate-diagnostics.sh" "$CHECKOUT/scripts/gate-diagnostics.sh"
 cp "$REPO/container/Dockerfile" "$CHECKOUT/container/Dockerfile"
 cp "$REPO/deploy/compose/compose.yaml" "$CHECKOUT/deploy/compose/compose.yaml"
 printf 'SCAMWALL_SECRET_GID=%s\nPIHOLE_HOST_IP=host-gateway\n' "$ENV_GID" > "$CHECKOUT/deploy/compose/.env"

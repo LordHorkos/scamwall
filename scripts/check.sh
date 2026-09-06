@@ -52,6 +52,27 @@ optskip() { printf '\033[33m  SKIP   \033[0m %s (%s)\n' "$1" "$2"; OPTIONAL_SKIP
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Failure diagnostics live in their own program, so that "what a failing gate is
+# allowed to print" is one reviewable, self-testing thing rather than a line
+# buried in this loop. See scripts/gate-diagnostics.sh and FINDING-23.
+GATE_DIAG="$REPO_ROOT/scripts/gate-diagnostics.sh"
+
+# report_failure <label> <status> <capture-file>
+#
+# Never consulted for the verdict. The gate's status was recorded by the caller
+# before this runs, so neither a missing reporter nor a failed one can turn a
+# red gate green — the failure mode here is a less readable log, never a wrong
+# result.
+report_failure() {
+  if [ -f "$GATE_DIAG" ]; then
+    bash "$GATE_DIAG" --report "$1" "$2" "$3" ||
+      printf '         (the diagnostics reporter itself failed; %s exited %s)\n' "$1" "$2"
+  else
+    printf '         %s is missing, so the output cannot be sanitized and is NOT printed.\n' "$GATE_DIAG"
+    printf '         The gate still failed with exit status %s.\n' "$2"
+  fi
+}
+
 # require <label> <tool> <command...>
 # Runs the command if the tool exists; otherwise records BLOCKED.
 #
@@ -59,16 +80,28 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # world-writable directory is predictable, so another local user can pre-create
 # it as a symlink and redirect this write. mktemp with O_EXCL cannot be
 # hijacked that way.
+#
+# The command's exit status is captured into a variable BEFORE anything else
+# runs. The superseded form used the status only as an `if` condition and then
+# discarded it, so the log could not say what a gate exited with — and the
+# reporting that followed (`head -25`) kept the first twenty-five lines of a
+# capture whose failure, cleanup result and verdict are all at the END.
+# FINDING-23: on the first hosted CI run that discarded the entire diagnosis.
 require() {
   local label="$1" tool="$2"; shift 2
   if ! have "$tool"; then blocked "$label" "$tool not installed"; return; fi
-  local out
+  local out status
+  # mktemp creates with mode 600; it is asserted rather than assumed, because a
+  # gate's capture may quote a file this account can read and another cannot.
   out="$(mktemp)" || { blocked "$label" "could not create a temporary file"; return; }
-  if "$@" >"$out" 2>&1; then
+  chmod 600 "$out" 2>/dev/null || true
+  "$@" >"$out" 2>&1
+  status=$?
+  if [ "$status" -eq 0 ]; then
     ok "$label"
   else
     bad "$label"
-    sed 's/^/         /' "$out" | head -25
+    report_failure "$label" "$status" "$out"
   fi
   rm -f "$out"
 }
@@ -166,6 +199,17 @@ require "container security (static)" bash ./scripts/container-security-check.sh
 # non-match. It produced a 100% false-clean in the secret scanner for files over
 # the pipe buffer, and a silent false PASS in a regression test.
 require "no SIGPIPE-decided conditions" bash ./scripts/tests/pipefail-sigpipe-test.sh
+
+echo
+echo "-- gate reporting --"
+# A gate that fails must be able to say WHY, and must say it without leaking.
+# FINDING-23: this script printed the FIRST 25 lines of a failing capture, and
+# for a gate that reports progressively that is the part which succeeded — so
+# the first hosted CI run recorded twenty-five PASS lines and no diagnosis.
+# The replacement prints the reason, the verdict and the cleanup result first,
+# then the whole sanitized capture, and states any truncation explicitly.
+require "gate diagnostics self-test"        bash bash ./scripts/gate-diagnostics.sh --self-test
+require "gate diagnostics regression tests" bash bash ./scripts/tests/gate-diagnostics-test.sh
 
 echo
 echo "-- compose definition --"

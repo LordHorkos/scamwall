@@ -95,6 +95,50 @@ bad()     { printf '\033[31mFAIL\033[0m    %s\n' "$1"; FAIL=$((FAIL + 1)); }
 blocked() { printf '\033[31mBLOCKED\033[0m %s\n' "$1"; BLOCK=$((BLOCK + 1)); }
 note()    { printf '        %s\n' "$1"; }
 
+# --- Captured diagnostics -----------------------------------------------------
+#
+# The two commands that can fail with something worth reading — `compose config`
+# and `compose create` — used to have their stderr folded onto one line and cut
+# at 200 characters. Compose puts the useful part of a mount or secret error at
+# the END of a multi-line message, so that cut discarded exactly the sentence
+# naming the path it could not use.
+#
+# Compose's stderr is not trusted text: it quotes paths, service names, and
+# occasionally the content of a file it failed to read. It is therefore passed
+# through the same filter the gate suite uses and, if that filter is missing or
+# fails, NOT printed at all. An unreadable message costs a rerun; a leaked one
+# cannot be taken back.
+SANITIZER="$SCRIPT_DIR/gate-diagnostics.sh"
+DIAG_MAX_LINES=100
+print_diagnostic() { # <captured-file>
+  local file="$1" clean n line shown
+  if [ ! -f "$file" ] || [ ! -s "$file" ]; then
+    note "no output was captured from the failing command"
+    return 0
+  fi
+  if [ ! -f "$SANITIZER" ]; then
+    note "the captured output is NOT printed: $SANITIZER is absent, so it could not be sanitized"
+    return 0
+  fi
+  clean="$(mktemp)" || { note "the captured output is NOT printed: no temporary file could be created"; return 0; }
+  chmod 600 "$clean" 2>/dev/null || true
+  if ! bash "$SANITIZER" --sanitize < "$file" > "$clean" 2>/dev/null; then
+    note "the captured output is NOT printed: it could not be sanitized"
+    rm -f "$clean"
+    return 0
+  fi
+  n="$(wc -l < "$clean" 2>/dev/null)" || n=0
+  n="${n//[[:space:]]/}"; [ -n "$n" ] || n=0
+  shown="$n"
+  [ "$shown" -le "$DIAG_MAX_LINES" ] || shown="$DIAG_MAX_LINES"
+  note "captured output ($n line(s), sanitized):"
+  while IFS= read -r line; do note "  $line"; done < <(sed -n "1,${shown}p" -- "$clean")
+  [ "$n" -le "$DIAG_MAX_LINES" ] ||
+    note "  ... $((n - DIAG_MAX_LINES)) further line(s) omitted from this message ..."
+  rm -f "$clean"
+  return 0
+}
+
 # --- Resource tracking --------------------------------------------------------
 #
 # `scamwall-verify-$$` was not proof of ownership. A PID is small, reused, and
@@ -977,7 +1021,8 @@ COMPOSE_ARGS+=(-f "$COMPOSE" -f "$OVERRIDE_FILE")
 CONFIG_JSON="$WORK_DIR/compose-config.json"
 CONFIG_ERR="$WORK_DIR/compose-config.err"
 if ! docker compose "${COMPOSE_ARGS[@]}" config --format json > "$CONFIG_JSON" 2>"$CONFIG_ERR"; then
-  blocked "the deployment configuration could not be resolved: $(tr '\n' ' ' < "$CONFIG_ERR" | cut -c1-200)"
+  blocked "the deployment configuration could not be resolved"
+  print_diagnostic "$CONFIG_ERR"
   summary_and_exit
 fi
 if ! jq -e 'type == "object"' < "$CONFIG_JSON" >/dev/null 2>&1; then
@@ -1266,7 +1311,8 @@ note "created with the SAME argument set used to resolve the configuration"
 # stand in for one that was never created.
 CREATE_LOG="$WORK_DIR/create.log"
 if ! docker compose "${COMPOSE_ARGS[@]}" create --no-build --quiet-pull > "$CREATE_LOG" 2>&1; then
-  bad "compose create failed — container assertions UNPROVEN: $(tr '\n' ' ' < "$CREATE_LOG" | cut -c1-200)"
+  bad "compose create failed — container assertions UNPROVEN"
+  print_diagnostic "$CREATE_LOG"
   note "any resource this partial creation did produce is removed by cleanup below"
   summary_and_exit
 fi
