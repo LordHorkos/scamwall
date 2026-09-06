@@ -98,6 +98,17 @@ run_scan() {
     return
   fi
 
+  # jq succeeded, but assert the result is actually a number before comparing.
+  # `[ "" -eq 0 ]` is a shell error, not a false — and an error here would be
+  # read as "there were findings", or worse, printed as a nonsense count. An
+  # uncountable report means the scan was not evaluated.
+  case "$count" in
+    ''|*[!0-9]*)
+      printf 'ERROR  %s: finding count %q is not a number — result UNPROVEN\n' "$label" "$count"
+      FAILED=$((FAILED + 1))
+      return ;;
+  esac
+
   if [ "$count" -eq 0 ]; then
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
       # No findings, but the tool still failed. Something went wrong before or
