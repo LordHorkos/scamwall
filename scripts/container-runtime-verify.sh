@@ -148,6 +148,31 @@ in_list() {
   return 1
 }
 
+# combine_ids <listA> <listB> — prints the sorted, de-duplicated union of two
+# newline-separated id lists with blank lines removed.
+#
+# Returns 1 when the COMBINATION ITSELF failed. The superseded code ran
+# `printf | grep -v | sort -u` and then returned success unconditionally, so a
+# grep that could not run or a sort that could not write produced an empty
+# string — indistinguishable from "there are no such resources". That empty
+# string then told the pre-snapshot there was no collision and told cleanup
+# there was nothing to sweep. An obtained-and-empty list and a list that could
+# not be produced must never be the same answer.
+combine_ids() {
+  local filtered rc sorted
+  filtered="$(printf '%s\n%s\n' "$1" "$2" | grep -v '^[[:space:]]*$')"
+  rc=$?
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;   # nothing selected: a genuine empty list
+    *) return 1 ;;   # grep could not do its job
+  esac
+  [ -n "$filtered" ] || return 0
+  sorted="$(LC_ALL=C sort -u <<< "$filtered")" || return 1
+  printf '%s\n' "$sorted"
+  return 0
+}
+
 # label_query <kind> <label=value> — prints full IDs, one per line.
 # Returns 1 when the query itself failed, so "no resources" and "could not ask"
 # are never the same answer.
@@ -244,7 +269,11 @@ sweep() {
   extra="$(label_query "$kind" "$OWN_LABEL=$INVOCATION")" || {
     cleanup_problem "could not list ${kind}s carrying this invocation's ownership label — leftovers may remain"
     return 1; }
-  ids="$(printf '%s\n%s\n' "$ids" "$extra" | grep -v '^$' | sort -u)"
+  if ! ids="$(combine_ids "$ids" "$extra")"; then
+    cleanup_problem "the ${kind} lists carrying this invocation's labels could not be combined — leftovers may remain"
+    record_leftover "${kind}s of this invocation (list processing failed; not swept)"
+    return 1
+  fi
   [ -n "$ids" ] || return 0
   while IFS= read -r id; do
     [ -n "$id" ] || continue
@@ -426,35 +455,114 @@ jq_read() {
   jq -r "$2" < "$1" 2>/dev/null
 }
 
-# --- Size and option parsing --------------------------------------------------
+# --- Required inspection fields -----------------------------------------------
+#
+# `// 0`, `// ""` and `// []` were used to make assertions total. They also made
+# them vacuous: `(.State.Pid // 0) == 0` is satisfied when the daemon reported
+# no Pid at all, and `(.HostConfig.NetworkMode // "") != "host"` is satisfied
+# when NetworkMode is missing. A default cannot stand in for evidence — a field
+# that is absent, or present with the wrong type, means the property was never
+# observed, and that is a FAILURE.
+#
+# A default is retained ONLY where Docker's own representation genuinely uses
+# null for "none" and the requirement is satisfied by that null; each such case
+# is marked where it appears.
+require_field() { # label file filter permitted-types(csv)
+  local label="$1" file="$2" filter="$3" types="$4" got
+  if ! got="$(jq -r "($filter) | type" < "$file" 2>/dev/null)"; then
+    bad "$label: the inspection JSON could not be parsed — field UNPROVEN"
+    return 1
+  fi
+  case ",$types," in
+    *",$got,"*) return 0 ;;
+  esac
+  bad "$label: required inspection field is absent or of the wrong type (observed '$got', expected $types)"
+  return 1
+}
+
+# require_fields <file> <label-prefix> <filter:types>... — reports every
+# missing field rather than stopping at the first, and returns 1 if any is
+# missing so the caller can say the evaluation that follows is unproven.
+require_fields() {
+  local file="$1" prefix="$2" spec filter types rc=0
+  shift 2
+  for spec in "$@"; do
+    filter="${spec%%::*}"; types="${spec##*::}"
+    require_field "$prefix $filter" "$file" "$filter" "$types" || rc=1
+  done
+  return "$rc"
+}
+
+# --- Numeric and option parsing -----------------------------------------------
 #
 # Finding the substring `size=` proves only that the letters are present. These
 # parse the value and reject anything that is not a bounded quantity, so
 # `size=0`, `size=`, `size=abc` and `size=999g` are all rejected.
-size_to_bytes() { # value -> bytes on stdout; 1 if malformed
-  local v="$1" num unit
+#
+# Two further defects were found here and are fixed below:
+#
+#   * `$(( ))` reads a leading zero as OCTAL. `size=010k` was evaluated as
+#     8 * 1024, not 10 * 1024, so a configured bound was silently understated —
+#     and `09` is not a valid octal literal at all, which makes the shell emit
+#     an error and the surrounding arithmetic produce nothing. Leading zeros
+#     are now stripped and every value is read explicitly in base 10.
+#   * The multiplication was performed BEFORE any bound was applied. Bash
+#     arithmetic is 64-bit and wraps silently, so `size=18014398509483008k`
+#     evaluated to 1048576 — one mebibyte — and passed the tmpfs bound while
+#     actually requesting sixteen pebibytes. The multiplicand is now bounded
+#     first, so a product that could wrap is rejected before it is computed.
+#
+# SIZE_MAX_BYTES is an absolute ceiling for any parsed size. It is far above
+# anything this deployment permits; its only job is to keep every product well
+# inside the 64-bit range so no arithmetic below can wrap.
+SIZE_MAX_BYTES=$((1024 * 1024 * 1024 * 1024))   # 1 TiB
+
+# to_decimal <digits> [max] — prints the value in base 10.
+# Returns 1 when the input is not a run of decimal digits, when it is longer
+# than the shell can multiply safely, or when it exceeds <max>. Every numeric
+# input this program acts on goes through here; nothing is fed to `$(( ))`
+# straight from Docker or Compose output.
+to_decimal() {
+  local v="$1" max="${2:-}" d
+  case "$v" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  # Leading zeros are permitted on input and are read as DECIMAL, never octal.
+  d="$v"
+  while [ "${#d}" -gt 1 ] && [ "${d:0:1}" = '0' ]; do d="${d:1}"; done
+  # 18 significant digits keeps every value, and every product formed from a
+  # bounded multiplicand below, inside the signed 64-bit range.
+  [ "${#d}" -le 18 ] || return 1
+  if [ -n "$max" ] && [ "$d" -gt "$max" ]; then return 1; fi
+  printf '%s' "$d"
+  return 0
+}
+
+size_to_bytes() { # value -> bytes on stdout; 1 if malformed or out of range
+  local v="$1" num unit mult
   if [[ "$v" =~ ^([0-9]+)([bkmgBKMG]?)$ ]]; then
     num="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
   else
     return 1
   fi
   case "$unit" in
-    ''|b|B) printf '%s' "$num" ;;
-    k|K)    printf '%s' "$((num * 1024))" ;;
-    m|M)    printf '%s' "$((num * 1024 * 1024))" ;;
-    g|G)    printf '%s' "$((num * 1024 * 1024 * 1024))" ;;
+    ''|b|B) mult=1 ;;
+    k|K)    mult=1024 ;;
+    m|M)    mult=$((1024 * 1024)) ;;
+    g|G)    mult=$((1024 * 1024 * 1024)) ;;
     *)      return 1 ;;
   esac
+  # Bound the multiplicand BEFORE multiplying, not the product afterwards.
+  num="$(to_decimal "$num" "$((SIZE_MAX_BYTES / mult))")" || return 1
+  printf '%s' "$((num * mult))"
   return 0
 }
 
 is_uint() { # value [min] [max]
-  local v="$1" min="${2:-0}" max="${3:-}"
-  case "$v" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$v" -ge "$min" ] || return 1
-  [ -z "$max" ] || [ "$v" -le "$max" ] || return 1
+  local v="$1" min="${2:-0}" max="${3:-}" d
+  d="$(to_decimal "$v")" || return 1
+  [ "$d" -ge "$min" ] || return 1
+  [ -z "$max" ] || [ "$d" -le "$max" ] || return 1
   return 0
 }
 
@@ -502,6 +610,69 @@ validate_tmpfs_options() {
   else
     bad "$label: missing one of noexec/nosuid/nodev/size in '$opts'"
   fi
+}
+
+# --- The approved mount set ---------------------------------------------------
+#
+# These four destinations are the ENTIRE set of mounts this deployment is
+# permitted to have, and they are fixed HERE rather than derived from the
+# configuration. Deriving the expectation from `docker compose config` and then
+# comparing it with `docker inspect` proves only that the two AGREE. A fifth
+# mount added to compose.yaml appears in both, the comparison finds neither a
+# missing nor an extra entry, and every mount assertion passes while the
+# container has a mount nobody approved.
+#
+# The scratch tmpfs at /tmp is deliberately NOT in this list: Docker records it
+# through HostConfig.Tmpfs, where its options live, and it is validated
+# separately by validate_tmpfs_options.
+APPROVED_MOUNT_DESTS='/etc/scamwall/certs/pihole-ca.crt
+/etc/scamwall/config.json
+/etc/scamwall/feed.json
+/run/secrets/pihole_app_password'
+APPROVED_MOUNT_COUNT=4
+
+# approved_mount_problems <file> — prints a description of everything wrong
+# with a `type|source|destination|ro|rw` mount listing, or nothing when the
+# listing is exactly the approved set. Returns 1 if the file could not be read,
+# which is a failure to check and never an absence of problems.
+approved_mount_problems() {
+  local file="$1" line type source dest mode seen="" n=0 problems=""
+  local -a fields
+  [ -f "$file" ] && [ -r "$file" ] || return 1
+  while IFS= read -r line; do
+    [ -n "${line//[[:space:]]/}" ] || continue
+    n=$((n + 1))
+    IFS='|' read -r -a fields <<< "$line"
+    if [ "${#fields[@]}" -ne 4 ]; then
+      problems="${problems}${problems:+; }unparseable mount record '$line'"; continue
+    fi
+    type="${fields[0]}"; source="${fields[1]}"; dest="${fields[2]}"; mode="${fields[3]}"
+    if ! in_list "$dest" "$APPROVED_MOUNT_DESTS"; then
+      problems="${problems}${problems:+; }'$dest' is not an approved mount destination"; continue
+    fi
+    if in_list "$dest" "$seen"; then
+      problems="${problems}${problems:+; }'$dest' is mounted more than once"; continue
+    fi
+    seen="${seen}${seen:+$'\n'}$dest"
+    [ "$type" = "bind" ] ||
+      problems="${problems}${problems:+; }'$dest' is a '$type' mount, not a bind"
+    [ "$mode" = "ro" ] ||
+      problems="${problems}${problems:+; }'$dest' is not read-only"
+    case "$source" in
+      /?*) ;;
+      *) problems="${problems}${problems:+; }'$dest' has no resolved absolute source (observed '$source')" ;;
+    esac
+  done < "$file"
+  while IFS= read -r dest; do
+    [ -n "$dest" ] || continue
+    in_list "$dest" "$seen" ||
+      problems="${problems}${problems:+; }'$dest' is not mounted"
+  done <<< "$APPROVED_MOUNT_DESTS"
+  if [ "$n" -ne "$APPROVED_MOUNT_COUNT" ]; then
+    problems="${problems}${problems:+; }expected exactly $APPROVED_MOUNT_COUNT mounts, found $n"
+  fi
+  printf '%s' "$problems"
+  return 0
 }
 
 # --- Prerequisites ------------------------------------------------------------
@@ -611,7 +782,15 @@ else
   note "intended image. Set it to bind this run to a specific build."
 fi
 
+# Required before evaluation, for the same reason as the container fields:
+# `.Config.User` missing must not be read as "no user requirement stated".
+require_fields "$IMAGE_JSON" "image inspection field" \
+  '.[0].Config::object' \
+  '.[0].Config.User::string' \
+  && ok "every required image inspection field is present with the expected type"
 assert_eq   "image user"                    "$IMAGE_JSON" '.[0].Config.User' '65532:65532'
+# Healthcheck and ExposedPorts are absent-or-null in a compliant image, and
+# that null IS the requirement, so it is asserted directly.
 assert_eq   "image declares no healthcheck" "$IMAGE_JSON" '.[0].Config.Healthcheck' 'null'
 assert_eq   "image exposes no ports"        "$IMAGE_JSON" '(.[0].Config.ExposedPorts // {}) | length' '0'
 
@@ -647,18 +826,22 @@ fi
 echo
 echo "== resource ownership =="
 
-snapshot_kind() { # kind -> newline-separated ids on stdout
+# snapshot_kind <kind> -> newline-separated ids on stdout.
+# Returns 1 when either query OR the combination of their results failed. The
+# caller treats that as BLOCKED: an empty snapshot is only trustworthy when it
+# was actually obtained.
+snapshot_kind() {
   local kind="$1" by_project by_invocation
   by_project="$(label_query "$kind" "$PROJECT_LABEL=$VERIFY_PROJECT")" || return 1
   by_invocation="$(label_query "$kind" "$OWN_LABEL=$INVOCATION")" || return 1
-  printf '%s\n%s\n' "$by_project" "$by_invocation" | grep -v '^[[:space:]]*$' | sort -u
+  combine_ids "$by_project" "$by_invocation" || return 1
   return 0
 }
 
 COLLISIONS=""
 for kind in container network volume; do
   if ! snapshot="$(snapshot_kind "$kind")"; then
-    blocked "pre-existing ${kind}s could not be enumerated — ownership cannot be established, so nothing will be created or deleted"
+    blocked "pre-existing ${kind}s could not be enumerated or processed — ownership cannot be established, so nothing will be created or deleted"
     summary_and_exit
   fi
   case "$kind" in
@@ -843,6 +1026,50 @@ else
   conf_issue "external resources: $EXTERNALS"
 fi
 
+# `external: true` is only ONE of the two ways a resource escapes the project
+# namespace. A network or volume may also carry an explicit `name:` while
+# remaining non-external — and Compose then creates OR ADOPTS a resource by
+# that exact name. An adopted resource is one the real deployment may own: it
+# would be attached to this verification container, could have its
+# configuration reconciled, and would be a deletion candidate for any
+# name-based teardown. The superseded check inspected `external` only and saw
+# nothing wrong with `networks: {default: {name: pihole_net}}`.
+#
+# So every RESOLVED name is inspected, external or not, and must be exactly the
+# name Compose derives from this invocation's private project — `<project>_<key>`.
+# Anything else is rejected BEFORE `compose create` runs, which is what makes
+# "no pre-existing resource is adopted, changed or deleted" true rather than
+# hoped for: nothing is created at all, so nothing can be attached or
+# reconciled, and cleanup only ever removes resources this invocation recorded
+# or that carry its unpredictable label.
+check_namespaced_names() { # section (networks|volumes)
+  local section="$1" entries key name expected issues="" line
+  if ! entries="$(cfg "[ (.$section // {}) | to_entries[] | .key + \"=\" + ((.value.name // \"\") | tostring) ] | join(\"\n\")")"; then
+    blocked "the resolved $section could not be read — resource naming cannot be checked, so nothing is created"
+    summary_and_exit
+  fi
+  [ -n "$entries" ] || { ok "no $section are declared, so none can be adopted"; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"; name="${line#*=}"
+    expected="${VERIFY_PROJECT}_${key}"
+    if [ -z "$name" ]; then
+      issues="${issues}${issues:+; }$section.$key has no resolved name, so it cannot be shown to be project-scoped"
+    elif [ "$name" != "$expected" ]; then
+      issues="${issues}${issues:+; }$section.$key resolves to '$name', outside this invocation's namespace (expected '$expected')"
+    fi
+  done <<< "$entries"
+  if [ -z "$issues" ]; then
+    ok "every declared $section name lies inside this invocation's namespace"
+    return 0
+  fi
+  bad "a resolved $section name would escape project isolation: $issues"
+  conf_issue "$section naming: $issues"
+  return 1
+}
+check_namespaced_names networks
+check_namespaced_names volumes
+
 TOP_VOLUMES="$(cfg '(.volumes // {}) | keys | join(",")')" || TOP_VOLUMES="<unreadable>"
 if [ -z "$TOP_VOLUMES" ]; then
   ok "no named volumes are declared"
@@ -926,14 +1153,18 @@ case "$EXPECTED_LOG_DRIVER" in
   *)   derive_fail "log driver '$EXPECTED_LOG_DRIVER' is not one this deployment permits" ;;
 esac
 LOG_SIZE_BYTES=""
+LOG_MAXFILE_N=""
 if ! LOG_SIZE_BYTES="$(size_to_bytes "$EXPECTED_LOG_MAXSIZE")"; then
   derive_fail "max-size '$EXPECTED_LOG_MAXSIZE' is missing or not a parseable size"
 elif [ "$LOG_SIZE_BYTES" -le 0 ] || [ "$LOG_SIZE_BYTES" -gt "$LOG_MAX_SIZE_BYTES" ]; then
   derive_fail "max-size $LOG_SIZE_BYTES bytes is outside the permitted bound"
-elif ! is_uint "$EXPECTED_LOG_MAXFILE" 1 10; then
+elif ! LOG_MAXFILE_N="$(to_decimal "$EXPECTED_LOG_MAXFILE" 10)" || [ "$LOG_MAXFILE_N" -lt 1 ]; then
+  # Normalised before it is multiplied: `max-file: "09"` is a valid Compose
+  # value and an INVALID octal literal, so `$((LOG_SIZE_BYTES * 09))` is a
+  # shell error rather than a bound.
   derive_fail "max-file '$EXPECTED_LOG_MAXFILE' is missing or not an integer in 1..10"
-elif [ $((LOG_SIZE_BYTES * EXPECTED_LOG_MAXFILE)) -gt "$LOG_MAX_TOTAL_BYTES" ]; then
-  derive_fail "the total log bound ($((LOG_SIZE_BYTES * EXPECTED_LOG_MAXFILE)) bytes) exceeds the permitted maximum"
+elif [ $((LOG_SIZE_BYTES * LOG_MAXFILE_N)) -gt "$LOG_MAX_TOTAL_BYTES" ]; then
+  derive_fail "the total log bound ($((LOG_SIZE_BYTES * LOG_MAXFILE_N)) bytes) exceeds the permitted maximum"
 else
   ok "log size is bounded (max-size=$EXPECTED_LOG_MAXSIZE, max-file=$EXPECTED_LOG_MAXFILE)"
 fi
@@ -989,11 +1220,15 @@ if ! cfg "
   derive_fail "the expected mount set could not be derived from the resolved configuration"
   : > "$EXPECTED_MOUNTS"
 fi
-EXPECTED_MOUNT_COUNT="$(grep -c '[^[:space:]]' "$EXPECTED_MOUNTS")" || EXPECTED_MOUNT_COUNT=0
-if [ "$EXPECTED_MOUNT_COUNT" -lt 4 ]; then
-  derive_fail "the resolved configuration declares only $EXPECTED_MOUNT_COUNT mounts; the CA, config, feed and password mounts are all required"
+# Exactly the approved set — not "at least the four required ones". A count
+# floor accepted any number of additional mounts as long as the four were
+# among them.
+if ! CONFIG_MOUNT_PROBLEMS="$(approved_mount_problems "$EXPECTED_MOUNTS")"; then
+  derive_fail "the expected mount set could not be examined against the approved set"
+elif [ -n "$CONFIG_MOUNT_PROBLEMS" ]; then
+  derive_fail "the resolved configuration does not declare exactly the approved mounts: $CONFIG_MOUNT_PROBLEMS"
 else
-  ok "$EXPECTED_MOUNT_COUNT mounts are required by the resolved configuration"
+  ok "the resolved configuration declares exactly the $APPROVED_MOUNT_COUNT approved mounts, each a read-only bind with a resolved source"
 fi
 for required_dest in /etc/scamwall/certs/pihole-ca.crt /etc/scamwall/config.json /etc/scamwall/feed.json /run/secrets/pihole_app_password; do
   search_file "\\|${required_dest}\\|ro\$" "$EXPECTED_MOUNTS"
@@ -1081,8 +1316,51 @@ if ! jq -e 'type == "array" and length == 1' < "$CJSON" >/dev/null 2>&1; then
 fi
 ok "container inspection captured and parsed"
 
+echo
+echo "-- required inspection fields --"
+# Every field the assertions below read must EXIST, with the right type, before
+# any of them is evaluated. Optional-by-Docker fields are listed with null
+# among their permitted types and only where null genuinely means "none":
+#   CapAdd            null when no capability was added — which is the requirement
+#   Config.Labels     null when the container carries no label at all
+require_fields "$CJSON" "inspection field" \
+  '.[0].Image::string' \
+  '.[0].State::object' \
+  '.[0].State.Status::string' \
+  '.[0].State.Running::boolean' \
+  '.[0].State.Pid::number' \
+  '.[0].State.StartedAt::string' \
+  '.[0].RestartCount::number' \
+  '.[0].Config::object' \
+  '.[0].Config.User::string' \
+  '.[0].Config.Labels::object,null' \
+  '.[0].HostConfig::object' \
+  '.[0].HostConfig.GroupAdd::array' \
+  '.[0].HostConfig.CapDrop::array' \
+  '.[0].HostConfig.CapAdd::array,null' \
+  '.[0].HostConfig.Privileged::boolean' \
+  '.[0].HostConfig.SecurityOpt::array' \
+  '.[0].HostConfig.Init::boolean' \
+  '.[0].HostConfig.ReadonlyRootfs::boolean' \
+  '.[0].HostConfig.Tmpfs::object' \
+  '.[0].HostConfig.NetworkMode::string' \
+  '.[0].HostConfig.ExtraHosts::array' \
+  '.[0].HostConfig.PortBindings::object' \
+  '.[0].HostConfig.LogConfig::object' \
+  '.[0].HostConfig.LogConfig.Type::string' \
+  '.[0].HostConfig.LogConfig.Config::object' \
+  '.[0].HostConfig.Memory::number' \
+  '.[0].HostConfig.MemorySwap::number' \
+  '.[0].HostConfig.PidsLimit::number' \
+  '.[0].HostConfig.NanoCpus::number' \
+  '.[0].HostConfig.RestartPolicy::object' \
+  '.[0].HostConfig.RestartPolicy.Name::string' \
+  '.[0].NetworkSettings::object' \
+  '.[0].NetworkSettings.Ports::object' \
+  && ok "every required inspection field is present with the expected type"
+
 assert_eq "container carries this invocation's ownership label" "$CJSON" \
-  "(.[0].Config.Labels // {})[\"$OWN_LABEL\"] // \"\"" "$INVOCATION"
+  "(.[0].Config.Labels // {})[\"$OWN_LABEL\"] // \"<absent>\"" "$INVOCATION"
 
 # --- Image identity of the created container ----------------------------------
 #
@@ -1120,22 +1398,26 @@ echo
 echo "-- no application execution --"
 # `docker compose create` and `docker create` do not start a process. These
 # assertions state that positively rather than assuming it.
+# No `//` defaults: the fields were required above, and a default here would
+# turn "the daemon reported no Pid" into "the process id is zero".
 assert_eq   "container is created, not running" "$CJSON" '.[0].State.Status' 'created'
 assert_true "container has never run"           "$CJSON" '.[0].State.Running == false'
-assert_eq   "no process id is recorded"         "$CJSON" '(.[0].State.Pid // 0) | tostring' '0'
-assert_true "no start time is recorded"         "$CJSON" '((.[0].State.StartedAt // "") | (. == "" or startswith("0001-01-01")))'
-assert_eq   "restart count is zero"             "$CJSON" '(.[0].RestartCount // 0) | tostring' '0'
+assert_eq   "no process id is recorded"         "$CJSON" '.[0].State.Pid | tostring' '0'
+assert_true "no start time is recorded"         "$CJSON" '(.[0].State.StartedAt | type == "string") and (.[0].State.StartedAt | (. == "" or startswith("0001-01-01")))'
+assert_eq   "restart count is zero"             "$CJSON" '.[0].RestartCount | tostring' '0'
 
 echo
 echo "-- identity and privileges --"
 assert_eq   "container user"                "$CJSON" '.[0].Config.User' '65532:65532'
-assert_eq   "supplementary group"           "$CJSON" '(.[0].HostConfig.GroupAdd // []) | join(",")' "$EXPECTED_GID"
-assert_eq   "exactly one supplementary group" "$CJSON" '(.[0].HostConfig.GroupAdd // []) | length | tostring' '1'
-assert_eq   "capabilities dropped"          "$CJSON" '(.[0].HostConfig.CapDrop // []) | join(",")' 'ALL'
+assert_eq   "supplementary group"           "$CJSON" '.[0].HostConfig.GroupAdd | join(",")' "$EXPECTED_GID"
+assert_eq   "exactly one supplementary group" "$CJSON" '.[0].HostConfig.GroupAdd | length | tostring' '1'
+assert_eq   "capabilities dropped"          "$CJSON" '.[0].HostConfig.CapDrop | join(",")' 'ALL'
+# CapAdd is the one list Docker genuinely renders as null when nothing was
+# added, and null IS the requirement here, so the default is permitted.
 assert_eq   "no capabilities added"         "$CJSON" '(.[0].HostConfig.CapAdd // []) | length | tostring' '0'
 assert_true "not privileged"                "$CJSON" '.[0].HostConfig.Privileged == false'
-assert_true "no-new-privileges set"         "$CJSON" '((.[0].HostConfig.SecurityOpt // []) | map(select(. == "no-new-privileges:true")) | length) == 1'
-assert_true "no unconfined seccomp/apparmor" "$CJSON" '((.[0].HostConfig.SecurityOpt // []) | map(select(test("unconfined"))) | length) == 0'
+assert_true "no-new-privileges set"         "$CJSON" '(.[0].HostConfig.SecurityOpt | map(select(. == "no-new-privileges:true")) | length) == 1'
+assert_true "no unconfined seccomp/apparmor" "$CJSON" '(.[0].HostConfig.SecurityOpt | map(select(test("unconfined"))) | length) == 0'
 assert_true "init process enabled"          "$CJSON" '.[0].HostConfig.Init == true'
 
 echo
@@ -1170,19 +1452,52 @@ if [ "$MOUNTS_OK" -eq 1 ]; then
        < "$CJSON" > "$OBSERVED_MOUNTS" 2>/dev/null; then
     bad "the observed mount set could not be extracted — mount requirements UNPROVEN"
   else
-    LC_ALL=C sort -o "$OBSERVED_MOUNTS" "$OBSERVED_MOUNTS" || true
-    LC_ALL=C sort -o "$EXPECTED_MOUNTS" "$EXPECTED_MOUNTS" || true
-    MISSING_MOUNTS="$(LC_ALL=C comm -23 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')" || MISSING_MOUNTS="<unreadable>"
-    EXTRA_MOUNTS="$(LC_ALL=C comm -13 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')" || EXTRA_MOUNTS="<unreadable>"
-    if [ -z "${MISSING_MOUNTS// /}" ]; then
-      ok "every required mount is present with the expected type, resolved source and read-only status"
+    # The observed set is held to the SAME fixed approved set as the
+    # configuration, and not merely to agreement with it. An extra mount
+    # present in both compose.yaml and `docker inspect` is invisible to the
+    # comparison below — the two sides agree — but it is still a mount this
+    # deployment does not permit, and it is caught here.
+    if ! OBSERVED_MOUNT_PROBLEMS="$(approved_mount_problems "$OBSERVED_MOUNTS")"; then
+      bad "the observed mount set could not be examined against the approved set — mount requirements UNPROVEN"
+    elif [ -n "$OBSERVED_MOUNT_PROBLEMS" ]; then
+      bad "the container does not have exactly the approved mounts: $OBSERVED_MOUNT_PROBLEMS"
     else
-      bad "required mount(s) missing or differing (type|source|destination|mode): $MISSING_MOUNTS"
+      ok "the container has exactly the $APPROVED_MOUNT_COUNT approved mounts, each a read-only bind with a resolved source"
     fi
-    if [ -z "${EXTRA_MOUNTS// /}" ]; then
-      ok "no unexpected mounts (only the tmpfs at /tmp is runtime-managed and is checked separately)"
-    else
-      bad "unexpected mount(s) present: $EXTRA_MOUNTS"
+
+    # A sort or a comparison that could not run is a FAILED gate, never a
+    # clean one. `sort ... || true` discarded the status of the very step the
+    # comparison depends on, and an unsorted operand makes `comm` report
+    # arbitrary differences — or none at all.
+    MOUNT_COMPARE_OK=1
+    if ! LC_ALL=C sort -o "$OBSERVED_MOUNTS" "$OBSERVED_MOUNTS"; then
+      bad "the observed mount set could not be sorted — the mount comparison did not run and is UNPROVEN"
+      MOUNT_COMPARE_OK=0
+    fi
+    if ! LC_ALL=C sort -o "$EXPECTED_MOUNTS" "$EXPECTED_MOUNTS"; then
+      bad "the expected mount set could not be sorted — the mount comparison did not run and is UNPROVEN"
+      MOUNT_COMPARE_OK=0
+    fi
+    if [ "$MOUNT_COMPARE_OK" -eq 1 ]; then
+      if ! MISSING_MOUNTS="$(LC_ALL=C comm -23 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')"; then
+        bad "the mount comparison failed (comm could not compare the two sets) — mount requirements UNPROVEN"
+        MOUNT_COMPARE_OK=0
+      elif ! EXTRA_MOUNTS="$(LC_ALL=C comm -13 "$EXPECTED_MOUNTS" "$OBSERVED_MOUNTS" | tr '\n' ' ')"; then
+        bad "the mount comparison failed (comm could not compare the two sets) — mount requirements UNPROVEN"
+        MOUNT_COMPARE_OK=0
+      fi
+    fi
+    if [ "$MOUNT_COMPARE_OK" -eq 1 ]; then
+      if [ -z "${MISSING_MOUNTS// /}" ]; then
+        ok "every required mount is present with the expected type, resolved source and read-only status"
+      else
+        bad "required mount(s) missing or differing (type|source|destination|mode): $MISSING_MOUNTS"
+      fi
+      if [ -z "${EXTRA_MOUNTS// /}" ]; then
+        ok "no unexpected mounts (only the tmpfs at /tmp is runtime-managed and is checked separately)"
+      else
+        bad "unexpected mount(s) present: $EXTRA_MOUNTS"
+      fi
     fi
   fi
 
@@ -1227,31 +1542,38 @@ fi
 
 echo
 echo "-- network --"
-assert_true "not on host network"    "$CJSON" '(.[0].HostConfig.NetworkMode // "") != "host"'
-assert_true "not sharing a container netns" "$CJSON" '((.[0].HostConfig.NetworkMode // "") | startswith("container:")) == false'
-assert_eq   "no published port bindings" "$CJSON" '(.[0].HostConfig.PortBindings // {}) | length | tostring' '0'
-assert_eq   "no exposed container ports" "$CJSON" '(.[0].NetworkSettings.Ports // {}) | length | tostring' '0'
+# `// ""` here made an ABSENT NetworkMode satisfy both assertions: the empty
+# string is neither "host" nor a "container:" prefix. The field is required
+# above and is read without a default.
+assert_true "not on host network"    "$CJSON" '(.[0].HostConfig.NetworkMode | type == "string") and (.[0].HostConfig.NetworkMode != "host")'
+assert_true "not sharing a container netns" "$CJSON" '(.[0].HostConfig.NetworkMode | type == "string") and ((.[0].HostConfig.NetworkMode | startswith("container:")) == false)'
+# The type is part of the expected value: jq reports `null | length` as 0, so a
+# bare length check treats a MISSING port map as an empty one.
+assert_eq   "no published port bindings" "$CJSON" '(.[0].HostConfig.PortBindings | type) + ":" + (.[0].HostConfig.PortBindings | length | tostring)' 'object:0'
+assert_eq   "no exposed container ports" "$CJSON" '(.[0].NetworkSettings.Ports | type) + ":" + (.[0].NetworkSettings.Ports | length | tostring)' 'object:0'
 
 # Hostname pinning. ScamWall must never authenticate to whatever happens to
 # answer DNS for the API name, so the mapping is asserted exactly: one entry,
 # for the expected name, with the resolved address from the configuration.
 assert_eq "API hostname pinned to exactly one address" "$CJSON" \
-  '(.[0].HostConfig.ExtraHosts // []) | length | tostring' '1'
+  '(.[0].HostConfig.ExtraHosts | type) + ":" + (.[0].HostConfig.ExtraHosts | length | tostring)' 'array:1'
 assert_eq "API hostname pin matches the resolved configuration" "$CJSON" \
-  '(.[0].HostConfig.ExtraHosts // []) | join(",")' "$EXPECTED_HOST_ENTRY"
+  '.[0].HostConfig.ExtraHosts | join(",")' "$EXPECTED_HOST_ENTRY"
 
 echo
 echo "-- logging --"
-assert_eq "log driver" "$CJSON" '.[0].HostConfig.LogConfig.Type // ""' "$EXPECTED_LOG_DRIVER"
-assert_eq "log max-size" "$CJSON" '((.[0].HostConfig.LogConfig.Config // {})["max-size"] // "") | tostring' "$EXPECTED_LOG_MAXSIZE"
-assert_eq "log max-file" "$CJSON" '((.[0].HostConfig.LogConfig.Config // {})["max-file"] // "") | tostring' "$EXPECTED_LOG_MAXFILE"
+assert_eq "log driver" "$CJSON" '.[0].HostConfig.LogConfig.Type' "$EXPECTED_LOG_DRIVER"
+# A missing bound is reported as `<absent>`, which no configured value equals,
+# rather than as an empty string that a configuration could also produce.
+assert_eq "log max-size" "$CJSON" '(.[0].HostConfig.LogConfig.Config["max-size"] // "<absent>") | tostring' "$EXPECTED_LOG_MAXSIZE"
+assert_eq "log max-file" "$CJSON" '(.[0].HostConfig.LogConfig.Config["max-file"] // "<absent>") | tostring' "$EXPECTED_LOG_MAXFILE"
 
 echo
 echo "-- resource bounds --"
-assert_eq "memory limit"      "$CJSON" '(.[0].HostConfig.Memory // 0) | tostring'     "$EXPECTED_MEM"
-assert_eq "memory+swap limit" "$CJSON" '(.[0].HostConfig.MemorySwap // 0) | tostring' "$EXPECTED_MEMSWAP"
-assert_eq "pids limit"        "$CJSON" '(.[0].HostConfig.PidsLimit // 0) | tostring'  "$EXPECTED_PIDS"
-assert_eq "cpu limit"         "$CJSON" '(.[0].HostConfig.NanoCpus // 0) | tostring'   "$EXPECTED_NANOCPUS"
-assert_eq "restart policy"    "$CJSON" '.[0].HostConfig.RestartPolicy.Name // ""' 'no'
+assert_eq "memory limit"      "$CJSON" '.[0].HostConfig.Memory | tostring'     "$EXPECTED_MEM"
+assert_eq "memory+swap limit" "$CJSON" '.[0].HostConfig.MemorySwap | tostring' "$EXPECTED_MEMSWAP"
+assert_eq "pids limit"        "$CJSON" '.[0].HostConfig.PidsLimit | tostring'  "$EXPECTED_PIDS"
+assert_eq "cpu limit"         "$CJSON" '.[0].HostConfig.NanoCpus | tostring'   "$EXPECTED_NANOCPUS"
+assert_eq "restart policy"    "$CJSON" '.[0].HostConfig.RestartPolicy.Name' 'no'
 
 summary_and_exit

@@ -133,9 +133,19 @@ if [ "${1:-}" = "compose" ]; then
       if [ -f "$D/config-garbage" ]; then printf 'not json at all\n'; exit 0; fi
       tok="$(cat "$D/token" 2>/dev/null)"
       if [ -f "$D/drop-label" ]; then tok="somebody-elses-invocation"; fi
-      jq --arg p "$(cat "$D/project" 2>/dev/null)" --arg t "$tok" \
-         '.name = $p | .services.scamwall.labels = {"scamwall.verify.invocation": $t}' \
-         < "$D/compose-config.json"
+      proj="$(cat "$D/project" 2>/dev/null)"
+      # Real Compose renders every network and volume name as <project>_<key>.
+      # The fixture is written project-independently, so the project-relative
+      # names are applied here, exactly as the daemon-facing tool would.
+      mut='.'
+      [ -f "$D/config-mutate" ] && mut="$(cat "$D/config-mutate")"
+      jq --arg p "$proj" --arg t "$tok" \
+         '.name = $p
+          | (if has("networks") then .networks |= with_entries(.value.name = ($p + "_" + .key)) else . end)
+          | (if has("volumes")  then .volumes  |= with_entries(.value.name = ($p + "_" + .key)) else . end)
+          | .services.scamwall.labels = {"scamwall.verify.invocation": $t}' \
+         < "$D/compose-config.json" \
+        | jq --arg p "$proj" "$mut"
       exit 0 ;;
     create)
       [ -f "$D/no-create-container" ] || live_add live-containers-project "$(cat "$D/ps-aq" 2>/dev/null)"
@@ -276,6 +286,25 @@ printf 'fatal: detected dubious ownership in repository\n' >&2
 exit 128
 GIT_EOF
 chmod +x "$BIN/git"
+
+# A sort that can be made to fail for a specific invocation shape. The verifier
+# combines resource lists with `sort -u` and prepares the mount comparison with
+# `sort -o`; both used to discard the status, so a sort that could not run
+# produced an empty list or an unsorted operand and the gate reported clean.
+REAL_SORT="$(command -v sort)" || { printf 'fatal: no sort on PATH\n' >&2; exit 2; }
+cat > "$BIN/sort" <<SORT_EOF
+#!/usr/bin/env bash
+if [ -n "\${FAKE_DIR:-}" ]; then
+  for a in "\$@"; do
+    case "\$a" in
+      -u) [ -f "\$FAKE_DIR/break-sort-u" ] && { printf 'sort: cannot write (fake)\n' >&2; exit 2; } ;;
+      -o) [ -f "\$FAKE_DIR/break-sort-o" ] && { printf 'sort: cannot write (fake)\n' >&2; exit 2; } ;;
+    esac
+  done
+fi
+exec $REAL_SORT "\$@"
+SORT_EOF
+chmod +x "$BIN/sort"
 
 # --- Fixtures -----------------------------------------------------------------
 FS_SRC="$ROOT/fs"
@@ -495,7 +524,15 @@ log_count() { # extended-regex -> prints count
 # fake daemon: the file grep reads is written by the verifier itself.
 eval "$(sed -n '/^search_file()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^count_matches()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^SIZE_MAX_BYTES=/p' "$VERIFIER")"
+eval "$(sed -n '/^to_decimal()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^size_to_bytes()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^is_uint()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^in_list()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^combine_ids()/,/^}$/p' "$VERIFIER")"
+eval "$(sed -n '/^APPROVED_MOUNT_DESTS=/,/pihole_app_password.$/p' "$VERIFIER")"
+eval "$(sed -n '/^APPROVED_MOUNT_COUNT=/p' "$VERIFIER")"
+eval "$(sed -n '/^approved_mount_problems()/,/^}$/p' "$VERIFIER")"
 
 echo "== container-runtime-verify.sh regression tests =="
 echo
@@ -1306,6 +1343,337 @@ if grep -qE 'grep -q' <<<"$DOCKERFILE_NC"; then
 else
   pass "no producer-to-grep -q pipeline in the Dockerfile"
 fi
+
+# --- 19. Resource-list processing failures ------------------------------------
+#
+# The lists that decide what is preserved and what is deleted were combined by
+# `printf | grep -v | sort -u` and the result was returned unconditionally. A
+# combination that could not run produced an empty string, which the
+# pre-snapshot read as "no collision" and cleanup read as "nothing to sweep".
+echo
+echo "-- resource list processing --"
+
+pre_fix_combine() { # the superseded form, kept as a control
+  printf '%s\n%s\n' "$1" "$2" | grep -v '^$' | sort -u
+  return 0
+}
+
+# with_fake_bin <command...> — run a command with the scripted daemon and the
+# controllable sort ahead of the real ones. The body is a subshell, so the PATH
+# change is deliberately local: a variable assignment prefixed to a shell
+# function persists in the calling shell afterwards, and leaking the fake bin
+# onto PATH would silently arm the scripted daemon for every later case.
+# shellcheck disable=SC2030,SC2031  # the subshell-local PATH is the point
+with_fake_bin() ( PATH="$BIN:$PATH"; "$@" )
+
+setup_case combine-broken-sort
+: > "$FAKE_DIR/break-sort-u"
+if OUT_C="$(with_fake_bin pre_fix_combine 'aaa111111111' 'bbb222222222' 2>/dev/null)"; then
+  if [ -z "$OUT_C" ]; then
+    pass "PRE-FIX CONTROL: the superseded combination reported success with an empty result (the defect)"
+  else
+    fail "PRE-FIX CONTROL: the superseded combination reported success with an empty result" "it produced '$OUT_C'"
+  fi
+else
+  fail "PRE-FIX CONTROL: the superseded combination reported success with an empty result" "it returned nonzero, so this control proves nothing"
+fi
+if with_fake_bin combine_ids 'aaa111111111' 'bbb222222222' >/dev/null 2>&1; then
+  fail "combine_ids reports a failed combination" "it returned 0 while sort could not run"
+else
+  pass "combine_ids reports a failed combination"
+fi
+
+setup_case combine-empty
+if OUT_C="$(with_fake_bin combine_ids '' '')"; then
+  if [ -z "$OUT_C" ]; then
+    pass "combine_ids distinguishes an obtained empty list from a failure"
+  else
+    fail "combine_ids distinguishes an obtained empty list from a failure" "expected no output, got '$OUT_C'"
+  fi
+else
+  fail "combine_ids distinguishes an obtained empty list from a failure" "an empty pair of lists was reported as a failure"
+fi
+if OUT_C="$(with_fake_bin combine_ids 'bbb222222222' 'aaa111111111')" \
+   && [ "$OUT_C" = "$(printf 'aaa111111111\nbbb222222222')" ]; then
+  pass "combine_ids returns the sorted union of two lists"
+else
+  fail "combine_ids returns the sorted union of two lists" "got '$OUT_C'"
+fi
+
+# End to end: the network sweep is the one combination that runs over a
+# non-empty list, so a sort that cannot run must make the run fail rather than
+# silently sweep nothing.
+setup_case sweep-processing-fails
+: > "$FAKE_DIR/break-sort-u"
+run_verifier
+expect_rc_nonzero "a resource list that could not be processed fails the run"
+expect_output     "the processing failure is named" 'could not be combined'
+expect_no_output  "cleanup is not reported as complete" 'cleanup complete'
+
+# --- 20. Named resources cannot escape the invocation's namespace -------------
+#
+# `external: true` is not the only escape. A non-external network or volume
+# with an explicit `name:` is created OR ADOPTED by that exact name, which may
+# be a resource the real deployment owns.
+echo
+echo "-- named-resource isolation --"
+
+OLD_EXTERNAL_ONLY="$(jq -r '[ (.networks // {}), (.volumes // {}), (.secrets // {}) | to_entries[]
+                              | select(.value.external == true) | .key ] | join(",")' \
+                     <<<'{"networks":{"default":{"name":"pihole_shared_net"}}}')"
+if [ -z "$OLD_EXTERNAL_ONLY" ]; then
+  pass "PRE-FIX CONTROL: the superseded check saw nothing wrong with a fixed, non-external network name (the defect)"
+else
+  fail "PRE-FIX CONTROL: the superseded check saw nothing wrong with a fixed, non-external network name" "it reported '$OLD_EXTERNAL_ONLY'"
+fi
+
+setup_case named-network-outside
+printf '%s' '.networks.default.name = "pihole_shared_net"' > "$FAKE_DIR/config-mutate"
+run_verifier
+expect_rc_nonzero "a network named outside the invocation's namespace blocks the run"
+expect_output     "the escaping name is reported" "escape project isolation.*pihole_shared_net"
+log_lacks         "nothing is created, so no pre-existing network can be adopted" '^compose .*create'
+log_lacks         "no network is removed"                                        '^network rm'
+log_lacks         "no volume is removed"                                         '^volume rm'
+
+
+setup_case named-volume-outside
+printf '%s' '.volumes = {"data": {"name": "scamwall_shared_data", "external": false}}' > "$FAKE_DIR/config-mutate"
+run_verifier
+expect_rc_nonzero "a volume named outside the invocation's namespace blocks the run"
+expect_output     "the escaping volume name is reported" "escape project isolation.*scamwall_shared_data"
+log_lacks         "nothing is created for an escaping volume name" '^compose .*create'
+log_lacks         "no volume is removed for an escaping volume name" '^volume rm'
+
+# A resource that already exists under the name the configuration fixes must be
+# left exactly as it was: not adopted, not reconfigured, not deleted.
+setup_case named-network-preexisting
+printf '%s' '.networks.default.name = "pihole_shared_net"' > "$FAKE_DIR/config-mutate"
+printf 'pihole_shared_net\n' > "$FAKE_DIR/live-networks"
+run_verifier
+expect_rc_nonzero "a run that would adopt a pre-existing named network fails"
+log_lacks "the pre-existing network is never removed" 'network rm'
+if [ -s "$FAKE_DIR/removed" ]; then
+  fail "no resource at all is removed when a name would escape isolation" "removed: $(tr '\n' ' ' < "$FAKE_DIR/removed")"
+else
+  pass "no resource at all is removed when a name would escape isolation"
+fi
+
+setup_case named-volume-inside
+# $p is a jq variable bound by the fake's `--arg p`, not a shell variable.
+# shellcheck disable=SC2016
+printf '%s' '.volumes = {"data": {"name": ($p + "_data")}}' > "$FAKE_DIR/config-mutate"
+run_verifier
+expect_rc_zero "a volume named inside the invocation's namespace is accepted"
+expect_output  "the namespaced name is confirmed" 'volumes name.*inside this invocation'
+
+# --- 21. Mount comparison errors are not suppressed ---------------------------
+echo
+echo "-- mount comparison failures --"
+
+setup_case mount-sort-control
+: > "$FAKE_DIR/break-sort-o"
+printf 'b\na\n' > "$FAKE_DIR/probe.txt"
+if with_fake_bin env LC_ALL=C sort -o "$FAKE_DIR/probe.txt" "$FAKE_DIR/probe.txt" 2>/dev/null; then
+  fail "PRE-FIX CONTROL: 'sort ... || true' reported success while the sort failed" "the sort succeeded, so this control proves nothing"
+elif { with_fake_bin env LC_ALL=C sort -o "$FAKE_DIR/probe.txt" "$FAKE_DIR/probe.txt" 2>/dev/null || true; }; then
+  pass "PRE-FIX CONTROL: 'sort ... || true' reported success while the sort failed (the defect)"
+else
+  fail "PRE-FIX CONTROL: 'sort ... || true' reported success while the sort failed" "it returned nonzero, so this control proves nothing"
+fi
+
+setup_case mount-sort-fails
+: > "$FAKE_DIR/break-sort-o"
+run_verifier
+expect_rc_nonzero "a mount comparison that could not be prepared fails the gate"
+expect_output     "the comparison is reported as unproven, not clean" 'mount set could not be sorted'
+expect_no_output  "no clean mount verdict is printed" 'no unexpected mounts'
+
+# --- 22. The approved mount set is enforced independently of configuration ----
+#
+# Deriving the expectation from `docker compose config` and comparing it with
+# `docker inspect` proves only that the two AGREE. A mount added to BOTH is
+# invisible to that comparison.
+echo
+echo "-- the approved mount set --"
+
+BOTH_SIDES='bind|/srv/config.json|/etc/scamwall/config.json|ro
+bind|/srv/feed.json|/etc/scamwall/feed.json|ro
+bind|/srv/pihole-ca.crt|/etc/scamwall/certs/pihole-ca.crt|ro
+bind|/srv/secrets/pihole_app_password|/run/secrets/pihole_app_password|ro
+bind|/srv/extra.json|/etc/scamwall/extra.json|ro'
+printf '%s\n' "$BOTH_SIDES" > "$ROOT/both-expected.txt"
+printf '%s\n' "$BOTH_SIDES" > "$ROOT/both-observed.txt"
+OLD_MISSING="$(LC_ALL=C comm -23 "$ROOT/both-expected.txt" "$ROOT/both-observed.txt" | tr -d '\n')"
+OLD_EXTRA="$(LC_ALL=C comm -13 "$ROOT/both-expected.txt" "$ROOT/both-observed.txt" | tr -d '\n')"
+if [ -z "$OLD_MISSING" ] && [ -z "$OLD_EXTRA" ]; then
+  pass "PRE-FIX CONTROL: a fifth mount present on both sides satisfied the derived comparison (the defect)"
+else
+  fail "PRE-FIX CONTROL: a fifth mount present on both sides satisfied the derived comparison" "missing='$OLD_MISSING' extra='$OLD_EXTRA'"
+fi
+
+if [ -z "$(approved_mount_problems "$ROOT/both-observed.txt")" ]; then
+  fail "the approved-set check rejects a fifth mount" "it reported no problem"
+else
+  pass "the approved-set check rejects a fifth mount"
+fi
+printf 'bind|/srv/config.json|/etc/scamwall/config.json|ro\nbind|/srv/feed.json|/etc/scamwall/feed.json|ro\nbind|/srv/pihole-ca.crt|/etc/scamwall/certs/pihole-ca.crt|ro\nbind|/srv/secrets/pihole_app_password|/run/secrets/pihole_app_password|ro\n' > "$ROOT/approved-exact.txt"
+if [ -z "$(approved_mount_problems "$ROOT/approved-exact.txt")" ]; then
+  pass "the approved-set check accepts exactly the four approved mounts"
+else
+  fail "the approved-set check accepts exactly the four approved mounts" "$(approved_mount_problems "$ROOT/approved-exact.txt")"
+fi
+if approved_mount_problems "$ROOT/definitely-not-here.txt" >/dev/null 2>&1; then
+  fail "an unreadable mount listing is a failure, not an absence of problems" "it returned 0"
+else
+  pass "an unreadable mount listing is a failure, not an absence of problems"
+fi
+
+setup_case mounts-extra-both-sides
+compose_config_json '.services.scamwall.volumes += [{"type":"bind","source":"/srv/extra.json","target":"/etc/scamwall/extra.json","read_only":true}]' > "$FAKE_DIR/compose-config.json"
+container_json '.[0].Mounts += [{"Type":"bind","Source":"/srv/extra.json","Destination":"/etc/scamwall/extra.json","RW":false}]' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_nonzero "a mount present in BOTH the configuration and the inspection still fails"
+expect_output     "the unapproved destination is named" 'extra\.json.* is not an approved mount destination'
+
+setup_case mounts-type-both-sides
+compose_config_json '(.services.scamwall.volumes[] | select(.target == "/etc/scamwall/feed.json") | .type) = "volume"' > "$FAKE_DIR/compose-config.json"
+container_json '(.[0].Mounts[] | select(.Destination == "/etc/scamwall/feed.json") | .Type) = "volume"' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_nonzero "an approved destination mounted with the wrong type fails on both sides"
+expect_output     "the wrong mount type is named" "is a 'volume' mount, not a bind"
+
+setup_case mounts-unresolved-source-both-sides
+compose_config_json '(.services.scamwall.volumes[] | select(.target == "/etc/scamwall/config.json") | .source) = ""' > "$FAKE_DIR/compose-config.json"
+container_json '(.[0].Mounts[] | select(.Destination == "/etc/scamwall/config.json") | .Source) = ""' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_nonzero "an approved destination without a resolved source fails on both sides"
+expect_output     "the unresolved source is named" 'no resolved absolute source'
+
+# --- 23. Numeric parsing is explicit, bounded and overflow-safe ---------------
+echo
+echo "-- numeric parsing --"
+
+if [ "$((010 * 1024))" -eq 8192 ]; then
+  pass "PRE-FIX CONTROL: bash arithmetic reads a leading zero as octal (the defect)"
+else
+  fail "PRE-FIX CONTROL: bash arithmetic reads a leading zero as octal" "010 * 1024 was $((010 * 1024))"
+fi
+if [ "$((18014398509483008 * 1024))" -eq 1048576 ]; then
+  pass "PRE-FIX CONTROL: the superseded multiplication wrapped a huge size into a permitted one (the defect)"
+else
+  fail "PRE-FIX CONTROL: the superseded multiplication wrapped a huge size into a permitted one" "product was $((18014398509483008 * 1024))"
+fi
+
+check_size() { # label input expected-or-REJECT
+  local got
+  if got="$(size_to_bytes "$2" 2>/dev/null)"; then
+    if [ "$3" = "REJECT" ]; then fail "$1" "'$2' was accepted as $got"
+    elif [ "$got" = "$3" ]; then pass "$1"
+    else fail "$1" "'$2' became '$got', expected '$3'"; fi
+  else
+    if [ "$3" = "REJECT" ]; then pass "$1"
+    else fail "$1" "'$2' was rejected, expected '$3'"; fi
+  fi
+}
+check_size "a leading zero is read as decimal, not octal"   010k                   10240
+check_size "a leading zero is normalised away"              010                    10
+check_size "a size that would wrap the multiplication is rejected" 18014398509483008k REJECT
+check_size "an excessively long value is rejected"          99999999999999999999   REJECT
+check_size "a large but representable size is rejected by the ceiling" 4096g        REJECT
+check_size "an ordinary size still converts"                4g                     4294967296
+check_size "an ordinary mebibyte size still converts"       16m                     16777216
+
+if to_decimal '' >/dev/null 2>&1; then fail "to_decimal rejects an empty value" "accepted"; else pass "to_decimal rejects an empty value"; fi
+if to_decimal '1x' >/dev/null 2>&1; then fail "to_decimal rejects a non-numeric value" "accepted"; else pass "to_decimal rejects a non-numeric value"; fi
+if to_decimal '-1' >/dev/null 2>&1; then fail "to_decimal rejects a negative value" "accepted"; else pass "to_decimal rejects a negative value"; fi
+if [ "$(to_decimal '0009')" = "9" ]; then pass "to_decimal reads leading zeros in base 10"; else fail "to_decimal reads leading zeros in base 10" "got $(to_decimal '0009')"; fi
+if to_decimal '11' 10 >/dev/null 2>&1; then fail "to_decimal enforces its maximum" "11 was accepted with max 10"; else pass "to_decimal enforces its maximum"; fi
+if is_uint '010' 1 10; then pass "is_uint reads a leading zero in base 10"; else fail "is_uint reads a leading zero in base 10" "010 was rejected within 1..10"; fi
+
+setup_case tmpfs-wrapping-size
+WRAP_OPTS='rw,noexec,nosuid,nodev,size=18014398509483008k'
+container_json ".[0].HostConfig.Tmpfs = {\"/tmp\": \"$WRAP_OPTS\"}" > "$FAKE_DIR/container.json"
+compose_config_json ".services.scamwall.tmpfs = [\"/tmp:$WRAP_OPTS\"]" > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a tmpfs size that only fits by wrapping the arithmetic fails"
+expect_output     "the unparseable size is named" 'not a parseable size'
+
+# `max-file: "09"` is a valid Compose value meaning nine files, and an INVALID
+# octal literal. The superseded code fed it straight to `$(( ))` inside the
+# condition of an `elif`. Bash reports the arithmetic error on stderr and the
+# condition takes NEITHER branch — so no verdict about the logging bound was
+# printed at all, and the run continued to report success having never
+# evaluated the bound it claims to check.
+BRANCH_TAKEN="$( { set -uo pipefail; A=5242880; B=09
+  if [ "$A" -le 0 ]; then printf 'first'
+  elif [ $((A * B)) -gt 536870912 ]; then printf 'over'
+  else printf 'within'; fi; } 2>/dev/null )"
+if [ -z "$BRANCH_TAKEN" ]; then
+  pass "PRE-FIX CONTROL: an octal-invalid value in an elif condition takes no branch, so nothing is reported (the defect)"
+else
+  fail "PRE-FIX CONTROL: an octal-invalid value in an elif condition takes no branch" "the '$BRANCH_TAKEN' branch ran, so this control proves nothing"
+fi
+setup_case log-maxfile-leading-zero
+container_json '.[0].HostConfig.LogConfig.Config["max-file"] = "09"' > "$FAKE_DIR/container.json"
+compose_config_json '.services.scamwall.logging.options["max-file"] = "09"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_output  "a max-file with a leading zero is read as decimal and the bound is actually evaluated" 'log size is bounded .*max-file=09'
+expect_rc_zero "nine log files of five mebibytes is within the permitted total"
+
+setup_case log-maxfile-too-many
+container_json '.[0].HostConfig.LogConfig.Config["max-file"] = "0011"' > "$FAKE_DIR/container.json"
+compose_config_json '.services.scamwall.logging.options["max-file"] = "0011"' > "$FAKE_DIR/compose-config.json"
+run_verifier
+expect_rc_nonzero "a max-file above the permitted maximum still fails once leading zeros are stripped"
+expect_output     "the out-of-range max-file is named" "max-file '0011' is missing or not an integer"
+
+# --- 24. Required inspection fields ------------------------------------------
+#
+# `// 0` and `// ""` made assertions total AND vacuous: the default was
+# indistinguishable from the value the requirement demands.
+echo
+echo "-- required inspection fields --"
+
+MISSING_STATE='[{"State":{},"HostConfig":{},"NetworkSettings":{}}]'
+OLD_PID="$(jq -r '(.[0].State.Pid // 0) | tostring' <<<"$MISSING_STATE")"
+OLD_NETMODE="$(jq -r '((.[0].HostConfig.NetworkMode // "") != "host") | tostring' <<<"$MISSING_STATE")"
+OLD_PORTS="$(jq -r '(.[0].NetworkSettings.Ports // {}) | length | tostring' <<<"$MISSING_STATE")"
+if [ "$OLD_PID" = "0" ] && [ "$OLD_NETMODE" = "true" ] && [ "$OLD_PORTS" = "0" ]; then
+  pass "PRE-FIX CONTROL: absent State.Pid, NetworkMode and Ports satisfied the superseded assertions (the defect)"
+else
+  fail "PRE-FIX CONTROL: absent fields satisfied the superseded assertions" "pid='$OLD_PID' netmode='$OLD_NETMODE' ports='$OLD_PORTS'"
+fi
+
+require_field_case() { # label jq-mutation expected-message
+  setup_case "field-$3"
+  container_json "$2" > "$FAKE_DIR/container.json"
+  run_verifier
+  expect_rc_nonzero "$1"
+  expect_output     "$1 is reported as a missing or mistyped field" 'required inspection field is absent or of the wrong type'
+}
+require_field_case "an absent State.Pid fails"            'del(.[0].State.Pid)'                  pid
+require_field_case "an absent State.StartedAt fails"      'del(.[0].State.StartedAt)'            started
+require_field_case "an absent RestartCount fails"         'del(.[0].RestartCount)'               restartcount
+require_field_case "an absent NetworkMode fails"          'del(.[0].HostConfig.NetworkMode)'     netmode
+require_field_case "an absent PortBindings fails"         'del(.[0].HostConfig.PortBindings)'    portbindings
+require_field_case "an absent NetworkSettings.Ports fails" 'del(.[0].NetworkSettings.Ports)'     ports
+require_field_case "an absent PidsLimit fails"            'del(.[0].HostConfig.PidsLimit)'       pidslimit
+require_field_case "an absent SecurityOpt fails"          'del(.[0].HostConfig.SecurityOpt)'     securityopt
+require_field_case "a State.Pid of the wrong type fails"  '.[0].State.Pid = "0"'                 pidtype
+require_field_case "a GroupAdd of the wrong type fails"   '.[0].HostConfig.GroupAdd = "5150"'    groupaddtype
+
+setup_case field-image-user
+printf '[{"Id":"%s","RepoTags":[],"RepoDigests":[],"Config":{"Healthcheck":null,"ExposedPorts":{}}}]\n' "$IMAGE_ID" > "$FAKE_DIR/image-inspect.json"
+run_verifier
+expect_rc_nonzero "an absent image Config.User fails"
+expect_output     "the absent image field is reported" 'image inspection field .*Config\.User'
+
+# The optional fields Docker genuinely renders as null must still be accepted.
+setup_case field-capadd-null
+container_json '.[0].HostConfig.CapAdd = null' > "$FAKE_DIR/container.json"
+run_verifier
+expect_rc_zero "a null CapAdd — Docker's representation of 'no capability added' — is accepted"
 
 echo
 echo "=============================================="
