@@ -129,6 +129,14 @@ It is not, and must never become, a verification bypass.
 
 Honest accounting of what is **not** yet proven on live infrastructure.
 
+> **Where this sits.** `docs/VERIFICATION.md` is the authoritative evidence
+> record — every gate result, tied to a commit, tool versions, and where
+> relevant an image ID — and `docs/REQUIREMENTS_MATRIX.md` tracks which
+> requirement each piece of evidence discharges. This section stays as the
+> narrative account of the boundaries themselves and of the discovery work
+> behind them. When the two disagree about a status, `docs/VERIFICATION.md` is
+> correct and this section is stale.
+
 ### 5.1 Secret readability — grant applied, live authentication still unverified
 
 The minimal grant below has been applied on this host. A dedicated system group

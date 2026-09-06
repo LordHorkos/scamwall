@@ -104,17 +104,52 @@ want to hear about it.
 
 ### Verification status
 
-Properties above are exercised by the test suite and by container inspection.
-Two caveats apply to Phase 1 and are stated openly:
+`docs/VERIFICATION.md` is the authoritative record: what was run, against which
+commit and tool versions, and what came out. This is a summary of the caveats
+that bear on the list above.
 
+- Properties 1–8 are exercised by the Go test suite, including structural
+  guards that assert them against the source rather than only against
+  behaviour. Property 9 is exercised against the compose definition and the
+  Dockerfile from repository content, and against a scripted Docker for the
+  verifier's own logic.
+- **Property 9 has not been verified against a built image.** The service
+  account cannot reach the Docker daemon, by deliberate choice: `docker` group
+  membership is root-equivalent on this host. What is proven is that the
+  verifier behaves correctly; what is not proven is anything about a real
+  ScamWall image. Operator commands to close this are in
+  `docs/VERIFICATION.md` §6.1.
 - The **authenticated** Pi-hole path (successful login, authenticated read,
   `DELETE /api/auth` returning `204`) is proven against a fake Pi-hole HTTPS
-  server, **not** yet against the live instance, because the application
-  password is not readable by a non-root process on the deployment host. See
+  server, **not** against the live instance. The current record establishes
+  configured secret permissions, not demonstrated access. See
   `docs/SECURITY_BOUNDARIES.md` §5.1.
 - Container properties hold for the shipped compose definition. A deployment
   that overrides it — for example with a `docker-compose.override.yml` — is
   outside these commitments.
+- **Nothing here is a claim about detection accuracy.** `testdata/feed.json` is
+  a synthetic fixture; a signature proves who wrote a feed, never that its
+  contents are correct. Effectiveness evaluation is Phase 4 and has not begun.
+
+### A note on how these are checked
+
+Two of the checks that back this list were themselves found to be unsound
+during Phase 1 verification, and both were failures in the safe-looking
+direction:
+
+- The secret scanner used `producer | grep -q PATTERN` as a condition under
+  `set -o pipefail`. That is a race — `grep -q` exits on the first match, the
+  producer takes SIGPIPE, and the pipeline reports failure for content that did
+  match. Measured at 200 misses out of 200 for a private key at the head of a
+  1 MB file. Every tracked file in this repository is far smaller, so no real
+  secret was missed, but the control was not sound.
+- The vulnerability gate trusted `govulncheck`'s exit status. That is correct
+  in text mode and wrong in JSON mode, which exits 0 even with findings.
+
+Both are fixed, both now have positive controls, and a static gate fails the
+build if the first construction reappears. They are recorded here because a
+security policy that lists only the properties, and never the times its own
+checks were wrong, is not describing how the project actually works.
 
 ## Handling of credentials
 

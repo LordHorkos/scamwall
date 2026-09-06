@@ -80,47 +80,119 @@ HTTPS server with its own throwaway CA generated at test time.
 **Never point a test at a production Pi-hole.** No test may mutate a real
 instance.
 
+### Gate tooling
+
+`scripts/check.sh` needs these in addition to Go. Any that is missing is
+reported `BLOCKED` and fails the suite, so install them rather than working
+around them.
+
+| Tool | Version used | Install |
+| --- | --- | --- |
+| staticcheck | 2026.2.1 | `go install honnef.co/go/tools/cmd/staticcheck@2026.2.1` |
+| govulncheck | v1.7.0 | `go install golang.org/x/vuln/cmd/govulncheck@v1.7.0` |
+| ShellCheck | 0.11.0 | `apt install shellcheck`, or the static release binary |
+| gitleaks | 8.30.0 | the release binary from `gitleaks/gitleaks` |
+| jq | 1.7 | `apt install jq` |
+
+`go install` puts binaries in `$(go env GOPATH)/bin`, which a non-interactive
+shell may not have on `PATH`. `check.sh` adds it, so tools installed that way
+are found even when your shell does not see them.
+
+The pinned versions match `.github/workflows/gates.yml`. Bumping one is a
+deliberate change that invalidates prior evidence — see
+`docs/REQUIREMENTS_MATRIX.md` §5.
+
 ## Quality gates
 
-All of these must pass before a pull request is merged:
+One command runs everything, and it is the definition of "the gates":
 
 ```bash
-gofmt -l .                # must print nothing
+./scripts/check.sh
+```
+
+It exits 0 only when every **required** gate actually ran and passed. A gate
+that could not run — a missing tool, an unreachable Docker daemon — is reported
+`BLOCKED` and fails the suite. It is never a silent skip: a green summary that
+omits half the gates is worse than a red one, because it invites you to believe
+the work is verified when it is not.
+
+The individual gates, should you want to run one on its own:
+
+```bash
+gofmt -l .                                    # must print nothing
 go vet ./...
 go test -race ./...
 staticcheck ./...
-govulncheck ./...
+shellcheck --severity=style $(git ls-files '*.sh')
+./scripts/govulncheck-gate.sh                 # decides by CONTENT, see below
 ```
 
-Plus, for container changes — these run without Docker daemon access:
+Repository hygiene — two secret scanners, deliberately:
 
 ```bash
-docker compose --env-file deploy/compose/.env \
-  -f deploy/compose/compose.yaml config     # client-side; no daemon needed
-./scripts/container-security-check.sh        # repository content only
-./scripts/tests/runtime-verify-test.sh       # verifier regression tests
+./scripts/secret-scan.sh --tree               # ScamWall-specific rules
+./scripts/independent-secret-scan.sh          # gitleaks over history + tree
+./scripts/tests/secret-scan-test.sh           # controls for the above
+./scripts/tests/pipefail-sigpipe-test.sh      # see "A shell rule" below
+./scripts/container-security-check.sh         # repository content only
+./scripts/tests/runtime-verify-test.sh        # verifier regression tests
 ```
 
-And, with Docker daemon access, operator-executed:
+Neither scanner is a superset of the other. `secret-scan.sh` knows ScamWall —
+which paths must never be tracked, that the Pi-hole password lives at a fixed
+location, that a certificate body means the private CA leaked. gitleaks knows
+the world's credential formats. Both are required.
+
+`govulncheck-gate.sh` exists because `govulncheck -format json` **exits 0 even
+when it has findings**. A gate that trusts the exit status in that mode reports
+a vulnerable dependency set as clean. The gate parses the result instead, and
+treats output it cannot parse as UNPROVEN rather than as a pass.
+
+With Docker daemon access, operator-executed:
 
 ```bash
 docker build -f container/Dockerfile -t scamwall:local .
-./scripts/container-runtime-verify.sh        # image + container; needs no git
+SCAMWALL_EXPECTED_IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)" \
+  ./scripts/container-runtime-verify.sh       # image + container; needs no git
 ```
 
 The runtime verifier is a separate program from the repository checker because
 it runs on the other side of a privilege boundary. See
 `docs/SECURITY_BOUNDARIES.md` §5.5.
 
-And before every commit:
+### A shell rule you must follow
+
+In any script that sets `pipefail`, **never let a short-circuiting consumer
+decide a condition**:
 
 ```bash
-./scripts/secret-scan.sh
+if producer | grep -q PATTERN; then ...   # WRONG
+```
+
+`grep -q` exits at the first match; the producer takes SIGPIPE and dies with
+141; `pipefail` makes that the pipeline's status; the `if` reads false for input
+that *did* match. This is not theoretical — it produced a 100% false-clean in
+the secret scanner for files larger than the pipe buffer, and a silent false
+PASS in a regression test. Use a herestring, a direct file argument, or a
+captured variable:
+
+```bash
+if grep -q PATTERN <<<"$producer_output"; then ...   # right
+if grep -q PATTERN somefile; then ...                # right
+```
+
+`scripts/tests/pipefail-sigpipe-test.sh` enforces this. See
+`docs/VERIFICATION.md` §4.1.
+
+### Before every commit
+
+```bash
+./scripts/secret-scan.sh              # staged content
+./scripts/independent-secret-scan.sh --staged
 ```
 
 `.gitignore` is a safety net, not a control. The repository is **public** —
 check what you are actually staging with `git diff --cached` before committing.
-
 ## Coding standards
 
 - Standard `gofmt`. No custom formatting.
