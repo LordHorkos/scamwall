@@ -178,7 +178,8 @@ export SCAMWALL_SECRET_FILE="$FIX/pihole_app_password"
 # the deployment names the group that really owns them. Reproduced here rather
 # than assumed: without it CI would resolve the default 65532 and the
 # readability assertion below would be checking a relationship CI never has.
-export SCAMWALL_SECRET_GID="$(id -g)"
+SCAMWALL_SECRET_GID="$(id -g)"
+export SCAMWALL_SECRET_GID
 if ! resolve "$ROOT/ci.json" "$ROOT/ci.err"; then
   fail "the definition resolves under CI conditions" "$(tr '\n' '|' < "$ROOT/ci.err")"
 else
