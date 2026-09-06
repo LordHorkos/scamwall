@@ -118,6 +118,18 @@ jobs:
           echo "jq:          $(jq --version)"
           echo "docker:      $(docker --version 2>/dev/null || echo 'not available')"
 
+          # Compose is the tool behind the `docker compose config` gate and behind the
+
+          # runtime verifier's configuration resolution. It was not recorded until a
+
+          # result could not be attributed without it: an assertion on the RESOLVED
+
+          # configuration passed locally and failed here, on the same definition,
+
+          # because the two versions render one field differently.
+
+          echo "compose:     $(docker compose version 2>/dev/null || echo 'not available')"
+
       - name: Create disposable deployment fixtures
         # WHY THIS STEP EXISTS
         #
@@ -202,6 +214,23 @@ jobs:
           # material being lost. See scripts/gate-diagnostics.sh.
           SCAMWALL_GATE_DIAG_DIR: ${{ runner.temp }}/gate-diagnostics
         run: bash ./scripts/check.sh
+
+      - name: Record the verified image identity
+        # The container gates BUILD an image and verify it, and `check.sh`
+        # prints a passing gate's output nowhere — so a green run said which
+        # gates passed but not which artifact they passed against. An
+        # image-bound requirement (SW-P1-05, SW-P1-20) needs the ID, and a run
+        # that omits it is not evidence for those rows however green it is.
+        #
+        # `if: always()`, because the ID is just as interesting when the
+        # verification failed. It cannot affect the job's conclusion: it runs
+        # after the gate step, and `|| true` keeps a missing image (the build
+        # itself failed) from adding a second, misleading failure.
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "verified image: $(docker image inspect -f '{{.Id}}' scamwall:local 2>/dev/null || echo 'no scamwall:local image exists')"
+          echo "source commit:  ${{ github.sha }}"
 
       - name: Upload gate diagnostics
         # Runs whatever the outcome, and cannot change it: the gate step above

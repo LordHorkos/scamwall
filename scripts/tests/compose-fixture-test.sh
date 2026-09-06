@@ -210,21 +210,85 @@ else
     fail "the container sees identical mount destinations in CI and on the operator's host" "ci='$DESTS' operator='$DEF_DESTS'"
   fi
 
-  # `create_host_path: false` must survive resolution. Without it, Docker
+  # `create_host_path: false` must be set on every bind. Without it, Docker
   # invents an empty directory at a missing source and the container starts
   # with no CA behind a perfectly correct-looking mount.
+  #
   # `.bind.create_host_path // true` is WRONG here and was written that way
-  # first: jq's alternative operator treats `false` as absent, so the one
-  # value this assertion exists to detect would be replaced by the default and
-  # the check would report "true" for a definition that correctly says false.
+  # first: jq's alternative operator treats `false` as absent, so the one value
+  # this assertion exists to detect would be replaced by the default and the
+  # check would report "true" for a definition that correctly says false.
   # Presence is therefore tested explicitly.
-  CREATE_PATHS="$(jq -r "[ .services.scamwall.volumes[]
+  #
+  # THE RENDERED CONFIGURATION DOES NOT ALWAYS CARRY THIS FIELD. compose-go
+  # tags `CreateHostPath` with `omitempty`, and `false` is a bool's zero value,
+  # so on those versions `config` output omits the key entirely and a `false`
+  # is indistinguishable from an absent one. Compose v5.5.1 renders it; the
+  # version on `ubuntu-24.04` at the time of writing does not, which is how this
+  # was found — the assertion failed in CI and passed locally against the same
+  # definition (docs/VERIFICATION.md §4.11).
+  #
+  # So the property is checked through whichever channel actually carries it,
+  # and the channel used is REPORTED rather than hidden. The fallback is not a
+  # weakening: it reads the definition itself, which is where the key has to be,
+  # and requires one occurrence per bind rather than merely one anywhere.
+  BIND_COUNT="$(jq -r '[ .services.scamwall.volumes[] | select(.type == "bind") ] | length' < "$ROOT/ci.json")"
+  CREATE_PATHS="$(jq -r "[ .services.scamwall.volumes[] | select(.type == \"bind\")
       | (if (has(\"bind\") and (.bind | has(\"create_host_path\"))) then (.bind.create_host_path | tostring) else \"unset\" end) ]
     | unique | join(\",\")" < "$ROOT/ci.json")"
-  if [ "$CREATE_PATHS" = "false" ]; then
-    pass "no bind may have its source auto-created (create_host_path is false on all of them)"
+  case "$CREATE_PATHS" in
+    false)
+      pass "no bind may have its source auto-created (create_host_path=false on all $BIND_COUNT, observed in the resolved configuration)"
+      ;;
+    unset)
+      # This Compose omits the field when it is false. Fall back to the source.
+      DECLARED="$(grep -cE '^[[:space:]]*create_host_path:[[:space:]]*false[[:space:]]*$' "$CO/deploy/compose/compose.yaml")" || DECLARED=0
+      if [ "$DECLARED" -eq "$BIND_COUNT" ] && [ "$BIND_COUNT" -gt 0 ]; then
+        pass "no bind may have its source auto-created (create_host_path=false declared on all $BIND_COUNT binds; this Compose omits the field from rendered output, so the definition was read instead)"
+      else
+        fail "no bind may have its source auto-created" \
+             "$DECLARED declaration(s) of create_host_path=false for $BIND_COUNT bind mount(s), and this Compose does not render the field"
+      fi
+      ;;
+    *)
+      fail "no bind may have its source auto-created" "resolved: '$CREATE_PATHS'"
+      ;;
+  esac
+
+  # Both branches must be exercised wherever this runs. Whichever channel this
+  # host happens to use, the other one is unexercised and could rot unnoticed
+  # until the next environment change — which is exactly how the original
+  # assertion survived local runs and failed in CI. The unused branch is
+  # therefore driven against a resolved configuration with the field stripped,
+  # simulating the Compose versions that omit it.
+  SIMULATED="$ROOT/ci-without-bind-field.json"
+  jq '.services.scamwall.volumes |= map(del(.bind))' < "$ROOT/ci.json" > "$SIMULATED"
+  SIM_RENDERED="$(jq -r '[ .services.scamwall.volumes[] | select(.type == "bind")
+      | (if (has("bind") and (.bind | has("create_host_path"))) then (.bind.create_host_path | tostring) else "unset" end) ]
+    | unique | join(",")' < "$SIMULATED")"
+  if [ "$SIM_RENDERED" = "unset" ]; then
+    pass "a Compose that omits create_host_path is detected as 'unset', not silently as 'true'"
   else
-    fail "no bind may have its source auto-created" "resolved: '$CREATE_PATHS'"
+    fail "a Compose that omits create_host_path is detected as 'unset', not silently as 'true'" "got '$SIM_RENDERED'"
+  fi
+  SIM_DECLARED="$(grep -cE '^[[:space:]]*create_host_path:[[:space:]]*false[[:space:]]*$' "$CO/deploy/compose/compose.yaml")" || SIM_DECLARED=0
+  if [ "$SIM_DECLARED" -eq "$BIND_COUNT" ]; then
+    pass "the source-definition fallback accepts this definition, so the CI branch is exercised here too"
+  else
+    fail "the source-definition fallback accepts this definition" "$SIM_DECLARED declaration(s) for $BIND_COUNT bind(s)"
+  fi
+
+  # A negative control for the fallback, so that "the definition declares it"
+  # cannot pass by matching nothing. A definition with the key removed must be
+  # rejected by the same expression.
+  STRIPPED="$ROOT/compose-without-create-host-path.yaml"
+  grep -vE '^[[:space:]]*create_host_path:[[:space:]]*false[[:space:]]*$' "$CO/deploy/compose/compose.yaml" > "$STRIPPED"
+  STRIPPED_COUNT="$(grep -cE '^[[:space:]]*create_host_path:[[:space:]]*false[[:space:]]*$' "$STRIPPED")" || STRIPPED_COUNT=0
+  if [ "$STRIPPED_COUNT" -eq 0 ]; then
+    pass "NEGATIVE CONTROL: a definition with create_host_path removed is not accepted by the fallback"
+  else
+    fail "NEGATIVE CONTROL: a definition with create_host_path removed is not accepted by the fallback" \
+         "the stripped definition still matched $STRIPPED_COUNT time(s)"
   fi
 
   # Fixtures must not sit inside the image build context, or `docker build`

@@ -107,7 +107,7 @@ visible rather than silently absent.
 
 | Row | State | Next step |
 | --- | --- | --- |
-| SW-P1-12 | BLOCKED | Needs a hosted CI run that **passes**. One run has happened — <https://github.com/LordHorkos/scamwall/actions/runs/34036997074> at `2a18874`, `docs/VERIFICATION.md` §3.8 — and failed: 20 passed, 1 failed, 0 BLOCKED. Its two named prerequisites are now done: FINDING-23 is fixed at `ef40156`, and the fixture question is settled as option A at `aa49797` (§6.3). What remains is the run itself, of the workflow as it now stands, which has never executed |
+| SW-P1-12 | BLOCKED | Needs a hosted CI run that **passes**. Two have happened and both failed. 34036997074 at `2a18874`: 20 passed, 1 failed, and the log did not say why (§3.8). 34045148578 at `07154b6`: **23 passed, 1 failed, 0 BLOCKED**, and the log said exactly why (§3.11). The second run is materially closer: the container gates executed and PASSED on the runner, and the single failure was in a gate this session added, whose assertion read a Compose field that not every Compose version renders — FINDING-27, fixed. What remains is a run of the corrected workflow |
 | SW-P1-05 | IMPLEMENTED-UNVERIFIED | Demoted by §5: `aa49797` changes `deploy/compose/compose.yaml` **and** `scripts/container-runtime-verify.sh`, and the verifier now makes assertions the `b6b1769` run never evaluated. Renewal is an operator action: `docs/VERIFICATION.md` §6.1 |
 | SW-P1-20 | IMPLEMENTED-UNVERIFIED | Its ELF controls are untouched and still pass (§3.6). Its image-bound half lapsed with SW-P1-05: no image has been built from `aa49797`. Same renewal |
 
@@ -462,7 +462,7 @@ conflated here, and this row keeps them apart:
 | --- | --- | --- |
 | Implementation review | the workflow file was read property by property against the requirement | DONE — `docs/VERIFICATION.md` §3.4, re-done at `aa49797` for the three new steps |
 | Local simulation | the same gate list was executed locally, as the service account | DONE — `bash scripts/check.sh`, §3.0. This exercises the GATES, not the workflow: it says nothing about `permissions:`, action pinning, runner image, or fork-PR secret handling. `scripts/tests/compose-fixture-test.sh` narrows the gap slightly by resolving the deployment under the runner's conditions (§3.9), and narrows it only slightly: it still runs here |
-| Hosted CI run | the workflow itself executed on GitHub, with a run URL and log | **DONE ONCE, AND IT FAILED** — run 34036997074 at `2a18874`, §3.8. The workflow at `aa49797` has not run |
+| Hosted CI run | the workflow itself executed on GitHub, with a run URL and log | **DONE TWICE, BOTH FAILED** — 34036997074 at `2a18874` (§3.8) and 34045148578 at `07154b6` (§3.11). The second executed the container gates on the runner and they PASSED; its one failure was FINDING-27, in a gate added by this session |
 
 **Evidence required.** A hosted run: workflow file at a named commit, a run
 URL, the recorded tool versions from that run's log, and the outcome of each
@@ -502,16 +502,20 @@ operator's host; this is independent corroboration from a second one.
    exempting CI from the container gates. The reasoning for deciding it without
    the old run's cause in hand — including why option B was rejected on its
    merits — is `docs/VERIFICATION.md` §6.3.
-3. **Then a passing run**, recorded against its own commit. **Outstanding.** The
-   workflow as it now stands has never executed, so this row is blocked on
-   exactly one thing: running it.
+3. **Then a passing run**, recorded against its own commit. **Outstanding.** Run
+   34045148578 exercised the whole corrected pipeline — fixtures, container
+   gates, failure reporting, artifact upload, cleanup — and failed on one
+   assertion, since fixed (FINDING-27). This row is blocked on a run of the
+   corrected workflow.
 
-**What is deliberately NOT claimed by steps 1 and 2.** Neither has been observed
-on a runner. The `::group::` markers, the artifact upload, the fixture step and
-its cleanup have all been reviewed and tested locally, and every one of them is
-a hypothesis about GitHub's behaviour until a run exercises it. If the next run
-fails inside the fixture step, that is a defect in this work and not a reason to
-loosen anything.
+**Steps 1 and 2 have now been observed on a runner** — run 34045148578. The
+`::group::` markers, the artifact upload (792 bytes), the fixture step
+(0600 files in a 0700 directory) and its cleanup all behaved as designed, and
+the container gates executed and passed. The caveat that stood here — that all
+of it was a hypothesis about GitHub's behaviour until a run exercised it — was
+well placed: the run also found FINDING-27, an assertion added by this session
+that read a Compose field not every Compose version renders. That is a defect in
+this work, and it was fixed rather than accommodated.
 
 **Two things this row will still not cover when it closes.** Both are recorded
 now, because the moment a green run exists they become easy to forget:

@@ -99,17 +99,20 @@ cleanup problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7). `ef40156` and
 built from `aa49797`. Renewal is an operator action — `docs/VERIFICATION.md`
 §6.1 — and is expected to pass; expected is not observed.
 
-**SW-P1-12 is the one BLOCKED requirement, so the phase does not close.**
-The workflow was executed with operator approval — run 34036997074 at
-`2a18874` — and it failed: 20 passed, 1 failed, 0 BLOCKED
-(`docs/VERIFICATION.md` §3.8). The run established that CI works, records its
-tool versions, runs the same gate list as the local suite, and builds the image
-on an independent host; it did not produce a passing run, and it did not say why
-it failed. Both named prerequisites are now discharged — FINDING-23 is fixed at
-`ef40156`, and the fixture question is decided as option A at `aa49797` — so the
-row is blocked on running the workflow, and on nothing else.
+**SW-P1-12 is the one BLOCKED requirement, so the phase does not close.** Two
+hosted runs have been executed with operator approval, and both failed.
 
-Twenty-six findings were raised and resolved along the way. The most serious
+Run 34036997074 at `2a18874`: 20 passed, 1 failed, and the log did not say why
+(`docs/VERIFICATION.md` §3.8). Run 34045148578 at `07154b6`: 23 passed, 1
+failed, 0 BLOCKED (§3.11) — and this one is materially different. The container
+gates executed on the runner and **passed**, which is what the fixture work was
+for; the failure reporting worked, so the single failure was diagnosed from the
+run's own log; and that failure was FINDING-27, a defect in an assertion this
+session added rather than anything about the deployment. It is fixed.
+
+The row is blocked on a run of the corrected workflow, and on nothing else.
+
+Twenty-eight findings were raised and resolved along the way. The most serious
 were a `pipefail`/SIGPIPE race that made the secret scanner report a planted
 private key as clean 200 times out of 200 in a 1 MB file
 (`docs/VERIFICATION.md` §4.1), and seventeen false-pass defects in the runtime
@@ -249,7 +252,7 @@ from the service account:
 
 | Outstanding | Why | Who |
 | --- | --- | --- |
-| A hosted run that passes | SW-P1-12's acceptance criterion, unchanged | Needs an approved push; the run follows automatically from the branch filter |
+| A hosted run that passes | SW-P1-12's acceptance criterion, unchanged. Two runs, both failed; the second reached 23 passed / 1 failed with the container gates green, and its one failure is fixed | Needs an approved push; the run follows automatically from the branch filter |
 | Runtime assertions tied to an image ID | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition | Operator — `docs/VERIFICATION.md` §6.1 |
 | Deployment resources survive checker execution | Demonstrated against the scripted fake at `aa49797` (336 cases) but not re-demonstrated against a real daemon since `b6b1769` | Same operator run |
 

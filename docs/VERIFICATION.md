@@ -113,6 +113,7 @@ about the code.
 | gitleaks | 8.30.0 |
 | jq | 1.7 |
 | Docker CLI | 29.8.0 (build 88096ef) — **daemon not reachable by this account** |
+| Docker Compose | v5.5.1. Recorded from FINDING-27 onward: it is the tool behind the `docker compose config` gate and behind the runtime verifier's configuration resolution, and two hosts disagreeing about a resolved field could not be explained while it went unrecorded. The runner's version differs and is printed by the workflow's `Record tool versions` step |
 
 `go.mod` pins `toolchain go1.26.8`; the installed toolchain matches, and
 go.dev reports it as a currently supported release.
@@ -927,6 +928,89 @@ patched, because a decoy in history is permanent and neither had been pushed.
 
 ---
 
+### 3.11 Second hosted CI run (SW-P1-12)
+
+The workflow at `07154b6` was executed. This is the first run of the workflow as
+changed by `aa49797`, and the first in which the container gates actually ran.
+
+| | |
+| --- | --- |
+| Run | <https://github.com/LordHorkos/scamwall/actions/runs/34045148578> |
+| Commit reported by the run | `07154b649c5ef43162e70319986eefb248f059e5` |
+| Trigger | `push` to `feat/phase-1-core` |
+| Runner | Ubuntu 24.04.4 LTS, Docker 28.0.4 |
+| Duration | 3m39s |
+| Job conclusion | **failure** |
+| Summary | **23 passed, 1 failed, 0 BLOCKED, 0 optional-skipped** |
+
+**Every required step's result**, because "the job failed" is not a per-step
+report:
+
+| Step | Result |
+| --- | --- |
+| Set up job, checkout, Set up Go, Install ShellCheck, Install gitleaks, Install Go analysis tools, Record tool versions | success |
+| **Create disposable deployment fixtures** | **success** — `-rw------- runner runner 232 pihole-ca.crt`, `-rw------- runner runner 45 pihole_app_password`, in a 0700 directory. No content echoed |
+| **Run the gate suite** | **failure**, exit 1 |
+| **Upload gate diagnostics** | success — artifact `gate-diagnostics-34045148578-1`, 792 bytes, expires 2026-09-13 |
+| **Remove disposable fixtures** | success — `CI fixtures removed.`, and the step re-tests for the directory before saying so |
+| Post checkout, Complete job | success |
+
+**Three things this run establishes that no previous one did.**
+
+*First, the container gates execute and pass on an independent host:*
+
+```
+-- container runtime (operator-executed, needs daemon) --
+  PASS    docker build
+  PASS    container runtime verification
+```
+
+That is the whole purpose of option A, and it worked. The runtime verifier ran
+on a CI-built image with CI fixtures and passed every assertion — including the
+three added at `aa49797`: exactly the approved mounts, every source an existing
+regular file, and the password file not world-readable through its path. The
+`b6b1769` run of the verifier had a real CA and a real password behind those
+mounts; this one had fixtures. Both satisfied the same checks.
+
+*Second, a red run is now diagnosable from its own log.* The failing gate
+printed its reason, then its complete sanitized output inside a `::group::`,
+then the artifact path — 21 lines where the previous run gave 25 lines of `PASS`
+and no diagnosis:
+
+```
+  FAIL    compose definition under runner conditions
+         --- why it failed (exit status 1) ---
+         FAIL no bind may have its source auto-created
+         --- full output (21 line(s), sanitized) ---
+::group::gate output: compose definition under runner conditions
+         …
+         FAIL no bind may have its source auto-created
+                resolved: 'unset'
+         …
+##[endgroup]
+         sanitized capture retained at: /home/runner/work/_temp/gate-diagnostics/…
+```
+
+FINDING-23's fix is now observed on a runner, not only locally. The `::group::`
+markers, the artifact upload and the retained capture all worked as designed.
+
+*Third, the failure is a defect in this session's own work, not in the
+deployment* — FINDING-27, §4.11. The one failing gate is
+`compose definition under runner conditions`, added at `aa49797`. It asserted a
+property of the deployment through a channel that does not carry that property
+on every Compose version.
+
+**What this run does NOT establish.**
+
+| Claim | Why not |
+| --- | --- |
+| CI passes | It did not. 23 passed, 1 failed; the acceptance criterion for SW-P1-12 is unchanged and unmet |
+| SW-P1-05 or SW-P1-20 are renewed | The verification passed against an image whose **ID is nowhere in the log**. `check.sh` prints nothing for a passing gate, so a green container gate does not say what it was green about. FINDING-28, §4.11 |
+| Why the `2a18874` run failed | Still unrecoverable from that run. This run is a different commit with fixtures present, so it cannot speak to it |
+| `bind.create_host_path: false` is honoured by the runner's Compose | Unknown, and now known to be unknown. See §4.11 |
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
@@ -1200,7 +1284,8 @@ part worth removing; an inline suppression would have kept it.
 Neither of the last two belongs to Phase 1 as a code defect; each observation
 here is registered against the row or phase that owns it so it is not lost. The
 Phase 1 code defects found here have their own sections — FINDING-23 (§4.9) and
-FINDING-24 … FINDING-26 (§4.10) — and all four are now fixed.
+FINDING-24 … FINDING-26 (§4.10) and FINDING-27 … FINDING-28 (§4.11) — and all six
+are now fixed.
 
 **The CI job cannot pass on a hosted runner as configured (SW-P1-12) —
 ADDRESSED at `aa49797`.** The observation was correct as far as it went, and it
@@ -1601,6 +1686,97 @@ verdict.
 This deliberately does **not** claim the container can read the file. The
 verifier never starts a container, so that remains exactly where §7 has always
 put it: not established.
+
+---
+
+### 4.11 FINDING-27 and FINDING-28 — found by the second hosted run
+
+Both were found by the run in §3.11, and both are defects in this session's own
+work rather than in the deployment. Recording them that way matters: the first
+hosted run found a defect in the gate suite, and it would be easy to present
+this second one as "CI is nearly green" instead of "the new gate was wrong".
+
+#### FINDING-27 — an assertion read a property through a channel that does not carry it
+
+**Severity: low as a security matter, high as a lesson. Fixed at the commit
+carrying this document.**
+
+`scripts/tests/compose-fixture-test.sh` asserted that every bind in the resolved
+configuration carries `create_host_path: false`. It passed locally and failed in
+CI, on a byte-identical definition:
+
+```
+FAIL no bind may have its source auto-created
+       resolved: 'unset'
+```
+
+The cause is not the definition. `compose-go` tags `CreateHostPath` with
+`omitempty`, and `false` is a `bool`'s zero value, so on those versions
+`docker compose config` **omits the field entirely** and a `false` is
+indistinguishable in the rendered output from an absent one. Compose v5.5.1
+(this host) renders it; the version shipped with Docker 28.0.4 on
+`ubuntu-24.04` does not.
+
+Note what the earlier revision of this assertion did. It read
+`.bind.create_host_path // true`, which jq resolves to `true` for a `false`
+value — so it reported `true` for a definition that correctly said `false`. That
+was found and fixed while writing the test. The corrected form then had the
+*opposite* problem in a different environment. The property is genuinely awkward
+to observe, and both mistakes came from assuming the rendered configuration is a
+faithful mirror of the definition. It is a projection, and projections lose
+things.
+
+**Fixed by checking whichever channel carries the property, and saying which
+was used.** Where the field is rendered, the rendered value is asserted. Where
+it is omitted, the definition itself is read and one `create_host_path: false`
+is required *per bind* — stricter than "one somewhere". The branch that this
+host does not take is exercised anyway, against a resolved configuration with
+the field stripped, because an unexercised branch is how the original defect
+survived every local run. A negative control confirms a definition with the key
+removed is rejected.
+
+**The load-bearing check was never this one.** FINDING-25 is defended primarily
+by the verifier's host-side rule that every approved mount source is an existing
+regular file — which runs in both environments, needs no Compose cooperation,
+and **passed on the runner** in §3.11. `create_host_path: false` is defence in
+depth, and whether the runner's Compose honours it at create time is not
+established: the fixtures existed, so nothing would have been auto-created
+either way. That is stated rather than assumed.
+
+**An attribution gap it exposed, and the real reason it took a diff to explain.**
+`docker compose config` is a required gate, and the runtime verifier resolves
+the deployment through Compose — yet **no Compose version was recorded by either
+host**. §2.2 records the Docker CLI and not the thing that actually parsed the
+definition. Two runs disagreed and neither log said what had parsed it. The
+workflow now records `docker compose version`, and §2.2 carries it for this
+host.
+
+#### FINDING-28 — a passing container gate does not record what it passed against
+
+**Severity: medium for evidence, none for security. Fixed at the commit carrying
+this document.**
+
+In §3.11 `container runtime verification` **passed** on the runner. That is the
+result option A was built to obtain — and it cannot be used as evidence for
+SW-P1-05 or SW-P1-20, because the log does not say which image it verified.
+
+`check.sh` prints a gate's captured output only on failure, which is right for a
+log's readability and wrong for exactly one gate: the container gates *build an
+artifact* and verify it, and the artifact's identity is the evidence. A green
+run therefore said which gates passed but not what they passed about. §6.1 has
+required the image ID from the operator since it was written; CI was not held to
+the same standard.
+
+Fixed in the workflow rather than in `check.sh`: a step after the gate suite
+records `docker image inspect -f '{{.Id}}' scamwall:local` alongside the source
+commit. It runs `if: always()` — the ID is as interesting after a failure — and
+cannot affect the job's conclusion.
+
+**This does not by itself renew SW-P1-05 or SW-P1-20.** Those rows require a run
+against a named image, and a future CI run will record one; whether CI evidence
+*may* renew an image-bound row that §6.1 assigns to the operator is a separate
+question, and this document does not answer it here. What the fix removes is the
+situation where the question could not even be asked.
 
 ---
 
@@ -2223,19 +2399,21 @@ is — but a row tied to `b6b1769` is evidence about `b6b1769`.
 | The gate suite's exit status matches its printed verdict | `CHECK exit=1` observed directly at `b6b1769`, with two gates BLOCKED on this host. §3.0 |
 | The `b6b1769` regression cases discriminate rather than merely agreeing with the code | The `0b083cb` verifier fails 50 of the 319 cases. §3.5 |
 | The workflow runs on GitHub, records its tool versions, and runs the same gate list as the local suite | Run 34036997074 at `2a18874`: versions identical to §2.2, gate list identical to §3.0. §3.8 |
-| The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4. Corroborates §3.7 from a second host. §3.8 |
+| The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4, at `2a18874` (§3.8) and again at `07154b6` (§3.11). Corroborates §3.7 from a second host |
+| The container hardening assertions hold on a second, independent host | `container runtime verification` PASSED in run 34045148578, against a CI-built image with CI fixtures, including the three assertions added at `aa49797`. §3.11. **It does not renew SW-P1-05 or SW-P1-20**: the log does not name the image it verified (FINDING-28, §4.11) |
 
 **Still not established:**
 
 | Claim | Status |
 | --- | --- |
 | The image built by the operator from `b469c59` is verified | **Not established, and superseded.** `sha256:d3c4ed2c…` is an identity on record. No verifier ran against it, and it predates all seventeen findings in §4.7 and §4.8. Do not deploy or cite it |
-| CI passes | **Not established.** The workflow has been executed once — run 34036997074 at `2a18874` — and **failed**: 20 passed, 1 failed, 0 BLOCKED. §3.8. The workflow at `aa49797` has never run at all. This is the only Phase 1 blocker remaining |
+| CI passes | **Not established.** Two runs, both failed. 34036997074 at `2a18874`: 20 passed, 1 failed (§3.8). 34045148578 at `07154b6`: 23 passed, 1 failed, 0 BLOCKED (§3.11) — a different failure, in a gate added by this session, now fixed. This is the only Phase 1 blocker remaining |
+| `bind.create_host_path: false` is honoured by the runner's Compose | **Not established, and newly known to be unknown.** That Compose omits the field from rendered output, so it cannot be observed there, and the CI fixtures existed so nothing would have been auto-created either way. The load-bearing defence against FINDING-25 is the verifier's host-side regular-file check, which does not depend on Compose and passed on the runner. §4.11 |
 | Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
-| A red CI run can be diagnosed from its own log | **Established locally; not yet observed in CI.** FINDING-23 is fixed at `ef40156`, proven by 62 regression cases and demonstrated end to end through `check.sh` with an injected failing gate (§3.10) — but that demonstration ran here, not on a runner. The `::group::` markers and the uploaded artifact have never been exercised by GitHub |
+| A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported was diagnosed from that log alone |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4; demonstrating it needs a fork PR, which even a successful branch run does not provide. §6.3 |
-| The CI fixtures never enter an image or a log | **Established by construction and by test, not by observation on a runner.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; `.dockerignore` and `RUNNER_TEMP` do the rest. No CI run has yet exercised the step |
-| The uploaded gate diagnostics contain nothing credential-shaped | **Established for eleven decoy shapes, on the retained artifact as well as the log** (§4.9). That is a deny-by-pattern filter, so it establishes what those patterns catch and nothing wider. A credential of an unanticipated shape would pass through it |
+| The CI fixtures never enter an image or a log | **Established by construction and by test, and the step has now run.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; run 34045148578 created them 0600 in a 0700 directory, echoed only `ls -l` metadata, and removed them in a step that re-tests before reporting success. §3.11 |
+| The uploaded gate diagnostics contain nothing credential-shaped | **Established for eleven decoy shapes, on the retained artifact as well as the log** (§4.9), and one artifact has now actually been produced and uploaded (792 bytes, §3.11). That is a deny-by-pattern filter, so it establishes what those patterns catch and nothing wider. A credential of an unanticipated shape would pass through it |
 | The container identity can read the mounted secret | **Not established, and `aa49797` does not change it.** The verifier now checks that the password file is not readable by every account on the HOST (FINDING-26) — the opposite question. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read, and no container has been started |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |
 | The destination behind the `pi.hole` pin is reachable, is a Pi-hole, and passes TLS verification | **Not established.** §3.7 proves the pin is configured and applied exactly; nothing was sent through it. Phase 2 — §6.2 |
