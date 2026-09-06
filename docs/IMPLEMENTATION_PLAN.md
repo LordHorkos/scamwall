@@ -84,25 +84,32 @@ around it — ShellCheck, an independent secret detector, content-based
 vulnerability handling, CI — plus the findings this session's own inspection
 raised.
 
-**Status now, at `b6b1769`.** Nineteen of twenty verified — the requirement set
+**Status now, at `aa49797`.** Seventeen of twenty verified — the requirement set
 grew from fifteen to twenty as the work exposed classes that had no requirement
 covering them. `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative; this paragraph
 is a summary and defers to it wherever the two differ.
 
-SW-P1-05 and SW-P1-20 closed on the operator's run at `b6b1769` against image
-`sha256:b95cc07c…`: build exit 0 with the ELF and enforcement-absent assertions
-executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0 cleanup
-problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7).
+**SW-P1-05 and SW-P1-20 were closed and have been re-opened**, not by a failure
+but by the renewal rule. They closed on the operator's run at `b6b1769` against
+image `sha256:b95cc07c…`: build exit 0 with the ELF and enforcement-absent
+assertions executed inside it, verifier 90 passed / 0 failed / 0 blocked / 0
+cleanup problems, `VERIFY exit=0` (`docs/VERIFICATION.md` §3.7). `ef40156` and
+`aa49797` then changed the verifier and the compose definition, which
+`docs/REQUIREMENTS_MATRIX.md` §5 demotes both rows on, and no image has been
+built from `aa49797`. Renewal is an operator action — `docs/VERIFICATION.md`
+§6.1 — and is expected to pass; expected is not observed.
 
-**SW-P1-12 is the one requirement still blocked, so the phase does not close.**
-The workflow has now been executed with operator approval — run 34036997074 at
+**SW-P1-12 is the one BLOCKED requirement, so the phase does not close.**
+The workflow was executed with operator approval — run 34036997074 at
 `2a18874` — and it failed: 20 passed, 1 failed, 0 BLOCKED
 (`docs/VERIFICATION.md` §3.8). The run established that CI works, records its
 tool versions, runs the same gate list as the local suite, and builds the image
-on an independent host; it did not produce a passing run. Closing the row now
-needs FINDING-23 fixed first (§4.9), then the fixture decision in §6.3.
+on an independent host; it did not produce a passing run, and it did not say why
+it failed. Both named prerequisites are now discharged — FINDING-23 is fixed at
+`ef40156`, and the fixture question is decided as option A at `aa49797` — so the
+row is blocked on running the workflow, and on nothing else.
 
-Twenty-two findings were raised and resolved along the way. The most serious
+Twenty-six findings were raised and resolved along the way. The most serious
 were a `pipefail`/SIGPIPE race that made the secret scanner report a planted
 private key as clean 200 times out of 200 in a 1 MB file
 (`docs/VERIFICATION.md` §4.1), and seventeen false-pass defects in the runtime
@@ -173,8 +180,35 @@ because an unparseable result is an unrun check.
 than by tag; a top-level `permissions: contents: read`; `pull_request` rather
 than `pull_request_target`, so fork contributions run without repository
 secrets and without a writable token; every tool version echoed into the run
-log; and the same gate list as `scripts/check.sh`. Docker-dependent gates are
-reported as blocked in CI exactly as they are locally.
+log; and the same gate list as `scripts/check.sh`.
+
+The last clause of that paragraph used to read "Docker-dependent gates are
+reported as blocked in CI exactly as they are locally", and that was wrong about
+the hosted runner: it **has** a daemon, so those gates attempt to run rather than
+block. The first hosted run proved it by building the image successfully and
+then failing the runtime verification. As of `aa49797` the workflow supplies the
+two host files the deployment binds — generated on the runner, outside the image
+build context, removed by a step that fails the job if the removal did not take
+— so the container gates **execute** in CI against a CI-built image.
+
+The rule that decision was made under: **a CI-specific fixture is acceptable; a
+CI-specific bypass of a required assertion is not.** The runtime checker
+enforces the same mount destinations, the same read-only binds, the same
+exact-set rule and the same permission check in both environments; only the bind
+*sources* differ, and every destination remains fixed in the compose file with no
+override. Where a gate genuinely cannot run — a runner with no daemon — it still
+reports BLOCKED and BLOCKED still fails the suite.
+
+**Gate diagnosability.** Added to this phase's scope by the first hosted run
+rather than planned into it, and worth recording as a lesson about the plan
+rather than only as a fix. Every gate here was designed to distinguish *passed*,
+*failed* and *could not run*; none of that survives if the harness prints the
+wrong end of the output, and locally the defect was invisible because the two
+container gates blocked rather than failed, so the truncation never fired.
+Failure reporting is now a separate, self-testing program that prints the
+reason, the verdict and the cleanup result before any length limit, sanitizes
+everything it prints, and preserves anything it had to omit in an artifact the
+workflow uploads. `docs/VERIFICATION.md` §4.9.
 
 **Gate determinism (SW-P1-14).** A nondeterministic failure was observed in
 `scripts/tests/runtime-verify-test.sh` and root-caused before being fixed —
@@ -201,10 +235,23 @@ Phase 1 is complete when, at one commit:
 * every required gate that can run, ran and passed;
 * every deliberate failure injection produces a nonzero gate result;
 * no required gate is silently omitted;
+* **a failing gate says why** — its reason, its verdict and its cleanup result
+  appear in the log, and anything omitted for length is preserved and pointed
+  at. Added after the first hosted run showed a red gate whose diagnosis had
+  been discarded (`docs/VERIFICATION.md` §4.9);
 * operator verification runs without root git access;
 * runtime assertions are tied to the exact inspected image ID;
 * existing deployment resources survive checker execution;
 * remaining evidence gaps are explicitly `BLOCKED`, with operator commands.
+
+Three of these are outstanding at `aa49797`, and none of them is satisfiable
+from the service account:
+
+| Outstanding | Why | Who |
+| --- | --- | --- |
+| A hosted run that passes | SW-P1-12's acceptance criterion, unchanged | Needs an approved push; the run follows automatically from the branch filter |
+| Runtime assertions tied to an image ID | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition | Operator — `docs/VERIFICATION.md` §6.1 |
+| Deployment resources survive checker execution | Demonstrated against the scripted fake at `aa49797` (336 cases) but not re-demonstrated against a real daemon since `b6b1769` | Same operator run |
 
 ### 3.4 Previous-state validation
 

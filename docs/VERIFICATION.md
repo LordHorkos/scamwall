@@ -40,8 +40,9 @@ Three rules govern what may appear here.
 | --- | --- |
 | Branch | `feat/phase-1-core` |
 | Session start | `2edb95a07567f4ebf9d6bc1bcb6c1ff01f5decc8` (tree `546ad23`) |
-| Evidence commit | `b6b1769151501d89d7f8550d2c8f3378d0e73c3d` — *fix(verify): check list processing, name scope, mounts, numbers and fields* |
-| Verified image | `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built by the operator from that commit — §3.7 |
+| Evidence commit | `aa49797` — *fix(ci): supply the deployment's fixtures, and check the mount sources*. The last commit that changes a gate input |
+| Previous evidence commit | `b6b1769151501d89d7f8550d2c8f3378d0e73c3d` — *fix(verify): check list processing, name scope, mounts, numbers and fields*. Retained where cited; superseded for every row §5 of the matrix demotes |
+| Verified image | `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built by the operator from `b6b1769` — §3.7. **No image has been built from `aa49797`**, so the image-bound rows are open; §6.1 |
 | Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. Retained where cited; **not** carried forward for the rows §5 of the matrix demotes |
 
 Commits between the two:
@@ -62,13 +63,19 @@ Commits between the two:
 | `7c639c2` | docs: record the eleven verifier findings and correct the evidence status |
 | `b6b1769` | fix(verify): check list processing, name scope, mounts, numbers and fields |
 | `2a18874` | docs: record the verified image and close the Docker and ELF blockers — the commit CI ran against (§3.8) |
+| `c3ae292` | docs: record the first hosted CI run, and a defect it exposed |
+| `ef40156` | fix(gates): report a failing gate's verdict, not its first 25 lines — FINDING-23, §4.9 |
+| `aa49797` | fix(ci): supply the deployment's fixtures, and check the mount sources — FINDING-24 … FINDING-26, §4.10 |
 
-All results in §3 were produced against `b6b1769`, the last commit that changes
-any gate input. They are **not** valid for earlier commits: §4.1 – §4.5
-describe defects present at `2edb95a`, §4.7 describes eleven defects present at
-`b469c59` — including in the runtime verifier as it stood there, which is the
-version an operator would have run had it been executed — and §4.8 describes
-six further defects present at `0b083cb`.
+Results in §3 are produced against `aa49797`, the last commit that changes any
+gate input, **except** §3.6 – §3.8, which are tied to the commits and image IDs
+named in them and are not re-runnable from here. They are **not** valid for
+earlier commits: §4.1 – §4.5 describe defects present at `2edb95a`, §4.7
+describes eleven defects present at `b469c59` — including in the runtime
+verifier as it stood there, which is the version an operator would have run had
+it been executed — §4.8 describes six further defects present at `0b083cb`, §4.9
+describes one present at `c3ae292`, and §4.10 three more present at the same
+commit.
 
 `b6b1769` changed `scripts/container-runtime-verify.sh` and its regression
 suite. Under `docs/REQUIREMENTS_MATRIX.md` §5 that demotes every row resting on
@@ -76,9 +83,14 @@ a `scripts/*.sh` gate, so the `0b083cb` transcript is not carried forward for
 those rows: the suite was re-run at `b6b1769`, and that run is §3.0. The
 regression suite grew from 237 cases to 319 over the same commit.
 
-The commit carrying this document changes documentation only. That does not
-invalidate the results above, and the rule is worth stating rather than
-assuming: **evidence is tied to the last commit that changed a gate input.** A
+`ef40156` and `aa49797` change `scripts/check.sh`,
+`scripts/container-runtime-verify.sh`, `deploy/compose/compose.yaml` and
+`.github/workflows/gates.yml`, and add three scripts. That demotes the same set
+of rows again, so the suite was re-run at `aa49797` and that run is now §3.0.
+The image-bound rows (SW-P1-05, SW-P1-20) cannot be renewed from here at all —
+they need the operator, §6.1.
+
+The rule is worth stating rather than assuming: **evidence is tied to the last commit that changed a gate input.** A
 documentation-only commit changes none, so the record carries forward. Any
 commit touching source, scripts, dependencies, the container definition, or CI
 does change one, and demotes the affected rows per
@@ -117,11 +129,13 @@ independent-scanner evidence exists for earlier commits.
 ### 2.3 Test inventory
 
 129 Go test functions across eight packages, plus three shell test suites
-(runtime-verify with 319 cases, secret-scan controls, pipefail/SIGPIPE). The
-counts moved this session: `internal/buildcheck/elfcheck` is new (5 functions,
-the ELF controls), and the runtime-verify suite grew from 47 cases to 237 at
-`0b083cb` and to 319 at `b6b1769`. No fuzz targets exist yet; fuzzing is a
-Phase 3 requirement (SW-P3-08).
+(runtime-verify with 336 cases, secret-scan controls, pipefail/SIGPIPE), and —
+added at `ef40156`/`aa49797` — two more: gate-diagnostics with 62 cases and
+compose-fixture with 16, plus the gate reporter's own `--self-test`. The counts
+moved this session: `internal/buildcheck/elfcheck` is new (5 functions, the ELF
+controls), and the runtime-verify suite grew from 47 cases to 237 at `0b083cb`,
+to 319 at `b6b1769` and to 336 at `aa49797`. No fuzz targets exist yet; fuzzing
+is a Phase 3 requirement (SW-P3-08).
 
 ---
 
@@ -129,17 +143,25 @@ Phase 3 requirement (SW-P3-08).
 
 ### 3.0 Run identity
 
-Run against commit **`b6b1769`** on `feat/phase-1-core`, with the tools in
+Run against commit **`aa49797`** on `feat/phase-1-core`, with the tools in
 §2.2, as user `scamwall`, in the repository working tree — which `git status
 --porcelain` reported as empty before the run, so the checkout is identical to
 the commit. The deployment `.env` is gitignored and is the file the operator's
 deployment uses; it contains a group id and nothing else, and no value from it
 is reproduced here.
 
+**This run supersedes the one recorded here against `b6b1769`.** `aa49797` and
+its parent `ef40156` change `scripts/check.sh`, `scripts/container-runtime-
+verify.sh`, `deploy/compose/compose.yaml` and `.github/workflows/gates.yml` —
+all gate inputs under `docs/REQUIREMENTS_MATRIX.md` §5 — so the earlier
+transcript no longer describes the suite that is now in the tree. The `b6b1769`
+figures (19 passed, 0 failed, 2 BLOCKED) are retained in §3.5 and §3.8 where
+they are compared against, and nowhere else.
+
 The earlier transcript in this section was taken against `0b083cb` in a fresh
 `--local` clone. That method is still valid and is preferable when the tree is
 dirty; it is not used here because the tree is clean and the run must be tied
-to `b6b1769` itself.
+to `aa49797` itself.
 
 Command, capturing the exit status directly rather than inferring it from the
 printed verdict:
@@ -178,8 +200,13 @@ bash scripts/check.sh; echo "CHECK exit=$?"
   PASS    container security (static)
   PASS    no SIGPIPE-decided conditions
 
+-- gate reporting --
+  PASS    gate diagnostics self-test
+  PASS    gate diagnostics regression tests
+
 -- compose definition --
   PASS    docker compose config
+  PASS    compose definition under runner conditions
 
 -- runtime verifier regression tests --
   PASS    runtime-verify regression tests
@@ -192,11 +219,20 @@ bash scripts/check.sh; echo "CHECK exit=$?"
   PASS    no uncommitted generated artifacts
 
 ======================================================
- 19 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ 22 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
  RESULT: NOT COMPLETE — required gates failed or could not run.
 ======================================================
 CHECK exit=1
 ```
+
+**Three gates are new since `b6b1769`**, which is why the count moved from 19 to
+22:
+
+| Gate | What it establishes |
+| --- | --- |
+| `gate diagnostics self-test` | The failure reporter shows a failure that appears below the first twenty-five lines, states any truncation, and redacts credential-shaped decoys. §4.9 |
+| `gate diagnostics regression tests` | 62 cases driving `check.sh`'s own `require`: status preservation, cleanup visibility, no false pass on large output, no decoy in the log or the retained artifact. §4.9 |
+| `compose definition under runner conditions` | The real deployment definition, resolved with no `.env` and no operator paths, produces exactly the approved mount set from disposable fixtures — the local reproduction of what CI faces. §3.9 |
 
 **`CHECK exit=1` is the observation, not the summary line.** It was requested
 separately, and the distinction is the point: a script can print anything it
@@ -224,26 +260,26 @@ they are referred to below by the title printed when the suite runs.
 
 | Requirement | Evidence | Verdict |
 | --- | --- | --- |
-| SW-P1-01 | `scripts/tests/runtime-verify-test.sh`, 319 cases, all passing | VERIFIED |
+| SW-P1-01 | `scripts/tests/runtime-verify-test.sh`, 336 cases, all passing | VERIFIED |
 | SW-P1-02 | *no git dependency*: the verifier succeeds with a `git` on `PATH` that exits 128 on every call, the git-log fixture stays empty, and no git command appears in the comment-stripped source | VERIFIED |
 | SW-P1-03 | *absence versus search failure*: failed inspect, history, export, `docker create`, `compose ps`, container listing, configuration resolution, and both malformed and empty JSON each produce a nonzero exit | VERIFIED |
 | SW-P1-04 | *incomplete and malformed inspection data*: `[]`, non-JSON, a non-array image inspection, a non-digest image identifier, and twelve structurally valid documents with a required field deleted are each rejected before any conclusion is drawn | VERIFIED |
-| SW-P1-05 | *image identity*, *mounts*, *tmpfs bounds*, *logging bounds*, *API hostname pinning*, *supplementary group*, *hardening regressions* against the scripted fake; **and** an operator run against image `sha256:b95cc07c…` built from this commit, §3.7 | VERIFIED |
+| SW-P1-05 | *image identity*, *mounts*, *mount sources on the host*, *tmpfs bounds*, *logging bounds*, *API hostname pinning*, *supplementary group*, *hardening regressions* against the scripted fake | **IMPLEMENTED-UNVERIFIED against a real image.** The operator run in §3.7 is against `sha256:b95cc07c…` built from `b6b1769`; `aa49797` changes both `compose.yaml` and the verifier, so that evidence does not carry forward. Renewal: §6.1 |
 | SW-P1-06 | *resource ownership* and *cleanup as a verdict*: the command log shows removal of exactly the resources this run created, every listing filtered by a label unique to this invocation, no `compose down` at all, and no reference to any pre-existing resource | VERIFIED |
 | SW-P1-07 | Coverage map in §3.2; pre-fix comparison in §3.5 | VERIFIED |
-| SW-P1-08 | `shellcheck --severity=style` over all 10 tracked scripts, clean | VERIFIED |
+| SW-P1-08 | `shellcheck --severity=style` over all 13 tracked scripts, clean | VERIFIED |
 | SW-P1-09 | §4.2 | VERIFIED |
 | SW-P1-10 | §5 | VERIFIED |
 | SW-P1-11 | §4.3 | VERIFIED |
-| SW-P1-12 | `.github/workflows/gates.yml`, reviewed in §3.4. Review is not execution | **BLOCKED** on §6.3 |
+| SW-P1-12 | `.github/workflows/gates.yml`, reviewed in §3.4 and re-reviewed at `aa49797`; executed once at `2a18874` and failed, §3.8. Review is not execution, and a failed run is not acceptance | **BLOCKED** on §6.3 |
 | SW-P1-13 | `go test -race -count=1 ./...` passes; 129 test functions; no test removed or weakened | VERIFIED |
 | SW-P1-14 | §4.1, and the repeat-run evidence in §3.3 | VERIFIED |
 | SW-P1-15 | `cmd/scamwall/main_test.go`, 15 test functions, all passing | VERIFIED |
 | SW-P1-16 | *cleanup as a verdict*: ordering (cleanup precedes the verdict line), failed container removal, failed network removal, TERM mid-run, mid-run verification failure, and exactly one removal attempt per resource | VERIFIED |
 | SW-P1-17 | *resource ownership*: container and network collisions block creation; a coexisting deployment is never listed or touched; partial creation is cleaned up by attribution; an unattributable resource is preserved and reported | VERIFIED |
 | SW-P1-18 | *consistent Compose configuration*: all three Compose operations carry the same `--env-file` and project name; a `.env` value deliberately different from the resolved value is not used; resolution and parse failures block the run | VERIFIED |
-| SW-P1-19 | *mounts*: the cases covering empty, absent, missing, extra, duplicated, writable, wrong-source, wrong-type and prohibited mounts, plus the pre-fix controls, and — added at `b6b1769` — an exact four-destination approved set enforced independently of the configuration and a failed comparison treated as UNPROVEN (§4.8, FINDING-19 and FINDING-20) | VERIFIED |
-| SW-P1-20 | §3.6 — the ELF controls pass; and §3.7 — the in-build assertion executed inside the operator's `docker build` of this commit | VERIFIED |
+| SW-P1-19 | *mounts*: the cases covering empty, absent, missing, extra, duplicated, writable, wrong-source, wrong-type and prohibited mounts, plus the pre-fix controls; an exact four-destination approved set enforced independently of the configuration and a failed comparison treated as UNPROVEN (§4.8, FINDING-19 and FINDING-20); and — added at `aa49797` — *mount sources on the host*, covering an absent source, a directory where a file is required, an absent or world-reachable password file, and a secret source taken from a prohibited path (§4.10) | VERIFIED |
+| SW-P1-20 | §3.6 — the ELF controls pass, and they are unchanged at `aa49797`; §3.7 and §3.8 — the in-build assertion executed inside two independent `docker build`s of `b6b1769`/`2a18874`. **The image-bound half is IMPLEMENTED-UNVERIFIED at `aa49797`**: no image has been built from this commit. Renewal: §6.1 |
 
 ### 3.2 SW-P1-07 coverage map
 
@@ -340,8 +376,35 @@ environment cannot run GitHub Actions.
 | Same gates as local | The job runs `scripts/check.sh` rather than maintaining a second list that could drift |
 | Full history | `fetch-depth: 0`, because the independent secret scan inspects every commit; a shallow clone would silently narrow it |
 
+**Re-reviewed at `aa49797`**, which adds three steps. The workflow is a gate
+input, so this re-review is required rather than optional
+(`docs/REQUIREMENTS_MATRIX.md` §5):
+
+| New step | Property | How it is met |
+| --- | --- | --- |
+| Create disposable deployment fixtures | Nothing production-derived enters CI | Both files are generated on the runner. Nothing is copied from any host, no key pair is generated, no committed fixture is rewritten, and no site value appears — the compose overrides carry the operator defaults, which CI replaces with runner-local paths |
+| | Fixtures cannot enter an image | They are written under `RUNNER_TEMP`, outside the checkout, and the build context is the checkout (`../..`). `scripts/tests/compose-fixture-test.sh` asserts that neither fixture path lies under the resolved build context |
+| | Fixtures are not readable by other accounts | Directory 0700, files 0600, both set with an explicit `chmod` rather than `mkdir -m` (which applies only to the deepest component). The verifier independently checks that the password file is not reachable by every account on the host |
+| | No authentication happens | The verifier uses `docker compose create` and `docker create` only. Nothing is started, so the password is mounted and never read |
+| Upload gate diagnostics | Cannot turn a red job green | `if: always()`, and it runs after the gate step has already concluded. An upload action does not alter a prior step's conclusion |
+| | Cannot publish a credential | Everything in the directory has been through `scripts/gate-diagnostics.sh`, which is self-tested against eleven credential decoys and writes nothing it could not sanitize. §4.9 |
+| | Pinned | `actions/upload-artifact` by commit SHA `043fb46…` (v7.0.1), with the tag in a comment, like the other two |
+| Remove disposable fixtures | Cleanup is a result, not a hope | `if: always()`, and it re-tests for the directory after removing it and fails the job if it survives. "The runner is discarded afterwards" is not a cleanup procedure |
+
+**No secret is referenced by the workflow at any point**, before or after this
+change, so the `pull_request`-not-`pull_request_target` property is unaffected:
+a fork pull request still receives a read-only token and nothing to exfiltrate.
+The fixtures are generated from `/dev/urandom` on the runner, so a fork PR
+generating its own throwaway password reveals nothing about anything.
+
 The YAML was parsed with `gopkg.in/yaml.v3` to confirm it is well-formed and
-that `permissions` resolves to `map[contents:read]`.
+that `permissions` resolves to `map[contents:read]`. At `aa49797` that check
+was not repeated in the same form — the pinned toolchain has no network access
+to fetch that module here — so the file was instead parsed by the Compose YAML
+reader, which reached interpolation without a syntax error, confirming
+well-formedness but **not** re-confirming the `permissions` value by parse. The
+`permissions` blocks are unchanged from the reviewed text above and are visible
+in the diff; that is weaker evidence than a parse and is labelled as such.
 
 **This is a review, and a review is not an execution.** Three things are
 routinely conflated, so they are separated here:
@@ -352,14 +415,25 @@ routinely conflated, so they are separated here:
 | Local simulation — the same GATE LIST executed locally by `scripts/check.sh` (§3.0) | DONE, and it says nothing about `permissions:`, action pinning, the runner image, or fork-PR secret handling, because none of those exist locally |
 | Hosted CI run — the workflow itself executed on GitHub, with a run URL and log | **NOT DONE** |
 
-SW-P1-12 is therefore **BLOCKED**, not "VERIFIED as written". No run has
-occurred; pushing is outside the authorisation for this work. §6.3.
+SW-P1-12 is therefore **BLOCKED**, not "VERIFIED as written". The middle row
+above has since been executed — run 34036997074, §3.8 — and the bottom row is
+what is still missing: a hosted run that passes. The workflow at `aa49797` has
+never been executed at all, and reviewing a change to it is not running it.
+§6.3.
 
 ### 3.5 Deliberate failure injection
 
 "The gates pass" is a much weaker statement than it looks unless the gates can
 also be shown to fail. Each injection below was made in a fresh `--local` clone
 of this repository, with `scripts/check.sh` run unmodified.
+
+**These injections were run at `b6b1769` and have not been repeated at
+`aa49797`**, so the counts below are that commit's (19, not 22). They are
+retained rather than re-run because each one demonstrates a specific gate's
+ability to fail, and none of those gates changed; the reporting *around* them
+did, which is a different property and is covered by §3.10 and §4.9 — including
+an injection at `aa49797` that this table does not have: a gate exiting **3**,
+so that the status is distinguishable from a plain failure.
 
 | Injection | Result |
 | --- | --- |
@@ -714,6 +788,143 @@ agree, the explanation is plausible, and nothing observed here tests it. It
 stays a hypothesis until §4.9 is fixed and a run shows the verifier's actual
 verdict.
 
+**Recovery attempted, at `aa49797`, and the omitted output is gone.** Before
+anything was changed, the run was re-examined for the missing material:
+
+```bash
+gh run view 34036997074 --json headSha,workflowName,jobs   # head SHA, job, per-step conclusions
+gh run view 34036997074 --log                              # 392 lines, the complete job log
+gh api repos/LordHorkos/scamwall/actions/runs/34036997074/artifacts
+#   {"total_count":0,"artifacts":[]}
+```
+
+The run has **no artifacts**, and the job log contains exactly the twenty-five
+lines already quoted — counted line by line against `head -25`, which they match
+exactly. There is no second copy of a step's output in the Actions API. **The
+cause of that failure cannot be recovered from that run, and this document will
+not assert one.** What the run does still establish is listed in the table
+above, and that list is unchanged.
+
+The identity reconciliation is also worth stating, because it decides which
+evidence survives: `b6b1769..2a18874` and `2a18874..c3ae292` are
+**documentation-only** (`git diff --stat` lists only `docs/`), so the tested
+tree at `2a18874` is byte-identical to `b6b1769` outside `docs/`. The operator
+evidence in §3.7 and the CI run in §3.8 therefore describe the same source. That
+equality ends at `ef40156`.
+
+---
+
+### 3.9 The runner's conditions, reproduced locally (SW-P1-12)
+
+Run at `aa49797`, as `scamwall`, with **no Docker daemon**. This is what could
+be tested here about the CI failure without the daemon the service account
+cannot reach, and it is deliberately narrower than the claim it supports.
+
+`scripts/tests/compose-fixture-test.sh` builds a synthetic checkout containing
+only the files Compose reads, **without `deploy/compose/.env`** — that file is
+gitignored, so a fresh clone never has one, and running the test from the
+operator's checkout would otherwise pick the local one up and hide the very
+difference under examination. It then resolves the real
+`deploy/compose/compose.yaml` under three environments and inspects the result
+with the verifier's own lifted `approved_mount_problems`.
+
+```
+== deployment definition under hosted-runner conditions ==
+
+ok   the synthetic checkout has no .env, as a fresh clone has none
+ok   the definition resolves with no overrides at all
+ok   the CA default is unchanged for the operator
+ok   the password default is unchanged for the operator
+ok   compose config exits 0 even when every bind source is absent (which is why it cannot be the check)
+ok   the verifier's host-side rule does detect the absent sources
+ok   the definition resolves under CI conditions
+ok   CI resolves exactly the 4 approved mounts, each a read-only bind
+ok   every CI-resolved mount source exists and is a regular file
+ok   the container sees identical mount destinations in CI and on the operator's host
+ok   no bind may have its source auto-created (create_host_path is false on all of them)
+ok   the fixtures lie outside the image build context (…/checkout)
+ok   the CI password fixture is not readable by every account on the host
+ok   an override pointing the CA at Pi-hole's own state is caught by the prohibited-path rule
+ok   an override pointing the password at the Docker socket is caught
+ok   the fixture directory is removable, leaving nothing behind
+
+16 test(s), 0 failure(s)
+```
+
+**What this establishes, precisely:**
+
+| Claim | State |
+| --- | --- |
+| Under runner conditions the definition names two bind sources that cannot exist on a fresh `ubuntu-24.04` | **Established, by resolution rather than by reading.** Both resolve to `/etc/scamwall/…` when nothing overrides them |
+| `docker compose config` does not detect that | **Established.** It exits 0 with every bind source absent — so the CI gate that passed could not have caught it |
+| The overrides do not move the operator's defaults | **Established.** Resolved with no environment at all, both sources are the operator paths |
+| CI and the operator's host verify the same thing | **Established for the configuration.** The four mount destinations the container sees are identical in both; only the sources differ |
+| The CI failure of §3.8 was *caused* by those absent sources | **Still not established.** This shows the precondition held on that runner. It does not show which assertion fired, because that needs a daemon, and the run that had one discarded its output |
+
+That last row is the discipline this section exists for. A demonstrated
+precondition and a matching outcome are not a demonstrated mechanism.
+
+**A defect was demonstrated along the way, and is fixed rather than left for a
+redundant red run.** Docker's default for a missing bind source is to create an
+empty *directory* at it and mount that. A deployment with no CA and no password
+file therefore produces a container whose mount set, destinations and read-only
+flags are all exactly as required — and every assertion in `SW-P1-19` passes,
+against a container that has a directory where its trust anchor should be. That
+is a false pass in the class SW-P1-07 enumerates, and it does not need a hosted
+run to establish. It is fixed two ways at `aa49797` (FINDING-25, §4.10).
+
+---
+
+### 3.10 The failure reporter, demonstrated end to end (FINDING-23)
+
+The regression suite proves the reporter's properties in isolation. This is the
+whole `check.sh` driven with a deliberately failing gate, because "the unit
+tests pass" is not the same claim as "a red run is diagnosable".
+
+A fake `staticcheck` was placed first on `PATH`. It reports progressively — 40
+`PASS` lines, then a credential decoy, then the failure and the verdict — and
+exits **3**, a status neither 0 nor 1:
+
+```bash
+PATH="$FAKEBIN:$PATH" GITHUB_ACTIONS=true SCAMWALL_GATE_DIAG_DIR="$DIAG" \
+  bash ./scripts/check.sh; echo "INJECTED CHECK exit=$?"
+```
+
+```
+  FAIL    staticcheck ./...
+         --- why it failed (exit status 3) ---
+         FAIL    the injected failure, at line 42, below the old 25-line cut
+         RESULT: injected gate INCOMPLETE
+         --- full output (43 line(s), sanitized) ---
+::group::gate output: staticcheck ./...
+         PASS    checked package 1
+         …
+         PASS    checked package 40
+         password=<redacted>
+         FAIL    the injected failure, at line 42, below the old 25-line cut
+         RESULT: injected gate INCOMPLETE
+::endgroup::
+         sanitized capture retained at: …/staticcheck-.-....log
+INJECTED CHECK exit=1
+```
+
+Six things are observable there at once, and each is a separate requirement:
+the failure at line 42 is visible where `head -25` would have cut at line 25;
+the reason and the verdict are printed **before** the full capture and outside
+the collapsible group; the command's own exit status **3** is reported rather
+than collapsed to "failed"; `password=…` is redacted; the CI grouping markers
+are emitted; and a mode-600 artifact is retained in a mode-700 directory.
+
+**The reporter also earned its place on a real failure during this work.** With
+the decoy fixtures committed, `independent secret scan` failed, and the log said
+why in full — two `generic-api-key` findings, named by rule, file and line, in
+both the history scan and the publishable-tree scan. Under the superseded
+reporter that gate's output would have been cut before the findings. The decoys
+were then assembled at run time instead of written as literals, which is what
+the other decoys in the same file already did, so no allowlist entry was added
+and no hole was opened in the detector. The two commits were rebuilt rather than
+patched, because a decoy in history is permanent and neither had been pushed.
+
 ---
 
 ## 4. Findings raised by this session
@@ -988,10 +1199,21 @@ part worth removing; an inline suppression would have kept it.
 
 Neither of the last two belongs to Phase 1 as a code defect; each observation
 here is registered against the row or phase that owns it so it is not lost. The
-one Phase 1 code defect found and left unfixed has its own section — FINDING-23,
-§4.9.
+Phase 1 code defects found here have their own sections — FINDING-23 (§4.9) and
+FINDING-24 … FINDING-26 (§4.10) — and all four are now fixed.
 
-**The CI job cannot pass on a hosted runner as configured (SW-P1-12).**
+**The CI job cannot pass on a hosted runner as configured (SW-P1-12) —
+ADDRESSED at `aa49797`.** The observation was correct as far as it went, and it
+is kept in its original form below because the fix should be readable against
+what prompted it. Two of its clauses have since been settled by measurement
+rather than by reading (§3.9), and its premise that the CA path has "no
+environment override" is what `aa49797` changed. Its final sentence — that the
+choice is the operator's — was overtaken: the choice was made under an
+authorisation to fix the CI diagnostics and make CI self-contained, and the
+reasoning is set out in §6.3 rather than assumed. What it did NOT establish, and
+what is still not established, is the cause of the §3.8 failure.
+
+> **The CI job cannot pass on a hosted runner as configured (SW-P1-12).**
 `deploy/compose/compose.yaml` binds `/etc/scamwall/certs/pihole-ca.crt`, a
 literal absolute path with no environment override, and a Compose secret
 defaulting to `/etc/scamwall/secrets/pihole_app_password`. Neither exists on a
@@ -1226,7 +1448,7 @@ first in anything else that reports on security properties.
 
 ### 4.9 FINDING-23 — a failing gate's output is truncated from the wrong end
 
-**Severity: medium. Found by the CI run in §3.8, and not yet fixed.**
+**Severity: medium. Found by the CI run in §3.8. FIXED at `ef40156`.**
 
 `scripts/check.sh` captures each gate's output and, on failure, prints it:
 
@@ -1260,14 +1482,125 @@ It also degrades quietly. Locally, with two container gates BLOCKED rather than
 FAILED, the truncation never fired, so eleven gate runs across this session gave
 no sign of it. It took a host where the gate could actually fail to expose it.
 
-**Not fixed here.** `scripts/check.sh` is a gate input: changing it demotes
-eleven requirement rows under `docs/REQUIREMENTS_MATRIX.md` §5 and requires the
-suite to be re-run and re-recorded. That is a small cost and the fix is small —
-print the tail, or raise the cap, or print the whole capture for a gate that
-reports a verdict — but it is a code change, and the authorisation for this
-session covers documentation and the approved push. It is registered here so the
-next session does not rediscover it, and SW-P1-12 cannot close until it is done:
-without it, a CI run cannot report *why* a gate failed.
+**Fixed at `ef40156`.** Reporting moved into `scripts/gate-diagnostics.sh`, a
+separate program with its own `--self-test`, so "what a failing gate may print"
+is one reviewable thing rather than a line inside a loop. It prints the failure
+reason, the verdict and the cleanup result first and outside any length limit —
+those are the lines the reader needs and they are always at the end — then the
+complete capture inside a collapsible CI group. Where a limit does apply, the
+truncation is stated, both ends are shown, and the omitted material is preserved
+in a mode-600 file inside a mode-700 directory whose path is printed.
+
+`require` now captures the command's status into a variable before anything else
+runs, and reports it. The superseded form used it only as an `if` condition, so
+a gate that exited 2 because a tool could not run read identically in the log to
+one that exited 1 because a check failed.
+
+**The fix carries an opposite risk, and that is the part worth reviewing.**
+Printing *more* of a gate's output is a disclosure decision: a capture can quote
+a mounted file, an API header, or an environment value, and a CI log is public.
+Everything is therefore sanitized before it is printed, and a capture that
+cannot be sanitized is **not printed at all** — an unreadable log costs a rerun;
+a leaked credential cannot be taken back. The retained artifact holds the same
+sanitized text, never the raw capture, because in CI that artifact is uploaded.
+
+Reporting is invoked *after* the verdict is recorded and its own exit status is
+never consulted, so neither a broken reporter nor a missing one can turn a red
+gate green. Both are tested.
+
+| Property required | Where it is proven |
+| --- | --- |
+| A failure below the first 25 lines stays visible | `gate-diagnostics-test.sh` case 1, plus three PRE-FIX CONTROLS asserting `head -25` hid the failure, the verdict and the cleanup result on the same fixture |
+| The original nonzero status is preserved | case 2, for statuses 1, 2, 7 and 42; and a zero-exit gate stays a pass with no diagnosis printed |
+| Cleanup failures stay visible and affect the verdict | case 4, including with the cleanup report pushed past the inline cap — an artifact is not a substitute for a verdict, so the verdict is still printed inline |
+| Large output does not create a false pass | case 3: 5000 lines and a nonzero exit is a FAIL, 5000 lines and a zero exit is still a PASS |
+| Decoys are not exposed | case 5: eleven credential shapes, checked in the log **and** in the retained artifact |
+| Reporting cannot change a verdict | case 6: a reporter that exits 9, and a reporter that does not exist. In the missing case nothing is printed rather than falling back to the raw capture |
+| No temporary file is left behind | case 7 |
+
+62 cases, all passing (§3.0). End-to-end demonstration through `check.sh`
+itself, including the CI grouping markers and the retained artifact, is §3.10.
+
+**The same truncation existed inside the verifier and went with it.** Its two
+Compose failures folded stderr onto one line and cut it at 200 characters.
+Compose puts the useful part of a mount or secret error at the end of a
+multi-line message, so that cut discarded precisely the sentence naming the path
+it could not use — and those are the two places the §3.8 failure would most
+likely have spoken from. Both now print the full sanitized capture through the
+same filter, or nothing.
+
+---
+
+### 4.10 FINDING-24 … FINDING-26 — the deployment definition at `c3ae292`
+
+Three defects found while making CI able to run the container gates. None was
+found by the hosted run; all three were found by asking what the runner would
+face and then checking, and all three are fixed at `aa49797`.
+
+#### FINDING-24 — the prohibited-path rule exempted the secret source
+
+**Severity: medium.**
+
+The verifier rejects a mount whose source is `docker.sock`, `/etc/pihole`,
+`/proc`, `/sys`, `/`, `/etc`, `/root` and so on. The expression inspected
+`.services.<svc>.volumes` only. The application password is not declared there —
+it is a Compose *secret*, under `.secrets` — so it was never examined.
+
+That is the wrong one to miss. It is the only source in the definition that was
+already redirectable by an environment variable (`SCAMWALL_SECRET_FILE`), which
+makes it the easiest thing in the whole deployment to point somewhere it should
+not go. `SCAMWALL_SECRET_FILE=/etc/pihole/setupVars.conf` would have been
+mounted read-only at `/run/secrets/pihole_app_password` with every assertion
+passing.
+
+Fixed by examining both sources under one rule. The PRE-FIX CONTROL in
+`runtime-verify-test.sh` applies the superseded expression to a fixture with the
+password taken from `/etc/pihole` and asserts it reports nothing, so the new
+case is not merely agreeing with the new code.
+
+#### FINDING-25 — a missing bind source is materialised as an empty directory
+
+**Severity: medium. This is a false pass, not an inconvenience.**
+
+Docker's default for a bind mount whose source does not exist is to create a
+*directory* at that path and mount it. The consequence for this deployment:
+with no CA file and no password file on the host, `compose create` still
+succeeds, and the container has four bind mounts, at the four approved
+destinations, all read-only, with the four expected source paths. Every mount
+assertion in SW-P1-19 passes. The container has an empty directory where its
+trust anchor should be, and another where its credential should be.
+
+Fixed twice, because the two halves catch different things:
+
+* `bind.create_host_path: false` on all three binds in `compose.yaml`. Docker
+  now refuses a missing source instead of inventing one.
+* A host-side check in the verifier, before anything is created, that every
+  approved mount resolves to an existing **regular file**. This catches what
+  `create_host_path` cannot: a source that exists and *is* a directory, which
+  mounts perfectly well.
+
+It also names the offending path in the output, which is the difference between
+a diagnosable red run and another one like §3.8.
+
+#### FINDING-26 — the password file's exposure was configured, never checked
+
+**Severity: low.**
+
+`compose.yaml` documents that the password is delivered through a Compose secret
+and that the container joins a supplementary group to read it. Nothing checked
+the file's actual exposure on the host. A `0644` password file would have
+satisfied every assertion.
+
+Fixed by computing **reachability** rather than mode: the file's own
+other-read bit, AND an other-execute bit on every directory above it. Mode alone
+answers the wrong question in both directions — a `0644` file inside a `0750`
+directory is not world-readable, and a `0640` file under a `0777` directory
+still is not. A `stat` that fails is reported as undetermined, never as either
+verdict.
+
+This deliberately does **not** claim the container can read the file. The
+verifier never starts a container, so that remains exactly where §7 has always
+put it: not established.
 
 ---
 
@@ -1454,12 +1787,30 @@ bound, so that a later change does not quietly step outside them.
 
 ## 6. Operator procedures, and what remains blocked
 
-### 6.1 Runtime verification against a real image (SW-P1-05, SW-P1-20) — **CLOSED at `b6b1769`**
+### 6.1 Runtime verification against a real image (SW-P1-05, SW-P1-20) — **RENEWAL REQUIRED at `aa49797`**
 
 **Status.** Executed by the operator at commit `b6b1769` against image
 `sha256:b95cc07c…`: build exit 0 with both in-build assertions run, verifier
 90 passed / 0 failed / 0 blocked / 0 cleanup problems, `VERIFY exit=0`. The
-result is §3.7. SW-P1-05 and SW-P1-20 are VERIFIED on it.
+result is §3.7, and it closed both rows at `b6b1769`.
+
+**That evidence does not carry forward to `aa49797`.** `ef40156` and `aa49797`
+change `scripts/container-runtime-verify.sh` and `deploy/compose/compose.yaml`,
+which `docs/REQUIREMENTS_MATRIX.md` §5 lists as gate inputs for exactly these
+rows. The verifier now makes assertions the `b6b1769` run never made — that
+every approved mount resolves to an existing regular file, that the password
+file is not reachable by every account on the host, that the secret source is
+subject to the prohibited-path rule — and the definition now carries
+`bind.create_host_path: false` and a CA source override. A run that did not
+evaluate those did not establish them.
+
+**The expected outcome of the renewal is unchanged: 0 failed, 0 blocked.** The
+new checks describe the operator host as it already is — the CA at
+`/etc/scamwall/certs/pihole-ca.crt` is a regular file, and
+`/etc/scamwall/secrets` is `0750 root:swsecret`, so the password is not
+world-reachable. The check count rises from 90, because checks were added. If
+any of them FAILS, that is a finding about the deployment and takes precedence
+over closing anything.
 
 **The access constraint is unchanged, and is not a defect.** The service
 account is not in the `docker` group and has no passwordless sudo. By operator
@@ -1568,6 +1919,25 @@ All four are recorded against that image ID. Partial output is weaker: the
 verifier's value is that it distinguishes "passed", "failed" and "could not
 run", and a truncated log loses exactly that distinction — which is why the
 counts for all three categories are recorded in §3.7 and not just the passes.
+FINDING-23 was that same mistake made mechanically, by the gate suite, to this
+verifier's output.
+
+**For the renewal at `aa49797` specifically**, four assertions exist that the
+`b6b1769` run did not evaluate. Their lines are the ones to look for, because
+they are the reason the renewal is required rather than a formality:
+
+```
+PASS    no prohibited path appears in the configured mounts or in the secret source
+PASS    every approved mount resolves to an existing regular file on this host
+PASS    the application password file is not world-readable through its path
+```
+
+and, in the container section, the mount set assertions as before. The total
+will exceed 90 because checks were added, not because anything was relaxed. A
+`FAIL` on the third line means `/etc/scamwall/secrets/pihole_app_password` is
+reachable by every account on the host, which would be a finding about the
+deployment rather than about the verifier, and it takes precedence over closing
+either row.
 
 **Redaction.** The log may name the deployment's resolved paths, its
 supplementary group id and its pinned address. None of those belong in this
@@ -1619,13 +1989,48 @@ handling.
 **What now stands between this row and closure**, in the order the work has to
 happen:
 
-1. **FINDING-23 (§4.9)** — `check.sh` truncates a failing gate's output from the
-   head, so the CI log does not contain the reason the runtime verification
-   failed. Until this is fixed, a red CI run cannot be diagnosed from its own
-   log. This is a prerequisite, not a nicety.
-2. **The fixture decision** — option A or B below, which cannot be made
-   responsibly until step 1 makes the actual failure visible.
-3. **A passing run**, or an amended acceptance criterion.
+1. ~~**FINDING-23 (§4.9)**~~ — **DONE at `ef40156`.** A failing gate now reports
+   its reason, its verdict and its cleanup result before any length limit, and
+   the workflow uploads the complete sanitized capture as an artifact. §3.10
+   demonstrates it end to end through `check.sh` itself.
+2. ~~**The fixture decision**~~ — **DONE at `aa49797`: option A.** The reasoning
+   is below, and it is not the reasoning originally anticipated — see "why A,
+   and why not after step 1's evidence".
+3. **A passing run** of the workflow at `aa49797`, recorded against its own
+   commit. Not yet done, and nothing here substitutes for it.
+
+#### Why A, and why the choice did not wait for the failure's cause
+
+The plan in the previous revision was to fix step 1, re-run, read the verdict,
+then choose. That is still the better order in general, and it was not followed
+here for a reason that should be stated rather than glossed:
+
+* **The old run's output is unrecoverable** (§3.8). Re-running to obtain it
+  means pushing again, and a push is the one thing this work must ask for rather
+  than take.
+* **A local reproduction settled the part that actually decides between A and
+  B** (§3.9). Under runner conditions the definition resolves two bind sources
+  that cannot exist on a fresh runner, and `docker compose config` exits 0
+  anyway. That is the fact option A exists to address, and it is now established
+  by resolution rather than inferred from an outcome.
+* **A independently fixes a false pass** (FINDING-25, §4.10) that has nothing to
+  do with CI: a missing bind source becomes an empty directory and every mount
+  assertion passes against it. That defect needed fixing whether or not CI ever
+  ran, so the work was not contingent on the choice.
+* **B was rejected on its merits, not for convenience.** Amending the acceptance
+  criterion to "every gate that could run passed" would permanently exempt the
+  container gates from the only independent host available, and SW-P1-12 exists
+  precisely to check that two hosts agree. Option A costs a re-review of the
+  workflow (done, §3.4); option B costs the requirement.
+
+**What A does not do.** It does not make the CI run equivalent to §3.7. CI
+builds its own image and mounts throwaway fixtures; the operator's run mounts
+the real CA and the real password file. The two runs check the same properties
+against different material, and the CI run is corroboration, not a substitute.
+
+**What is still not confirmed, and is not being quietly closed:** *why* the run
+at `2a18874` failed. The next run will say. If it says something other than the
+absent bind sources, that is the answer and this section will record it.
 
 #### The procedure, as approved and executed
 
@@ -1719,13 +2124,12 @@ host and cannot exist on a fresh `ubuntu-24.04` runner:
 surfaces later, at `compose create`, and the verifier reports it as `BLOCKED` or
 `FAIL` — either of which makes `check.sh` exit 1 and the job red.
 
-**This collides with SW-P1-12's acceptance criterion**, which reads "the hosted
-run exists and **passes**". As things stand it cannot pass, so the push alone
-does not close the row — and §3.8 bears that out. Two ways forward remain; the
-choice belongs to the operator and is not made here. **Neither can be evaluated
-until FINDING-23 (§4.9) is fixed**, because until then the run log does not say
-what the verifier actually objected to, and choosing a remedy for an unobserved
-cause is guesswork:
+**This collided with SW-P1-12's acceptance criterion**, which reads "the hosted
+run exists and **passes**". At `2a18874` it could not pass, so the push alone
+did not close the row — and §3.8 bears that out. The options as they were
+written before the push are retained verbatim, because the one that was taken
+should be readable against the alternatives that were on the table rather than
+presented alone:
 
 | Option | What it costs | What it buys |
 | --- | --- | --- |
@@ -1733,12 +2137,22 @@ cause is guesswork:
 | **B — let the container gates report `BLOCKED` in CI and amend the acceptance criterion** so SW-P1-12 closes on "the workflow ran, its gate list matched the local suite, and every gate that could run passed" | Requires amending a requirement to match an observation, which needs saying out loud rather than doing quietly | Closes the row honestly without touching a gate input. The container evidence stays where it already is — §3.7 |
 | **C — push as-is first, and decide afterwards** | One red run on the record | Produces the run URL and tool-version output, and tests the prediction before anything is changed |
 
-**C has been done** (§3.8), and it earned its place: it produced the run URL,
+**C was done first** (§3.8), and it earned its place: it produced the run URL,
 the tool versions, the demonstration that both hosts run an identical gate list,
 an independent `docker build`, and FINDING-23 — which would otherwise have been
 found much later, by someone trying to diagnose a red CI run and finding nothing
-in the log. It did *not* confirm the cause above, which is why A and B are not
-yet decidable.
+in the log. It did *not* confirm the cause above.
+
+**A has since been done, at `aa49797`**, and the reasoning for choosing it
+without the cause in hand is set out above under "Why A, and why the choice did
+not wait for the failure's cause". Its cost was paid: `.github/workflows/gates.yml`
+is re-reviewed property by property in §3.4, including the three new steps.
+
+The prediction table below is retained unchanged, as written before the first
+push. Its `SCAMWALL_CA_FILE` row is now out of date by construction — that
+override exists as of `aa49797`, which is what option A added — and it is left
+as it was rather than edited, because a prediction rewritten after the fact is
+not a prediction.
 
 **Reading the result — retained for the next run, once §4.9 makes the verdict
 visible:**
@@ -1749,6 +2163,21 @@ visible:**
 | Every gate passes | The hypothesis was wrong and the runner supplied something unanticipated. Establish what before recording anything |
 | It fails on a **hardening assertion** — a mount set, a bound, a pin | Do not treat this as a CI problem. It is a disagreement with §3.7 about builds of the same commit, and it takes precedence over closing this row |
 | A non-container gate fails | The gate list disagrees between the two hosts. That is a reproducibility defect, which is what this requirement exists to detect. It did not happen in §3.8: all eighteen non-container gates passed on both |
+
+**Reading the *next* run, at `aa49797`.** The table above was written for a
+runner with no fixtures. The workflow now creates them, so the outcomes to
+expect are different, and they are written down before the run for the same
+reason as last time:
+
+| Outcome | Meaning |
+| --- | --- |
+| Every gate passes | SW-P1-12's acceptance criterion is met. The container gates ran against a CI-built image with CI fixtures; that corroborates §3.7 from an independent host and does not replace it |
+| `container runtime verification` fails, and the log now says why | The reason is what matters, and the log will carry it. If it names a missing or non-file mount source, the §3.8 hypothesis is confirmed at last — but for *this* run, not retroactively for that one |
+| It fails on a **hardening assertion** — a mount set, a bound, a pin, the exact approved set | Still not a CI problem. A CI-built image and an operator-built image of the same source disagreeing about hardening is a finding that outranks closing this row |
+| It fails on `the application password file is readable by every account on this host` | The fixture step's permissions are wrong, or `RUNNER_TEMP` is world-traversable in a way not anticipated. A CI defect, fixed in the workflow — never by relaxing the assertion |
+| `compose definition under runner conditions` fails in CI but passes locally | The two Docker CLI versions resolve the definition differently. That is exactly the reproducibility question SW-P1-12 exists to ask, and the answer goes in this document before anything is changed |
+| `gate diagnostics self-test` or its regression tests fail | The reporter behaves differently under the runner's `sed`, `grep` or locale. Until it is fixed, treat every other failure in the same run as possibly mis-reported |
+| The `gate-diagnostics-*` artifact contains anything credential-shaped | Stop. That is a disclosure defect in the sanitizer and takes precedence over every other row here |
 
 **Fork pull requests are not exercised by this push**, and the workflow's most
 security-relevant property — that a fork PR receives no secret and a read-only
@@ -1769,6 +2198,21 @@ established claims are listed alongside the outstanding ones, because a table
 of only the gaps invites the reader to assume everything absent from it is
 settled.
 
+**Established at `b6b1769`, and what survives at `aa49797`.** `ef40156` and
+`aa49797` change four gate inputs, so the image-bound rows below lapse under
+`docs/REQUIREMENTS_MATRIX.md` §5. They are kept, with the commit they were
+established at, because deleting them would make the record look thinner than it
+is — but a row tied to `b6b1769` is evidence about `b6b1769`.
+
+| Claim | Basis | Carries to `aa49797`? |
+| --- | --- | --- |
+| The `b6b1769` image satisfies its runtime hardening assertions | §3.7 | **No.** The verifier and `compose.yaml` both changed; renew per §6.1 |
+| The shipped binary carries no dynamic linking apparatus | §3.6 + §3.7 + §3.8 | **The controls do** — `internal/buildcheck` and the Dockerfile are untouched. The *image-bound* half does not: no image has been built from `aa49797` |
+| The gate suite's exit status matches its printed verdict | `CHECK exit=1` at `aa49797`, 22 passed / 0 failed / 2 BLOCKED. §3.0 | **Yes, re-established directly** |
+| The regression cases discriminate rather than agreeing with the code | §3.5, plus five new PRE-FIX CONTROLS at `ef40156`/`aa49797` (§4.9, §4.10) | **Yes** |
+| The workflow runs on GitHub and runs the same gate list as the local suite | Run 34036997074 at `2a18874`. §3.8 | **Partly.** The workflow changed; the *file* at `aa49797` has never run |
+| The image builds, and its in-build assertions pass, on an unrelated host | CI `docker build` at `2a18874`. §3.8 | **For that source, yes** — `2a18874` is byte-identical to `b6b1769` outside `docs/`. Not for `aa49797` |
+
 **Established at `b6b1769`:**
 
 | Claim | Basis |
@@ -1786,14 +2230,16 @@ settled.
 | Claim | Status |
 | --- | --- |
 | The image built by the operator from `b469c59` is verified | **Not established, and superseded.** `sha256:d3c4ed2c…` is an identity on record. No verifier ran against it, and it predates all seventeen findings in §4.7 and §4.8. Do not deploy or cite it |
-| CI passes | **Not established.** The workflow has now been executed — run 34036997074 — and **failed**: 20 passed, 1 failed, 0 BLOCKED. §3.8. This is the only Phase 1 blocker remaining |
-| Why the CI runtime verification failed | **Not established.** The predicted cause is the deployment's absent bind sources (§4.6, §6.3), and the outcome is consistent with it — but `check.sh` truncates a failing gate's output from the head, so the reason appears nowhere in the run log. §4.9 |
-| A red CI run can be diagnosed from its own log | **Not established, and currently false.** FINDING-23, §4.9. Fixing it is a prerequisite for closing SW-P1-12 |
+| CI passes | **Not established.** The workflow has been executed once — run 34036997074 at `2a18874` — and **failed**: 20 passed, 1 failed, 0 BLOCKED. §3.8. The workflow at `aa49797` has never run at all. This is the only Phase 1 blocker remaining |
+| Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
+| A red CI run can be diagnosed from its own log | **Established locally; not yet observed in CI.** FINDING-23 is fixed at `ef40156`, proven by 62 regression cases and demonstrated end to end through `check.sh` with an injected failing gate (§3.10) — but that demonstration ran here, not on a runner. The `::group::` markers and the uploaded artifact have never been exercised by GitHub |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4; demonstrating it needs a fork PR, which even a successful branch run does not provide. §6.3 |
-| The container identity can read the mounted secret | **Not established.** File modes are configured; no process has been observed reading it. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read — and §3.7 does not weaken this, because the container was never started |
+| The CI fixtures never enter an image or a log | **Established by construction and by test, not by observation on a runner.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; `.dockerignore` and `RUNNER_TEMP` do the rest. No CI run has yet exercised the step |
+| The uploaded gate diagnostics contain nothing credential-shaped | **Established for eleven decoy shapes, on the retained artifact as well as the log** (§4.9). That is a deny-by-pattern filter, so it establishes what those patterns catch and nothing wider. A credential of an unanticipated shape would pass through it |
+| The container identity can read the mounted secret | **Not established, and `aa49797` does not change it.** The verifier now checks that the password file is not readable by every account on the HOST (FINDING-26) — the opposite question. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read, and no container has been started |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |
 | The destination behind the `pi.hole` pin is reachable, is a Pi-hole, and passes TLS verification | **Not established.** §3.7 proves the pin is configured and applied exactly; nothing was sent through it. Phase 2 — §6.2 |
-| The 319-case suite is deterministic to the standard set at `0b083cb` | **Partly established.** §3.3: 30 consecutive runs, 0 failures, against 500 runs for the 237-case suite. At 30 runs a 1-in-50 defect would be missed more often than not. The gap is one of duration, not of method |
+| The 336-case suite is deterministic to the standard set at `0b083cb` | **Partly established, and now weaker.** §3.3 recorded 30 consecutive runs of the 319-case suite, 0 failures, against 500 runs for the 237-case suite. The suite at `aa49797` has 336 cases and has been run a handful of times, not 30. At 30 runs a 1-in-50 defect would already be missed more often than not; below that, less is claimed still. The gap is one of duration, not of method |
 | ScamWall detects scam domains accurately | **Not established, and not claimed.** `testdata/feed.json` is a synthetic fixture. It is evidence about signature verification and parsing, and about nothing else. Detection accuracy is Phase 4 and has not begun |
 
 The last row is the one most easily misread, so it is stated twice: a signed
