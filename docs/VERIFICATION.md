@@ -1325,9 +1325,19 @@ Docker daemon, a network beyond loopback, or an appliance.
 | --- | --- |
 | Starting HEAD | `6a737f39ade68f94e441809b58bde9816577a0ae` |
 | Previous candidate | `7e1141997cc1f7484144f07c1fb05cde5d39e280` — the last commit that changed a gate input *before* this session |
-| **New candidate** | this session's last commit. It changes Go source, three scripts and `scripts/check.sh`, so it **supersedes** `7e11419` as the commit every gate result below is evidence about |
+| **Candidate** | `9ebb98c590fe96628c486d83b66a3b9c87608b85` — *feat(operator): make the handoff a tested program, not a paste-in block*. The last commit of this session that changes a gate input, and therefore the commit every gate result below is evidence about. It **supersedes** `7e11419` |
+| Ending HEAD | the documentation commits after the candidate change no gate input, so under `docs/REQUIREMENTS_MATRIX.md` §5 the transcript carries forward rather than needing a re-run. The candidate is named separately for the same reason §3.14 names one: a SHA the recording commit would invalidate is not a usable identity, which is FINDING-38 in miniature |
 | Published commit | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` — unchanged; **nothing was pushed** |
 | Branch | `feat/phase-1-core` — unchanged |
+
+**Commits, and what each is for.**
+
+| Commit | Purpose |
+| --- | --- |
+| `42477f1` | `doctor --no-credential`; the credential length removed from its report; `Client.Teardown` and truthful session-teardown reporting in `status` and `sync`; the Dockerfile's `--offline` claim corrected |
+| `9c413d2` | The resource attribution and cleanup implementation extracted to `scripts/lib/docker-resources.sh` and shared. Behaviour-preserving; both programs refuse to start without it |
+| `9ebb98c` | `scripts/operator-handoff.sh` and its 141-case suite; the new gate in `scripts/check.sh` |
+| *(documentation)* | This section, §4.13, the §6.5 rewrite, the §6.1 supersession banner, and the matrix updates |
 
 **Evidence renewal.** This session changes application code
 (`cmd/scamwall/main.go`, `internal/adapters/pihole/client.go`) and gate inputs
@@ -3922,7 +3932,7 @@ published commit is still `72bc84c`.
 | The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4, at `2a18874` (§3.8) and again at `07154b6` (§3.11). Corroborates §3.7 from a second host |
 | The container hardening assertions hold on a second, independent host | `container runtime verification` PASSED in runs 34045148578 and 34047025567, against CI-built images with CI fixtures, including the three assertions added at `aa49797`. The passing run names the image: `sha256:d7c44949…`. §3.11, §3.12. **It does not renew SW-P1-05** — CI resolves a different deployment, with `group_add: 65532` rather than the operator's `989`, throwaway fixtures rather than the real CA and password, and an image built on the runner. It *does* close SW-P1-20, whose assertion is about the executable and reads none of those. §3.12 |
 
-**Established at the handoff-correction session, by local evidence only.** Same
+**Established at `9ebb98c`, by local evidence only.** Same
 conditions as the block above: this host, as `scamwall`, no daemon, no network
 beyond loopback. §3.15.
 
@@ -3948,8 +3958,8 @@ beyond loopback. §3.15.
 | Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
 | A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported — FINDING-27 — was diagnosed and fixed from that log alone, and the next run passed |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4, and now also asserted *lexically* by `scripts/workflow-policy-check.sh` (FINDING-30) — which establishes what the workflow SAYS, not what GitHub DOES. Demonstrating the latter needs a pull request from a fork. §6.3, §6.4 item 10 |
-| The gate suite passes on a hosted runner at the current candidate | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 25 gates, changed Go source, a changed Dockerfile comment, a new shared script library and two new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15 |
-| An image built from the current candidate satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
+| The gate suite passes on a hosted runner at `9ebb98c` | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 25 gates, changed Go source, a changed Dockerfile comment, a new shared script library and two new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15 |
+| An image built from `9ebb98c` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
 | The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C, which is written, tested against a fake daemon, and **unexecuted** |
 | The operator handoff behaves correctly against a REAL Docker daemon | **Not established.** `scripts/operator-handoff.sh` is covered by 141 cases against a scripted fake Docker and a scripted fake git (§3.15). That establishes its control flow, its refusals, its attribution and its cleanup logic. It does not establish that the arguments it constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
 | `docker --add-host` accepts what the resolved configuration yields | **Established for the shape, not for the daemon.** The installed Compose renders `extra_hosts` as `["pi.hole=host-gateway"]`; the program normalises the `=` to the `:` form and a case cross-checks the filter against the real Compose CLI. Whether the daemon then maps the name as intended is observable only in step B |
