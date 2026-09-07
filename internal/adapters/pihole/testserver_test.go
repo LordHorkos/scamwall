@@ -42,7 +42,7 @@ type testCA struct {
 	path    string
 }
 
-func newTestCA(t *testing.T) *testCA {
+func newTestCA(t testing.TB) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -75,7 +75,7 @@ func newTestCA(t *testing.T) *testCA {
 }
 
 // leafFor issues a server certificate for the given DNS names.
-func (ca *testCA) leafFor(t *testing.T, names ...string) tls.Certificate {
+func (ca *testCA) leafFor(t testing.TB, names ...string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -118,7 +118,7 @@ type recordedRequest struct {
 	HasAuth  bool
 }
 
-func newFakePihole(t *testing.T, ca *testCA, handler http.Handler, certNames ...string) *fakePihole {
+func newFakePihole(t testing.TB, ca *testCA, handler http.Handler, certNames ...string) *fakePihole {
 	t.Helper()
 	if len(certNames) == 0 {
 		certNames = []string{testHost}
@@ -157,7 +157,7 @@ func (f *fakePihole) recorded() []recordedRequest {
 }
 
 // Port returns the port the fake server is listening on.
-func (f *fakePihole) Port(t *testing.T) int {
+func (f *fakePihole) Port(t testing.TB) int {
 	t.Helper()
 	_, portStr, err := net.SplitHostPort(f.Listener.Addr().String())
 	if err != nil {
@@ -175,7 +175,7 @@ func (f *fakePihole) Port(t *testing.T) int {
 // The host stays "pi.hole" so hostname verification is exercised exactly as it
 // is in production; only the dialled address is overridden, which is the same
 // mechanism used against the real deployment.
-func configFor(t *testing.T, f *fakePihole, caPath string) config.Config {
+func configFor(t testing.TB, f *fakePihole, caPath string) config.Config {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Pihole.Host = testHost

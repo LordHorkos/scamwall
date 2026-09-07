@@ -167,13 +167,13 @@ func Default() Config {
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
-		return cfg, cfg.Validate()
+		return validated(cfg)
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return cfg, cfg.Validate()
+			return validated(cfg)
 		}
 		return Config{}, fmt.Errorf("open config: %w", err)
 	}
@@ -199,7 +199,23 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 
-	return cfg, cfg.Validate()
+	return validated(cfg)
+}
+
+// validated returns cfg only if it passes Validate, and the ZERO Config
+// otherwise.
+//
+// Returning a populated struct alongside an error is a footgun this package
+// can simply not have: a caller that logs the error and carries on would be
+// acting on settings that failed their own checks, with the credential still
+// on disk and the network still available. The zero Config has no host and no
+// paths, so it cannot authenticate to anything. Found by FuzzLoad, which
+// asserted the property before the code had it.
+func validated(cfg Config) (Config, error) {
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
 }
 
 // Validate checks the configuration for internal consistency and for

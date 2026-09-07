@@ -38,6 +38,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
@@ -229,6 +230,20 @@ func Assess(raw string) (Assessment, error) {
 		return Assessment{}, ErrEmpty
 	}
 
+	// Invalid UTF-8 is rejected before anything else looks at the bytes.
+	//
+	// A domain arriving from a JSON feed is a UTF-8 string by definition, so
+	// this is malformed input rather than an exotic name. It matters more
+	// than it looks: the IDNA mapper replaces an invalid byte with U+FFFD and
+	// encodes THAT, producing an ACE label which the same profile then
+	// refuses on the way back in. The canonical form would not be
+	// canonicalisable, and deduplication is only sound if it is. Found by
+	// FuzzAssess on the input "0.\\xd00" within a second of the target
+	// existing.
+	if !utf8.ValidString(s) {
+		return Assessment{}, fmt.Errorf("%w: input is not valid UTF-8", ErrInvalidCharacter)
+	}
+
 	// Control characters and embedded whitespace are always malformed and are
 	// a common way to smuggle a different name past a naive parser.
 	for _, r := range s {
@@ -284,6 +299,18 @@ func Assess(raw string) (Assessment, error) {
 	ascii = strings.ToLower(ascii)
 	if ascii == "" {
 		return Assessment{}, ErrEmpty
+	}
+
+	// The canonical form must itself be canonical.
+	//
+	// Rejecting invalid UTF-8 above removes the one input known to break this,
+	// but the property is asserted here rather than assumed, because it is the
+	// property callers actually depend on: feed deduplication, plan digests
+	// and the whole idea of "the same domain" are unsound the moment two
+	// spellings of one name can produce forms that do not converge. A future
+	// change in the IDNA tables cannot reintroduce the defect silently.
+	if round, rerr := idnaProfile.ToASCII(ascii); rerr != nil || !strings.EqualFold(round, ascii) {
+		return Assessment{}, fmt.Errorf("%w: the canonical form does not normalise to itself", ErrMalformedIDN)
 	}
 
 	if len(ascii) > MaxLength {
