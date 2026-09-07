@@ -1433,6 +1433,148 @@ A, B, C and D of `§6.5` remain unexecuted.
 
 ---
 
+### 3.16 Defect-review pass on the open rows
+
+Work performed under an order to correct FINDING-47 without stopping for
+permission, to inspect the reported diagnostics-filter gap and fix it if
+sensitive content could escape, and to review the ten open rows of §7
+individually — separating confirmed defects from missing evidence, documented
+limitations, and claims needing correction, with an explicit instruction not to
+file an implementation defect as "pending operator testing".
+
+Three of the four defects found were inside rows already classified as
+something else. **Nothing was pushed, no Docker daemon was contacted, and the
+live Pi-hole was not touched.** Steps A–D of §6.5 remain unexecuted.
+
+**Identity.**
+
+| Item | Value |
+| --- | --- |
+| Starting HEAD | `a1b6b507c5f5a579b705ecec322e88fdc2a4d2b8` |
+| Previous candidate | `9ebb98c590fe96628c486d83b66a3b9c87608b85` — the last commit that changed a gate input *before* this session |
+| **Candidate** | `5af270d8ae36b1f60832f4edf26b71df2eee4945` — *fix(gates,operator): four defects the open rows were hiding*. The only commit of this session that changes a gate input, and therefore the commit every gate result below is evidence about. It **supersedes** `9ebb98c` |
+| Ending HEAD | the documentation commit after the candidate changes no gate input, so under `docs/REQUIREMENTS_MATRIX.md` §5 the transcript carries forward. The candidate is named separately for the reason §3.14 and §3.15 name one — a SHA the recording commit would invalidate is not a usable identity, which is FINDING-38 |
+| Published commit | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` — unchanged; **nothing was pushed** |
+| Branch | `feat/phase-1-core` — unchanged |
+
+**Evidence renewal.** This session changes gate inputs — `scripts/check.sh`,
+`scripts/gate-diagnostics.sh`, `scripts/operator-handoff.sh`, the tracked file
+mode of `scripts/container-runtime-verify.sh`, and two test files, plus a new
+`scripts/tests/entrypoint-mode-test.sh`. Under `docs/REQUIREMENTS_MATRIX.md` §5
+that demotes every row resting on those inputs. It changes **no Go source**, so
+the Go-path rows established at `9ebb98c` and `7e11419` are untouched. **The
+passing CI run 34047025567 at `72bc84c` is not relabelled**, and neither is the
+local transcript at `9ebb98c`; both remain evidence about the commits they name.
+A hosted run is still owed, and is now owed for a 26-gate suite rather than a
+25-gate one.
+
+**Local suite on the final clean committed tree.** Run directly, as `scamwall`,
+not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own:
+
+```
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+The gate list grew by one again — `entry-point file modes`. The two BLOCKED
+gates are the same two as always, `docker build` and `container runtime
+verification`, blocked because this account has no Docker socket. That is the
+intended boundary, and `CHECK exit=1` is the correct outcome with the exit
+status agreeing with the printed verdict.
+
+Supporting suites, each run directly:
+
+| Suite | Result | Change |
+| --- | --- | --- |
+| `go test -race -count=1 ./...` | all 8 packages ok | no Go source changed |
+| `staticcheck ./...` | clean | — |
+| `gofmt -l .` | clean | — |
+| `shellcheck --severity=style` over 18 tracked and untracked-but-not-ignored scripts | clean | +1 file |
+| `scripts/tests/runtime-verify-test.sh` | **358** tests, 0 failed | unchanged |
+| `scripts/tests/operator-handoff-test.sh` | **167** tests, 0 failed | was 141; +26 for FINDING-49 and FINDING-50 |
+| `scripts/tests/gate-diagnostics-test.sh` | **73** tests, 0 failed | +9 for FINDING-48 |
+| `scripts/tests/entrypoint-mode-test.sh` | **58** tests, 0 failed | new, for FINDING-47. It reports 56 when its own file is untracked and 58 once tracked: it discovers its subjects from the git index, so it acquires two cases about itself. The tracked figure is the operative one |
+| `scripts/gate-diagnostics.sh --self-test` | all passed | +1 for FINDING-48 |
+| `scripts/secret-scan.sh` (staged), `scripts/independent-secret-scan.sh --staged` | clean; gitleaks 8.30.0 found nothing in history or in the staged tree | run before the commit |
+
+**Repeat runs, and exactly what they are worth (row 10 of §7).** The
+determinism row names a standard set at `0b083cb`: 30 consecutive runs. Five
+rounds of all four shell suites were run here — 20 suite executions, one writer,
+one log:
+
+```
+round=1..5  runtime-verify    rc=0  358 tests, 0 failed
+round=1..5  operator-handoff  rc=0  167 tests, 0 failed
+round=1..5  gate-diagnostics  rc=0   73 test(s), 0 failure(s)
+round=1..5  entrypoint-mode   rc=0   58 test(s), 0 failure(s)
+20 runs, 20 rc=0, 0 nonzero, case counts identical across every round
+```
+
+**Five is not thirty, and this does not close the row.** At five runs a
+one-in-fifty defect is missed about ninety per cent of the time. What it
+establishes is narrower and still worth recording: across five rounds the case
+counts did not drift, no suite flaked, and the two suites that gained cases this
+session are as stable as the two that did not.
+
+A first attempt at this measurement was **discarded rather than reported**. Two
+copies of the campaign were running against the same log, each truncating it at
+start, so the file interleaved two runs and its contents could not be attributed
+to either. The number it would have supported was larger than the one recorded
+above. It is not used.
+
+**A count that depends on the index.** `scripts/tests/entrypoint-mode-test.sh`
+reports **56** cases when its own file is untracked and **58** once it is
+committed. That is not a flake: it discovers its subjects from `git ls-files`,
+so once tracked it acquires two cases about itself. The candidate's commit
+message records 56, measured before the file was staged; 58 is the figure that
+holds for the committed tree, and both are correct about the tree they describe.
+
+**Every fix was shown to discriminate.** Each carries a PRE-FIX CONTROL inside
+its suite, and each was additionally verified by reverting the fix in the
+working tree and observing the suite fail:
+
+| Fix reverted | Failures |
+| --- | --- |
+| The tracked file mode | **5**, including the `exit 126` direct-invocation case |
+| `state_put` / `state_get` (FINDING-49) | **6** |
+| The preflight baseline (FINDING-50) | **8** |
+
+The FINDING-48 control is inside the suite rather than by reversion: the
+superseded three-rule set is applied to the same fixture and asserted to leak
+the short body line.
+
+**The new mode gate caught a live regression while this session ran.** A `cp`
+used to restore a backup during the reversion experiments dropped the execute
+bit on `scripts/operator-handoff.sh`; the next run of
+`scripts/tests/entrypoint-mode-test.sh` failed with `exit 126 — found but not
+executable`. That is the defect class it was written for, occurring
+independently, hours after the file was written.
+
+**What the FINDING-48 reproduction used.** Synthetic material only —
+`AAAAsynthetic…`, `ZZZZshortTailSynthetic03==` — assembled at run time. No
+production secret, key, certificate or `.env` was read at any point, and
+`keys/feed-signing.ed25519.key` was not touched.
+
+**A limit of the new mode gate, recorded rather than left to be inferred.**
+`scripts/check.sh` and `scripts/make-test-feed.sh` are *not* exec'd by it.
+Neither parses arguments, so one would run the entire gate suite from inside the
+gate suite and the other would rewrite `testdata/feed.json`. They are covered by
+the tracked-mode and working-tree assertions only, which establish that the bit
+is set and not that the kernel accepted it. That is weaker, and it is stated
+here rather than papered over with a live invocation that has a side effect
+hidden inside it.
+
+**What this session did NOT do:** nothing was pushed, no pull request was
+opened, `main` was not modified, no Docker command was run, no `sudo` was used,
+no image was built, no container was created, the live Pi-hole was not
+contacted, and no production secret, certificate, `.env` or deployment resource
+was read or changed. Steps A, B, C and D of `§6.5` remain unexecuted.
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
@@ -2557,6 +2699,226 @@ confirmed"* if the appliance's version offers no supported method.
 
 ---
 
+### 4.14 FINDING-47 … FINDING-50 — the defect-review pass at `a1b6b50`
+
+Four defects, found by reviewing the ten open rows of §7 one at a time instead
+of carrying them forward as a block. Three of them were sitting *inside* rows
+this record had already classified as "pending operator execution" or "a
+documented limitation". They were neither. A defect that a test can reach
+without a daemon is a defect, and filing it under work that needs an appliance
+is how it stops being looked at.
+
+All four are fixed here, each with a regression case and each with a PRE-FIX
+CONTROL that reproduces the defect and asserts the superseded code exhibits it.
+
+#### FINDING-47 — the runtime verifier lost its executable bit, and no gate could see it
+
+`9c413d2` changed `scripts/container-runtime-verify.sh` from tracked mode
+`100755` to `100644` while extracting the resource-tracking block out of it.
+Three commits passed before anyone looked.
+
+Nothing caught it because **every tested path invokes these scripts as an
+argument to `bash`** — `bash ./scripts/container-runtime-verify.sh` in
+`scripts/check.sh`, `bash "$VERIFIER"` in `scripts/operator-handoff.sh` — and
+`bash` does not consult the execute bit of a file it is told to read. The
+documented invocations are the direct form, and the kernel refuses those with
+`EACCES`:
+
+```
+$ ./scripts/container-runtime-verify.sh
+/bin/bash: ./scripts/container-runtime-verify.sh: Permission denied
+```
+
+Three documented invocations were broken: `CONTRIBUTING.md` line 155, the
+verifier's own usage header at line 53, and the command
+`scripts/container-security-check.sh` prints when it redirects the operator to
+it. The gate suite stayed green throughout, and **the first person to find out
+would have been the operator, at §6.5 step A** — the machine where a failure
+costs the most, which is the precise outcome the handoff rewrite exists to
+prevent.
+
+**Fixed:** the mode is restored in the index, not only in the working tree
+(`git update-index --chmod=+x`), because a local `chmod` leaves every fresh
+clone broken while making this checkout look correct.
+`scripts/lib/docker-resources.sh` stays `100644`: it is sourced, and marking it
+executable would invite it being run.
+
+**Regression:** `scripts/tests/entrypoint-mode-test.sh`, 56 cases, wired into
+`scripts/check.sh` as `entry-point file modes`. It asserts the **tracked** mode
+of every shell program under `scripts/`, that the working tree agrees with the
+index, that everything under `scripts/lib/` is non-executable, that every
+`./scripts/…` or `sudo scripts/…` form appearing in the documentation names a
+tracked-executable file — reading the invocation *form*, because the form is the
+whole defect — and it then **execs** each entry point that has a
+side-effect-free help path, asserting against exit 126 specifically. Docker,
+Compose and `go` are shimmed to record and fail during those invocations, so
+"no daemon was contacted" is asserted rather than assumed. `check.sh` and
+`make-test-feed.sh` are deliberately not exec'd: neither parses arguments, so
+one would run the entire gate suite from inside itself and the other would
+rewrite `testdata/feed.json`. They keep the mode assertions, which is weaker,
+and this says so rather than hiding a side effect inside a mode test.
+
+The suite discriminates: reverting the mode produces **5 failures**, including
+the `exit 126` case. It also caught a real regression during this session — a
+`cp` used to restore a backup dropped the bit again, and the suite failed on the
+next run.
+
+#### FINDING-48 — a PEM's short final body line was printed in full
+
+§7 recorded this as a *limitation*: "the filter is line-oriented, and a PEM's
+short final body line can fall under the 40-character threshold the
+long-opaque-value rule uses." That description was accurate and the
+classification was wrong. It is a **leak**, and it was reachable through the
+real reporting path.
+
+`scripts/gate-diagnostics.sh` gave the `-----BEGIN` and `-----END` markers a
+rule each and left the body between them to the long-opaque-value rule, which
+requires 40 characters. A PEM body wraps at 64, so every line but the last is
+caught — and the last is the remainder, routinely shorter than 40. Reproduced
+against `--report`, with synthetic material only:
+
+```
+$ gate-diagnostics.sh --report 'pem repro' 1 pem-repro.log
+         --- full output (8 line(s), sanitized) ---
+         PASS    check 1
+         <redacted: PEM block>
+         <redacted: long opaque value>
+         <redacted: long opaque value>
+         ZZZZshortTailSynthetic03==          <-- 26 characters, printed in full
+```
+
+**Fixed** with the filter's one stateful rule: between a BEGIN marker and its
+END marker, any line that is nothing but base64 is redacted whatever its length.
+The markers contain `-`, so they never match the body pattern and their own
+rules still apply. Two consequences are deliberate and are documented at the
+rule: an unterminated block — a capture cut off mid-key — leaves the range open
+to end of input, which is the fail-closed direction; and it costs nothing that
+matters, because every line the digest must always show (`FAIL`, `BLOCKED`,
+`RESULT:`, the counts) contains spaces or punctuation and cannot match a
+pure-base64 line. That is asserted, not assumed.
+
+**Regression:** four cases in `scripts/tests/gate-diagnostics-test.sh` plus one
+in the reporter's own `--self-test`. The existing decoy carried a single
+64-character body line, so it had been passing while saying nothing about the
+last line; it now carries a short tail. The PRE-FIX CONTROL applies the
+superseded three-rule set to the same fixture and asserts it leaks.
+
+**What this does not establish.** The filter is still deny-by-pattern. It
+establishes what its patterns catch, and a credential of an unanticipated shape
+would pass through it. That is the residual limitation, and it is a real one —
+but it is no longer a stand-in for a known leak.
+
+#### FINDING-49 — a re-run of step A left every later step pinned to the previous build
+
+Filed under "the handoff behaves correctly against a real Docker daemon", which
+is a row about missing runtime evidence. This needed no daemon.
+
+`state_put` **appended** to the work directory's state file and `state_get`
+returned the **first** match. A second `build` into the same work directory —
+after a failed first attempt, or a corrected one, which is the ordinary way a
+procedure gets re-run — appended a new `IMAGE_ID` that nothing ever read. Steps
+B, C and D went on creating their containers from the **previous** build's
+image while step A's report named the new one.
+
+Worse, each of those steps still passed its own `.Image` comparison, because it
+compared against the same stale value it had been created from. The pin
+introduced by FINDING-44 was intact and pointing at the wrong artifact. It is
+FINDING-44's defect — a result bound to one identity while the operation was
+performed on another — arriving by a different route.
+
+Reproduced with the two implementations in isolation:
+
+```
+IMAGE_ID=sha256:AAAAfirstbuild
+IMAGE_ID=sha256:BBBBsecondbuild
+state_require IMAGE_ID -> sha256:AAAAfirstbuild
+```
+
+**Fixed:** `state_put` now replaces any existing record of the key — rewriting
+through a temporary file in the mode-700 work directory and renaming it into
+place — and announces a replacement whose value differs, so a re-run says so in
+its own output. `state_get` takes the **last** record, which matters only for a
+state file written by an older revision of this program: there the last record
+is the current value and the first is the one the defect returned. Key matching
+is a literal prefix comparison at position 1, not a regex, so no metacharacter
+in a key can widen it.
+
+**Regression:** a `rebuild-repins` case builds twice with different image IDs
+into one work directory and asserts the state file holds exactly one `IMAGE_ID`,
+that it is the second build's, that the replacement is announced, and — read
+from the fake daemon's recorded `create` argument lists rather than from the
+program's own output — that the probe container is created from the second
+image and not the first. Reverting the two functions produces **6 failures**.
+
+#### FINDING-50 — step Z compared the secret against a baseline it had just written itself
+
+Also filed under the "real Docker daemon" row. Also needed no daemon.
+
+§6.5 step Z says the deployment secret's "owner, group, mode, size and
+modification time are compared against the values recorded earlier in the same
+work directory". **Nothing recorded them earlier.** `SECRET_META` was written
+only by `step_closeout`, which took its own baseline when it found none, printed
+`no earlier metadata was recorded; this run records it as the baseline`, and
+reported:
+
+```
+ok    secret metadata recorded (uid:gid mode size mtime)
+```
+
+On a single pass — 0, A, B, C, D, Z, which is the entire procedure — that was
+**every run**. The comparison never happened, and with no other failure the step
+reported `RESULT: every check in this step ran and passed`. A check that could
+not have run was reading as one that passed, which is the exact shape this
+repository has spent five sessions removing.
+
+**Fixed** in both halves. The preflight step records the baseline, before any
+step has run — metadata only; no credential is opened, there or in step Z's
+default path. Where preflight cannot read it, that is recorded as
+`SECRET_META_UNAVAILABLE` and step Z reports the comparison as **UNPROVEN**
+rather than inventing a baseline at the moment it is supposed to be checking
+one. Preflight itself does **not** fail on an unreadable secret: it requires
+neither Docker nor the deployment, and failing there would make it unusable on
+any host where the deployment is absent. The failure belongs to the step that
+makes the claim, and that is step Z.
+
+**Regression:** eleven cases, including the two that matter most — a closeout
+whose metadata read *succeeds* while no baseline exists (the branch the defect
+lived in, reached with a scoped `stat` shim that answers for the secret path and
+delegates everything else), and the positive and negative comparisons against a
+preflight-recorded baseline. Reverting the fix produces **8 failures**.
+
+#### The ten open rows, reviewed one at a time
+
+The review that produced the four findings above. Every row of §7's "still not
+established" table was taken separately and sorted into one of four kinds, and
+the sorting is recorded because three rows were in the wrong one.
+
+| # | Row | Kind | Disposition |
+| --- | --- | --- | --- |
+| 1 | The gate suite passes on a hosted runner at the candidate | **Missing hosted evidence** | Needs an approved push. Not authorised here; nothing was pushed |
+| 2 | An image built from the candidate satisfies the hardening assertions | **Missing runtime evidence** | Needs §6.5 step A, with a daemon. Unexecuted |
+| 3 | The handoff behaves correctly against a real Docker daemon | **Was: pending operator testing. Contained two confirmed defects** | FINDING-49 and FINDING-50, both fixed here. The **residual** is genuine runtime evidence: that a real daemon accepts the arguments the program builds, and that the deployment's paths are mountable |
+| 4 | The container identity can read the mounted secret | **Missing runtime evidence** | Needs a started container: step C. Unexecuted |
+| 5 | A session is confirmed absent from the appliance afterwards | **Documented limitation** | ScamWall cannot ask — the session-listing endpoint is outside the permitted set, and widening it for a diagnostic is the wrong trade. Unchanged |
+| 6 | `docker --add-host` accepts what the resolved configuration yields | **Missing runtime evidence** | The rendering is handled and cross-checked against the real Compose CLI. Whether the daemon maps the name is step B |
+| 7 | The diagnostics filter catches every credential shape | **Was: documented limitation. Contained a confirmed defect** | FINDING-48, fixed here. The **residual** is a real limitation: deny-by-pattern establishes what its patterns catch |
+| 8 | A fork pull request receives no secret and a read-only token | **Missing hosted evidence** | `workflow-policy-check.sh` establishes what the workflow says. What GitHub does needs a pull request from a fork |
+| 9 | Why the first CI runtime verification failed | **Documented limitation** | The run has no artifacts and its log holds twenty-five lines. Not recoverable, and the row stays open rather than being closed by a plausible mechanism |
+| 10 | The suite is deterministic to the standard set at `0b083cb` | **Missing evidence — partially supplied, and the row stays open** | §3.16: five rounds of all four suites, 20 runs, 0 failures, counts identical. Five is not the 30 the standard names. A first attempt was discarded rather than reported, because two copies of the campaign were truncating one log |
+
+Three rows also carried **claims requiring correction**, independent of the
+defects:
+
+* §7's diagnostics-filter row described a leak as a limitation. Corrected: it
+  was FINDING-48, it is fixed, and the residual is the deny-by-pattern nature.
+* §6.5 step Z's "compared against the values recorded earlier in the same work
+  directory" was **not true of the code**. It is now, by FINDING-50's fix.
+* §3.15's "the gate list grew by one" and its `25 passed` are superseded: the
+  list has grown again and the counts are restated in §3.16 rather than edited
+  in place, because §3.15 is evidence about `9ebb98c`.
+
+---
+
 ## 5. Critical Go path review (SW-P1-10)
 
 Review of the areas SW-P1-10 names. Each entry states what was checked and what
@@ -3363,7 +3725,7 @@ found by reading it (§4.13), and they were not subtle.
 
 It is now `scripts/operator-handoff.sh`, driven by
 `scripts/tests/operator-handoff-test.sh` against a scripted fake Docker and a
-scripted fake git: **141 cases, 0 failed**, no daemon, no network, no
+scripted fake git: **167 cases, 0 failed**, no daemon, no network, no
 appliance. Every refusal the procedure must make is reproduced there
 deliberately. This section describes what each step does and how to read its
 result; it does not restate the commands, because a second copy is a second
@@ -3444,6 +3806,13 @@ log is an unnecessary disclosure and naming the variable is enough to fix it.
 A git failure and a dirty tree are distinguished. "git could not tell us" is
 reported as `source identity is UNKNOWN`, never as a mismatch and never as a
 clean tree.
+
+It also records the deployment secret's **baseline metadata** — owner, group,
+mode, size, mtime — which is what step Z compares against at the end. No
+credential is opened: this is `stat`, not a read. Where the secret cannot be
+read from here, that is recorded rather than failed, because preflight requires
+neither Docker nor the deployment; step Z then reports its comparison as
+UNPROVEN instead of inventing a baseline. See FINDING-50.
 
 **Record:** the work-directory path it prints. Every later step takes
 `--work-dir <that path>`.
@@ -3736,12 +4105,21 @@ sudo scripts/operator-handoff.sh closeout --work-dir <work>
 ```
 
 * **The deployment's secret.** Owner, group, mode, size and modification time
-  are compared against the values recorded earlier in the same work directory.
-  That is what can be established without reading a credential, and it is
-  reported as exactly that: it does **not** prove the content is unchanged, and
-  a same-length rewrite with a restored mtime would pass it. A read that fails
-  is a failure and does not end the step — the leftover enumeration below is
-  the other half of closing out.
+  are compared against the baseline **the preflight step recorded**, before any
+  step of the handoff ran. That is what can be established without reading a
+  credential, and it is reported as exactly that: it does **not** prove the
+  content is unchanged, and a same-length rewrite with a restored mtime would
+  pass it. A read that fails is a failure and does not end the step — the
+  leftover enumeration below is the other half of closing out.
+
+  Until `5af270d` this sentence was **not true of the code**. Nothing recorded
+  the metadata earlier: step Z took its own baseline when it found none, printed
+  "no earlier metadata was recorded", and reported `ok` — so on a single pass,
+  which is the whole procedure, the comparison never happened and the step
+  reported a pass for it anyway. That is FINDING-50. Where preflight could not
+  read the secret, step Z now reports the comparison as **UNPROVEN** and fails,
+  rather than establishing a baseline at the moment it is supposed to be
+  checking one.
 * **Optional content integrity**, with `--verify-secret-integrity`, off by
   default. **It reads the credential**, which is why it is opt-in and why it is
   not used merely to show that some other step was credential-free.
@@ -3943,10 +4321,23 @@ beyond loopback. §3.15.
 | No command reports the credential's length | `TestDoctorNeverReportsTheCredentialLength`, which also asserts the literal length value is absent |
 | A failed session teardown is never reported as success | `Client` records a `Teardown` outcome and `status`/`sync` report which they observed. `TestAFailedLogoutIsNotReportedAsSuccess` asserts a nonzero exit, the absence of any "accepted" claim, that the successfully-read version data is still reported, and that the DELETE was in fact attempted. `TestALogoutAnswered404IsTheDesiredEndState` covers the third outcome |
 | `status` is not bounded to three requests | `TestStatusIsNotLimitedToThreeRequests`: the fake answers 503 twice and the observed sequence is five requests, all within the permitted set |
-| The operator procedure refuses an unexpected HEAD, a dirty tree, an unreadable tree, and a fixture redirection arriving by either route | `scripts/tests/operator-handoff-test.sh`, 141 cases against a scripted fake `docker` and a scripted fake `git`. §3.15 lists the covered failure modes |
+| The operator procedure refuses an unexpected HEAD, a dirty tree, an unreadable tree, and a fixture redirection arriving by either route | `scripts/tests/operator-handoff-test.sh`, 141 cases against a scripted fake `docker` and a scripted fake `git`. §3.15 lists the covered failure modes. **Superseded at `5af270d`:** the suite is now 167 cases, and two of the additions cover defects this row did not — FINDING-49 and FINDING-50, §4.14 |
 | Cleanup is installed before creation, is idempotent, preserves what it cannot attribute, distinguishes a failed enumeration from an empty one, and counts toward the verdict | The reviewed implementation, now shared as `scripts/lib/docker-resources.sh`. Its behaviour is unchanged over the extraction: the verifier's suite re-ran at **358** cases, 0 failed, including a new case asserting the verifier REFUSES to start if the library is absent |
 | A `SIGTERM` mid-run removes what was created and exits 143 | An interruption case in the handoff suite, delivered at the one moment a container exists |
 | A failing step's diagnostics carry no password-, session-id- or PEM-shaped value, and the logs survive for the operator to return | Four assertions in the redaction case, plus retention assertions on the work directory (mode 700) and the captured log (mode 600) |
+
+**Established at `5af270d`, by local evidence only.** Same conditions: this
+host, as `scamwall`, no daemon, no network beyond loopback. §3.16.
+
+| Claim | Basis |
+| --- | --- |
+| Every shell program under `scripts/` is tracked executable, the working tree agrees with the index, and everything under `scripts/lib/` is non-executable | `scripts/tests/entrypoint-mode-test.sh`, 56 cases, run as a gate. The **tracked** mode is what is asserted: a local `chmod` leaves every clone broken while making the checkout look correct |
+| Every direct invocation the documentation names can actually be exec'd | The same suite execs each entry point with a side-effect-free help path and asserts against `exit 126` specifically, with Docker, Compose and `go` shimmed to record and fail so that "no daemon was contacted" is asserted rather than assumed. `check.sh` and `make-test-feed.sh` are excluded, for stated reasons, and keep the mode assertions only |
+| A PEM's body does not reach a gate log, at any line length | The stateful range rule in `scripts/gate-diagnostics.sh`, with four cases in `scripts/tests/gate-diagnostics-test.sh` and one in the reporter's own `--self-test`, all driven through the real `--report` path. A PRE-FIX CONTROL applies the superseded three-rule set to the same fixture and asserts it leaks |
+| An unterminated PEM block does not swallow the diagnosis | Asserted directly: the failure line, the verdict and the pass/fail counts all survive a range left open to end of input, because none of them is a pure-base64 line |
+| A re-run of step A repins every later step to the new image | `rebuild-repins`: two builds of different images into one work directory, then the probe container's image read from the **fake daemon's recorded `create` arguments** rather than from the program's own output. Reverting `state_put`/`state_get` produces 6 failures |
+| Step Z compares the secret against a baseline recorded before the handoff, and reports UNPROVEN when there is none | Eleven cases, including the branch the defect lived in — a metadata read that *succeeds* with no baseline recorded — reached with a `stat` shim scoped to the secret path. Reverting the preflight change produces 8 failures |
+| A step that could not perform its check does not report a pass for it | The FINDING-50 fix, asserted by `expect_no_output` on both superseded success lines and by a state-file assertion that step Z writes no baseline of its own |
 
 **Still not established:**
 
@@ -3958,13 +4349,13 @@ beyond loopback. §3.15.
 | Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
 | A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported — FINDING-27 — was diagnosed and fixed from that log alone, and the next run passed |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4, and now also asserted *lexically* by `scripts/workflow-policy-check.sh` (FINDING-30) — which establishes what the workflow SAYS, not what GitHub DOES. Demonstrating the latter needs a pull request from a fork. §6.3, §6.4 item 10 |
-| The gate suite passes on a hosted runner at `9ebb98c` | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 25 gates, changed Go source, a changed Dockerfile comment, a new shared script library and two new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15 |
+| The gate suite passes on a hosted runner at `5af270d` | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has **26** gates, changed Go source, a changed Dockerfile comment, a shared script library, and three new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15, §3.16 |
 | An image built from `9ebb98c` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
 | The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C, which is written, tested against a fake daemon, and **unexecuted** |
-| The operator handoff behaves correctly against a REAL Docker daemon | **Not established.** `scripts/operator-handoff.sh` is covered by 141 cases against a scripted fake Docker and a scripted fake git (§3.15). That establishes its control flow, its refusals, its attribution and its cleanup logic. It does not establish that the arguments it constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
+| The operator handoff behaves correctly against a REAL Docker daemon | **Not established — and this row was carrying two defects that had nothing to do with a daemon.** FINDING-49 (a re-run of step A left every later step pinned to the previous build's image) and FINDING-50 (step Z compared the secret against a baseline it had just written itself, and reported `ok`) were both found by reading the program, both reproduced without a daemon, and both fixed at `5af270d`. §4.14. The **residual** is genuine runtime evidence: `scripts/operator-handoff.sh` is covered by 167 cases against a scripted fake Docker and a scripted fake git, which establishes its control flow, refusals, attribution, cleanup and state handling. It does not establish that the arguments it constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
 | `docker --add-host` accepts what the resolved configuration yields | **Established for the shape, not for the daemon.** The installed Compose renders `extra_hosts` as `["pi.hole=host-gateway"]`; the program normalises the `=` to the `:` form and a case cross-checks the filter against the real Compose CLI. Whether the daemon then maps the name as intended is observable only in step B |
 | A session created by ScamWall is confirmed absent from the appliance afterwards | **Not established, and no method for it is claimed.** ScamWall cannot ask: the endpoint that lists sessions is outside the permitted set. The superseded procedure named a Pi-hole UI path and a user-agent attribution that **this repository has never verified for any version**. §6.5 step D now states the limitation and proposes consulting the appliance version's own documentation, recording *"request accepted, not independently confirmed"* where no supported method exists |
-| The diagnostics filter catches every credential shape | **Not established, and narrowed further.** It is deny-by-pattern, so it establishes what its patterns catch. One instance is now recorded rather than left to be discovered: it is line-oriented, and a PEM's short final body line can fall under the 40-character threshold the long-opaque-value rule uses. §3.15 |
+| The diagnostics filter catches every credential shape | **Not established, and the previous wording of this row was wrong.** It described a PEM's short final body line surviving the 40-character threshold as a *limitation*. It was a **leak**, reachable through the real `--report` path, and it is FINDING-48 — fixed at `5af270d` by a stateful rule that redacts a PEM's body between its markers whatever the line length, with a PRE-FIX CONTROL asserting the superseded rules leaked it. §4.14. What remains is the true limitation: the filter is deny-by-pattern, so it establishes what its patterns catch, and a credential of an unanticipated shape would pass through it. That is no longer standing in for a known leak |
 | The domain policy separation is accepted | **Not claimed.** SW-P3-05 is implemented and locally tested at `7e11419`; its acceptance belongs to Phase 3, which has not begun |
 | The four fuzz targets show these paths are free of defects | **Not established, and not claimed.** Four bounded campaigns found two real defects and then stopped finding things. That is evidence about the inputs those runs reached and about nothing else. Durations and execution counts are recorded in §3.14 precisely so the claim cannot be inflated later |
 | The CI fixtures never enter an image or a log | **Established by construction and by test, and the step has now run.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; run 34045148578 created them 0600 in a 0700 directory, echoed only `ls -l` metadata, and removed them in a step that re-tests before reporting success. §3.11 |
@@ -3972,7 +4363,7 @@ beyond loopback. §3.15.
 | The container identity can read the mounted secret | **Not established, and `aa49797` does not change it.** The verifier now checks that the password file is not readable by every account on the HOST (FINDING-26) — the opposite question. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read, and no container has been started |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |
 | The destination behind the `pi.hole` pin is reachable, is a Pi-hole, and passes TLS verification | **Not established.** §3.7 proves the pin is configured and applied exactly; nothing was sent through it. Phase 2 — §6.2 |
-| The 336-case suite is deterministic to the standard set at `0b083cb` | **Partly established, and now weaker.** §3.3 recorded 30 consecutive runs of the 319-case suite, 0 failures, against 500 runs for the 237-case suite. The suite at `aa49797` has 336 cases and has been run a handful of times, not 30. At 30 runs a 1-in-50 defect would already be missed more often than not; below that, less is claimed still. The gap is one of duration, not of method |
+| The shell suites are deterministic to the standard set at `0b083cb` | **Partly established, and the row stays open.** §3.3 recorded 30 consecutive runs of the 319-case suite, 0 failures, against 500 runs for the 237-case suite. At `5af270d` the four shell suites were run five rounds each — 20 executions, 20 `rc=0`, case counts identical across every round (§3.16). **Five is not thirty:** at five runs a one-in-fifty defect is missed about nine times in ten. What it establishes is that the counts did not drift and that the two suites which gained cases this session are as stable as the two that did not. The gap remains one of duration, not of method. A first attempt at this measurement was **discarded rather than reported** — two copies of the campaign were truncating one log — and the larger number it would have supported is not used |
 | ScamWall detects scam domains accurately | **Not established, and not claimed.** `testdata/feed.json` is a synthetic fixture. It is evidence about signature verification and parsing, and about nothing else. Detection accuracy is Phase 4 and has not begun |
 
 The last row is the one most easily misread, so it is stated twice: a signed
