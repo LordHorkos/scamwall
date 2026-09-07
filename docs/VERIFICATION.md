@@ -1649,11 +1649,35 @@ defect is missed about nine times in ten. What this establishes is narrower:
 the counts did not drift, nothing flaked, and the suite that grew from 167 to
 308 cases is as stable as the three that did not change.
 
-The gate suite on the working tree: **25 passed, 1 failed, 2 BLOCKED**, where
-the one failure is the uncommitted-tree gate — it is the gate that fails until
-the work is committed — and the two BLOCKED are the daemon boundary, unchanged.
-The suite is re-run on the committed tree and that result, not this one, is the
-operative figure.
+#### The gate suite, run directly on the clean committed tree
+
+Not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own.
+
+```
+$ git status --porcelain          # (no output — the tree is clean)
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+Exit 1 is correct and agrees with the printed verdict. The two BLOCKED gates
+are the privilege boundary, unchanged and not a defect:
+
+```
+BLOCKED  docker build (docker daemon not reachable by scamwall)
+BLOCKED  container runtime verification (docker daemon not reachable by scamwall
+         — run scripts/container-runtime-verify.sh as the operator)
+```
+
+The gate list is **unchanged at 26**: this session added no gate. It changed
+what one of them — `operator-handoff regression tests` — asserts, and how much.
+
+Run on the *working* tree before committing, the suite reported 25 passed and
+one failure: the uncommitted-tree gate, which is the gate that fails until the
+work is committed. That figure is not used; the committed-tree run above is the
+operative one.
 
 #### Every fix was shown to discriminate
 
