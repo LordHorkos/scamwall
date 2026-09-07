@@ -136,6 +136,7 @@ Repository hygiene — two secret scanners, deliberately:
 ./scripts/tests/pipefail-sigpipe-test.sh      # see "A shell rule" below
 ./scripts/container-security-check.sh         # repository content only
 ./scripts/tests/runtime-verify-test.sh        # verifier regression tests
+./scripts/tests/operator-handoff-test.sh      # operator-procedure regression tests
 ```
 
 Neither scanner is a superset of the other. `secret-scan.sh` knows ScamWall —
@@ -159,6 +160,21 @@ SCAMWALL_EXPECTED_IMAGE_ID="$(docker image inspect -f '{{.Id}}' scamwall:local)"
 The runtime verifier is a separate program from the repository checker because
 it runs on the other side of a privilege boundary. See
 `docs/SECURITY_BOUNDARIES.md` §5.5.
+
+The evidence-collection procedure that wraps it is `scripts/operator-handoff.sh`
+(`docs/VERIFICATION.md` §6.5). Do not transcribe its steps into a shell by
+hand: it exists as a program precisely because a documentation code block that
+nothing executes accumulates defects nobody sees until it is run against the
+live appliance — `docs/VERIFICATION.md` §4.13 lists nine of them. Its step D
+authenticates and refuses to run without an explicit flag.
+
+Both programs share `scripts/lib/docker-resources.sh`, which is the reviewed
+implementation of resource attribution and cleanup: unpredictable invocation
+identifiers, per-invocation ownership labels, deletion only by exact ID after
+re-verifying ownership, preservation of anything not attributable, and
+idempotent cleanup installed before any resource is created. **If you write a
+third program that creates Docker resources, source that file rather than
+writing a fourth cleanup.** Both refuse to start if it is absent.
 
 ### A shell rule you must follow
 

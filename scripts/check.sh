@@ -258,6 +258,13 @@ echo "-- runtime verifier regression tests --"
 # scripted fake Docker so each one is reproduced deliberately, and they need
 # no daemon — so they run here, as the service account, on every gate run.
 require "runtime-verify regression tests" bash ./scripts/tests/runtime-verify-test.sh
+# The operator handoff (docs/VERIFICATION.md section 6.5) is a program now
+# rather than a documentation code block, for one reason: a defect in a block
+# nothing executes is only discoverable by running it against the household
+# Pi-hole, which is the most expensive place to find one. These drive it against
+# a scripted fake Docker and a scripted fake git — no daemon, no network, no
+# appliance — so every refusal it must make is reproduced deliberately here.
+require "operator-handoff regression tests" bash ./scripts/tests/operator-handoff-test.sh
 
 echo
 echo "-- container runtime (operator-executed, needs daemon) --"
