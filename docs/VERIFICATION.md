@@ -90,6 +90,12 @@ of rows again, so the suite was re-run at `aa49797` and that run is now §3.0.
 The image-bound rows (SW-P1-05, SW-P1-20) cannot be renewed from here at all —
 they need the operator, §6.1.
 
+**Later sessions carry their own identity blocks**, because rewriting this
+table each time would lose the commit each observation was actually made at.
+`§3.14` covers `f94214a`…`7e11419`; `§3.15` covers the handoff-correction
+session and names the commit that supersedes `7e11419` as the candidate. Both
+say explicitly which earlier evidence does and does not carry forward.
+
 The rule is worth stating rather than assuming: **evidence is tied to the last commit that changed a gate input.** A
 documentation-only commit changes none, so the record carries forward. Any
 commit touching source, scripts, dependencies, the container definition, or CI
@@ -1306,6 +1312,115 @@ secret, certificate, `.env` or deployment resource was read or changed. Every
 network test in the tree talks to a server started by the test itself and
 listening on the loopback interface.
 
+### 3.15 Operator-handoff correction session
+
+Work performed under an order to correct the `§6.5` operator handoff as one
+focused patch, without expanding application scope, and **without executing
+steps A–D or contacting the live Pi-hole**. Nothing here was run against a
+Docker daemon, a network beyond loopback, or an appliance.
+
+**Identity.**
+
+| Item | Value |
+| --- | --- |
+| Starting HEAD | `6a737f39ade68f94e441809b58bde9816577a0ae` |
+| Previous candidate | `7e1141997cc1f7484144f07c1fb05cde5d39e280` — the last commit that changed a gate input *before* this session |
+| **New candidate** | this session's last commit. It changes Go source, three scripts and `scripts/check.sh`, so it **supersedes** `7e11419` as the commit every gate result below is evidence about |
+| Published commit | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` — unchanged; **nothing was pushed** |
+| Branch | `feat/phase-1-core` — unchanged |
+
+**Evidence renewal.** This session changes application code
+(`cmd/scamwall/main.go`, `internal/adapters/pihole/client.go`) and gate inputs
+(`scripts/check.sh`, `scripts/container-runtime-verify.sh`, a new
+`scripts/lib/docker-resources.sh`, a new `scripts/operator-handoff.sh`, and
+`container/Dockerfile`). Under `docs/REQUIREMENTS_MATRIX.md` §5 that demotes
+every row resting on those inputs. **The passing CI run 34047025567 at
+`72bc84c` is not relabelled as covering this tree**, and neither is the local
+transcript at `7e11419`; both remain evidence about the commits they name. The
+local suite was re-run here, and a hosted run is still owed.
+
+**Local suite on the final clean committed tree.** Run directly, as `scamwall`,
+not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own:
+
+```
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 25 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+The gate list grew by one — `operator-handoff regression tests`. The two
+BLOCKED gates are the same two as always, `docker build` and `container runtime
+verification`, blocked because this account has no Docker socket. That is the
+intended boundary, not a defect, and `CHECK exit=1` is therefore the correct
+outcome with the exit status agreeing with the printed verdict.
+
+Supporting suites, each run directly:
+
+| Suite | Result |
+| --- | --- |
+| `go test -race -count=1 ./...` | all 8 packages ok |
+| `staticcheck ./...` | clean |
+| `gofmt -l .` | clean |
+| `shellcheck --severity=style` over every tracked and untracked-but-not-ignored script | clean |
+| `scripts/tests/runtime-verify-test.sh` | **358** tests, 0 failed (was 355; 3 added for the library extraction) |
+| `scripts/tests/operator-handoff-test.sh` | **141** tests, 0 failed (new) |
+| `scripts/tests/compose-fixture-test.sh` | 20 tests, 0 failed |
+| `scripts/tests/gate-diagnostics-test.sh` | passed |
+| `scripts/secret-scan.sh --tree`, `scripts/independent-secret-scan.sh` | clean |
+
+**What the new handoff suite actually drives.** `scripts/operator-handoff.sh`
+runs against a scripted fake `docker` and a scripted fake `git`. The fake
+Docker models container lifetime — a container exists once `create` returns its
+id and stops existing when `rm` succeeds — and echoes back the ownership labels
+the `create` call actually carried, so attribution, cleanup and idempotence are
+real assertions rather than replayed output. The cases cover, at minimum: an
+unexpected HEAD; a dirty tree; a `rev-parse` failure and a `status` failure,
+separately; an exported fixture override, with its value asserted absent from
+the output; a fixture path arriving through the *resolved* configuration rather
+than the environment; a failed build with a stale tag still on it; a successful
+build producing the same image ID; an in-build assertion step reported
+`CACHED`; a build that succeeds and writes no log; a binary reporting the wrong
+commit; a binary reporting enforcement as compiled in; a tag that moves after
+the image was resolved; a credential-free probe whose container has a secret
+mounted; a credential-free probe whose output reports reading the credential;
+an offline secret probe with network access; a credential length in the output;
+step D without authorisation; a failed session teardown; output that says
+nothing about the teardown; a partially created container; a cleanup removal
+failure; a resource that is not this invocation's; a pre-snapshot enumeration
+failure; a `SIGTERM` mid-run; a failed leftover enumeration; and credential-,
+session-id- and PEM-shaped values in a failing build's diagnostics.
+
+**Two things this suite found that review had not.**
+
+* The canned `docker compose config` fixture used the *object* rendering of
+  `extra_hosts`. The cross-check case, which renders the real definition with
+  the real Compose client (no daemon involved), showed the installed Compose
+  emits an **array** of `"pi.hole=host-gateway"`. The program would have passed
+  `pi.hole=host-gateway` to `--add-host`. Both renderings are handled now and
+  the array form's `=` is normalised.
+* The redaction case initially used `printf '-----BEGIN…'`, which `printf`
+  reads as its own options, so the PEM never reached the capture and the
+  "not printed" assertion passed for the wrong reason. Fixed to `printf '%s\n'`
+  with a real 64-character body line.
+
+**A limit of the diagnostics filter, recorded rather than papered over.**
+`scripts/gate-diagnostics.sh` is line-oriented. A PEM's `-----BEGIN…` line has
+its own rule and each 64-character body line is caught by the
+long-opaque-value rule, which requires 40 characters. A PEM's short **final**
+body line can fall under that threshold and survive. The filter is
+deny-by-pattern, so this is one instance of its general limit rather than a new
+kind of gap; it is stated here so the next reader does not infer a stronger
+guarantee.
+
+**What this session did NOT do**, stated so a reader of the commit log does not
+infer otherwise: nothing was pushed, no pull request was opened, `main` was not
+modified, no Docker command was run, no `sudo` was used, no image was built, no
+container was created, the live Pi-hole was not contacted, and no production
+secret, certificate, `.env` or deployment resource was read or changed. Steps
+A, B, C and D of `§6.5` remain unexecuted.
+
 ---
 
 ## 4. Findings raised by this session
@@ -2233,6 +2348,205 @@ in a transcript and cannot tell.
 
 ---
 
+### 4.13 FINDING-38 … FINDING-46 — the operator handoff at `6a737f3`
+
+Nine defects in the `§6.5` procedure, and in the code two of its steps depend
+on. Every one of them was in a block an operator was expected to paste into a
+root shell and run against the household Pi-hole. None would have been caught
+by any gate, because nothing executed the block.
+
+#### FINDING-38 — the procedure refused the checkout it documented
+
+Step 0 hardcoded `CANDIDATE=7e1141997cc1f7484144f07c1fb05cde5d39e280` and
+refused unless `HEAD` equalled it. The commits that wrote and revised that
+block are themselves in the tree the SHA names, so recording the value changed
+the object it claimed to be. At `6a737f3` — the commit the handoff was written
+for — the preamble would have printed `REFUSING: HEAD is 6a737f3…, expected
+7e11419…` and stopped.
+
+The near-miss fix is worse than the defect: reading the expected commit from
+`HEAD` makes the check tautological, and `git reset`ting to satisfy it destroys
+the operator's work. **Fixed** by taking the expected commit as an argument
+(`--expected-commit`), validating its form, requiring `HEAD` to equal it,
+refusing otherwise, and never moving the tree. Four identities — expected
+checkout, actual checkout, the commit embedded in the artifact, and the commits
+earlier evidence covers — are now named separately, because collapsing them is
+what produced this.
+
+#### FINDING-39 — the build passed no metadata, so the image named no source
+
+The build command was `docker build --no-cache --pull -f … -t scamwall:local .`
+with no `--build-arg`. The Dockerfile defaults `VERSION`, `COMMIT` and
+`BUILD_DATE` to `dev`/`unknown`/`unknown` and stamps them into the binary with
+`-ldflags -X`. The image produced by the SW-P1-05 renewal would therefore have
+reported `commit unknown`, and could not have been tied to a source at all —
+in a procedure whose stated purpose is binding results to exact identities.
+
+**Fixed:** all three are passed explicitly, `COMMIT` is the validated expected
+checkout, and the built binary is then **run** and required to report that
+commit back. The builder's account of the build and the artifact's own account
+are now both required to agree.
+
+#### FINDING-40 — two false claims about the build cache, and one false assertion about image identity
+
+The procedure asserted `[ "$IMAGE_ID" != "$PRIOR_IMAGE" ]`, refusing with "the
+build did not replace it" when the two matched. An image ID is the digest of
+the image's content: identical inputs produce an identical ID, and this turned
+reproducibility into a failure.
+
+Its comment also claimed "a layer cached from an earlier candidate would
+produce an image that is not this source". The build cache is keyed on the
+build context, so cache reuse means the inputs *were* identical.
+
+**Fixed:** the differ-from-prior assertion is removed and an unchanged ID is
+explained rather than refused. `--no-cache` is retained for the reason that is
+actually true — the two in-build assertions are `RUN` steps, and a cached `RUN`
+step does not execute, so it produces no evidence for this collection — and the
+text now says that it is not a substitute for source identity or for a
+successful build, both of which are checked separately.
+
+#### FINDING-41 — the build's exit status was read through `tee`, and the capture was never checked
+
+`docker build … | tee "$WORK/build.log"` with `BUILD_RC="${PIPESTATUS[0]}"`
+recovers the status, but the same procedure's own preamble table said "A status
+read through `tee`, a pipeline or a monitor is the wrapper's, not the
+command's. FINDING-23 began as exactly this kind of substitution." It had
+reintroduced the shape it warned against. Nothing checked that anything reached
+the log, so a build that succeeded with an unwritable capture and a build that
+succeeded normally were indistinguishable.
+
+The in-build assertion parser also depended on BuildKit's plain step output
+while the build ran with the default progress renderer, which rewrites lines in
+place.
+
+**Fixed:** the command's status is read from the command, the capture's
+usability is a separate reported result, and `--progress=plain` is passed
+because the output is parsed.
+
+#### FINDING-42 — step B claimed to read no password, and its own expected output showed it reading one
+
+Step B stated "**No password is read and none is transmitted**", then listed in
+its expected-output table `ok application password readable, N bytes`. Both
+could not be true. `cmdDoctor` called `config.LoadSecretFile` unconditionally,
+before any connectivity check, so there was no way to run `doctor` without
+opening `/run/secrets/pihole_app_password`.
+
+The step also used `docker compose run`, which mounts the Compose secret, so
+the container had the credential available regardless of what the command did
+with it.
+
+**Fixed** in three places: `doctor --no-credential` skips the read and reports
+the check as `SKIP` rather than as a pass; step B creates its container with no
+secret mount at all and asserts the absence of `/run/secrets/pihole_app_password`
+on the created container *before starting it*; and step C became a separate
+operation instead of a `grep` over step B's log.
+`TestDoctorNoCredentialDoesNotOpenTheSecret` carries a control that fails the
+same configuration without the flag, and `TestDoctorOfflineStillReadsTheSecret`
+records that `--offline` is not the credential-free flag the Dockerfile comment
+claimed it was.
+
+#### FINDING-43 — `--offline` was treated as an isolation boundary
+
+Step C's justification was "`--offline` skips every connectivity check, so this
+reads the credential and touches no network." That is a claim about what the
+program chooses to do, offered as a guarantee about what the container *can*
+do. A defect, a different code path, or a future flag change all defeat it.
+
+**Fixed:** step C runs with `--network none` and asserts the created
+container's network mode before starting it. `--offline` is still passed; it is
+no longer what the isolation rests on.
+
+#### FINDING-44 — steps B, C and D ran whatever `scamwall:local` pointed at
+
+Step A resolved the tag to an immutable image ID and then verified *that*. B, C
+and D used `docker compose run`, and `compose.yaml` names the mutable tag. Any
+rebuild, retag or concurrent build between A and D would have been executed
+without notice, and the evidence would still have cited A's image ID.
+
+**Fixed:** the resolved image ID is recorded in the work directory and every
+later container is created from it explicitly; the created container's
+`.Image` is compared to it before the container starts; the tag is re-resolved
+at the end of step A and a movement fails the step; and the runtime verifier is
+invoked with `SCAMWALL_EXPECTED_IMAGE_ID` so it refuses a substitution too.
+
+#### FINDING-45 — cleanup was `compose down --remove-orphans` on a project name
+
+Steps B, C and D each ended with `docker compose -p "$PROBE_PROJECT" … down
+--remove-orphans`, then printed `probe project removed: $PROBE_PROJECT`
+unconditionally — whether or not the command had succeeded. `down` deletes by
+project **name**; `--remove-orphans` widens that to anything Compose considers
+stray under the name. This is the same class of defect the runtime verifier had
+already been corrected for, and the corrected implementation was sitting in the
+next file.
+
+The leftover check that followed it also treated an unaskable question as an
+answered one: `docker ps -a --filter name=…` printing nothing means either "no
+leftovers" or "the query failed".
+
+**Fixed** by reusing the reviewed implementation rather than writing a second
+one. `scripts/lib/docker-resources.sh` is now shared between the verifier and
+the handoff: unpredictable invocation identifiers, per-invocation ownership
+labels, a pre-existing-resource snapshot that treats a label collision as a
+refusal, deletion only by exact ID after re-verifying ownership, preservation
+of anything not attributable, idempotent cleanup installed *before* any
+resource is created and reached on EXIT/INT/TERM, cleanup failure counted in
+the verdict, and enumeration failure distinguished from an empty result
+everywhere. The verifier's own 358-case suite was re-run over the extraction.
+
+#### FINDING-46 — `status` printed "session closed" on a path where the logout had failed
+
+`WithSession` performs the logout in a deferred call and deliberately does not
+let a logout failure mask the caller's error. So a run whose `DELETE /api/auth`
+failed still returned `nil` from `WithSession`, and `cmdStatus` printed
+`session closed` and exited 0. The failure existed only as a
+`pihole.logout_incomplete` warning in the audit stream.
+
+The procedure then compounded it: it instructed the operator to treat
+`status.log` ending with `session closed` as confirmation of cleanup, and to
+confirm independently in the Pi-hole web interface under *Settings → All
+settings → Web interface / API* by looking for a session attributed to the
+ScamWall user agent — a menu path and an attribution behaviour this repository
+has never verified for any Pi-hole version, and cannot verify without
+contacting an appliance.
+
+It also described `status` as "exactly three requests". `GET /api/info/version`
+is in the permitted set as **retryable**, so with the shipped `max_retries: 2`
+and up to two same-origin redirects per request the real worst case is fifteen
+HTTP requests. The bound that is true is the permitted set, not a count.
+
+**Fixed:** `Client` records a `Teardown` outcome — not attempted, accepted,
+already absent, or failed — and `status` and `sync` report which of them they
+observed, exiting nonzero on a failed teardown.
+`TestAFailedLogoutIsNotReportedAsSuccess` and
+`TestALogoutAnswered404IsTheDesiredEndState` cover the outcomes, and
+`TestStatusIsNotLimitedToThreeRequests` pins the retry behaviour by making the
+fake answer 503 twice. `ACCEPTED` is printed with the qualification that it is
+a fact about a request; the UI instruction is replaced by a statement that
+independent confirmation is unavailable from here, has not been verified
+elsewhere, and must be recorded as *"request accepted, not independently
+confirmed"* if the appliance's version offers no supported method.
+
+#### Three smaller corrections made in the same pass
+
+* The preamble hashed the production password with `sha256sum` in **every**
+  case, to compare it at the end. Hashing a credential is not needed to show
+  that some other step was credential-free. It is now opt-in
+  (`--verify-secret-integrity`), states that it reads the credential, checks
+  `sha256sum`'s status before parsing its output, validates the digest length,
+  never prints the digest, and is nonzero on any read or comparison failure.
+  The default compares owner, group, mode, size and mtime, and says explicitly
+  that this does not prove the content is unchanged.
+* Step Z ended with `rm -rf -- "$WORK"`, destroying a failing run's diagnosis
+  before the operator could return it. Logs are now retained, and the path and
+  the removal command are printed.
+* Step B cited "§4 of `docs/PIHOLE_API_CONTRACT.md`" for `GET /api/auth`
+  requiring no credential. It is §3.4; §4 is the read-only endpoint set.
+  `doctor`'s `application password` line also reported a byte count, which
+  diagnosed nothing — `LoadSecretFile` already refuses an empty credential —
+  and is removed.
+
+---
+
 ## 5. Critical Go path review (SW-P1-10)
 
 Review of the areas SW-P1-10 names. Each entry states what was checked and what
@@ -2261,6 +2575,20 @@ loud and fixable, while proceeding leaves an exposure nobody notices.
 reduction and not a guarantee — Go may have copied during a heap move, and
 `Reveal` necessarily produces an immutable string. **Adequate, with the residual
 risk correctly documented rather than overstated.**
+
+`doctor` no longer reports the credential's byte count. `LoadSecretFile`
+already refuses an empty credential, so the length diagnosed nothing that the
+pass/fail result did not, and a length is still a fact about a credential
+written into an operator's evidence log.
+`TestDoctorNeverReportsTheCredentialLength` keeps it out.
+
+**What this set does not amount to.** It is a set of reviewed protections with
+tests, not a proof that no code can disclose a credential. The call-site count
+is a lexical property of this tree at this commit and constrains this code, not
+a future edit and not a dependency. The formatting overrides bind
+`config.Secret`; a plaintext copied out into a plain `string` is outside all of
+them. `§6.5` step C states the same limits where an operator will read them,
+because the superseded text there asserted the stronger claim.
 
 ### 5.2 TLS configuration and trust
 
@@ -2416,7 +2744,15 @@ bound, so that a later change does not quietly step outside them.
 
 ## 6. Operator procedures, and what remains blocked
 
-### 6.1 Runtime verification against a real image (SW-P1-05) — **RENEWAL REQUIRED at `b6e70f4`**
+### 6.1 Runtime verification against a real image (SW-P1-05) — **SUPERSEDED BY §6.5 STEP A**
+
+> **Do not run the command block in this section.** It is retained because the
+> reasoning below — what is missing for SW-P1-05 and why CI does not cover it —
+> is still current and is what step A exists to satisfy. Its *commands* are the
+> ancestor of the procedure §4.13 documents nine defects in: they pass no build
+> metadata, assert that the new image ID must differ from the old, read the
+> build status through `tee`, and hash the production password unconditionally.
+> `scripts/operator-handoff.sh build` replaces them and is tested.
 
 **Status.** Executed by the operator at commit `b6b1769` against image
 `sha256:b95cc07c…`: build exit 0 with both in-build assertions run, verifier
@@ -2999,25 +3335,77 @@ Item 5 and item 6 are the two that require a live Pi-hole. Both stay pending a
 reviewed operator procedure; neither is started by this session or by the
 Phase 1 closure.
 
-### 6.5 Operator handoff for candidate `7e11419` — **PENDING REVIEW**
+### 6.5 Operator handoff — **PENDING REVIEW AND EXECUTION**
 
-Four steps, A to D, in order. **A is the renewal SW-P1-05 has been waiting
-for.** B, C and D are Phase 2 evidence and are *pending operator review and
-execution*: reading them is not authorisation to run them, and none of them may
-be run until the operator has read what each does and decided to.
+Four steps, A to D, in order, plus a preflight and a close-out. **A is the
+renewal SW-P1-05 has been waiting for.** B, C and D are Phase 2 evidence and
+are *pending operator review and execution*: reading them is not authorisation
+to run them, and none may be run until the operator has read what each does and
+decided to. D additionally refuses to run without an explicit flag.
 
-Common properties, and why each is there:
+#### The procedure is a program, and the program is tested
+
+The previous form of this section was about two hundred lines of shell for an
+operator to paste into an interactive root shell. Nothing executed it before an
+operator would have, so its defects were only discoverable against the
+household Pi-hole — the most expensive place to find one. Eight of them were
+found by reading it (§4.13), and they were not subtle.
+
+It is now `scripts/operator-handoff.sh`, driven by
+`scripts/tests/operator-handoff-test.sh` against a scripted fake Docker and a
+scripted fake git: **141 cases, 0 failed**, no daemon, no network, no
+appliance. Every refusal the procedure must make is reproduced there
+deliberately. This section describes what each step does and how to read its
+result; it does not restate the commands, because a second copy is a second
+thing to get wrong.
+
+The resource attribution and cleanup implementation is not a second one either.
+It was extracted from `scripts/container-runtime-verify.sh` into
+`scripts/lib/docker-resources.sh` and is **shared**, so the reviewed
+behaviour — unpredictable invocation identifiers, per-invocation ownership
+labels, deletion only by exact ID after re-verifying ownership, preservation of
+anything not attributable, idempotent cleanup that runs on EXIT/INT/TERM and
+counts toward the verdict — applies to both programs. The verifier's own suite
+was re-run over the extraction: **358 cases, 0 failed**.
+
+#### The expected checkout
+
+The step-0 command takes `--expected-commit <40-hex-sha>`. **The value is
+supplied with the handoff and is deliberately not written into this file.** A
+SHA written here names a commit that does not yet exist at the moment of
+writing: the commit that adds the line changes the file, so the object name it
+claims is invalidated by its own recording. That is precisely what happened to
+the previous form, which hardcoded `CANDIDATE=7e11419…` and would therefore
+have refused the checkout it was written to describe.
+
+Four identities are kept apart, because conflating them is what produced that
+defect:
+
+| Identity | What it is | Where it comes from |
+| --- | --- | --- |
+| **Expected checkout** | the commit the operator intends to verify | `--expected-commit`, supplied by the handoff |
+| **Actual checked-out commit** | what `HEAD` is right now | `git rev-parse HEAD`, read as the tree's owner |
+| **Embedded commit** | what the built artifact says it is | `--build-arg COMMIT=…`, read back out of the image by running `scamwall version` |
+| **Historically covered commits** | commits an earlier evidence run described | §2.1, §3.12, §3.14 — never inferred from the current HEAD |
+
+The program **refuses** when the actual commit is not the expected one, names
+both, and does not move the tree. It re-checks source identity at the start of
+**every** step: passing step 0 does not freeze the tree, and a step run against
+a commit that moved would name the wrong source in its own evidence.
+
+#### Common properties, and why each is there
 
 | Property | Reason |
 | --- | --- |
-| Repository metadata is obtained **as `scamwall`** | The tree is owned by `scamwall`; `git` refuses to operate on it as root without a `safe.directory` exception, and adding one is a permanent widening for a momentary convenience |
+| Repository metadata is read **as the tree's owner** | `git` refuses to operate on another account's tree without a `safe.directory` exception, and adding one is a permanent widening for a momentary convenience. The owner is read from the directory, not assumed |
 | Docker is used **only** through the operator | The service account has no socket access, deliberately. Nothing here asks for any |
-| Every step stops on failure, and on an unexpected source identity | A verification that continues past a failed precondition is reporting on something other than what it names |
-| No `docker compose up` | `up` starts the whole definition with its restart policy, its logging and its default command in one opaque step. Each step below states exactly what it starts and removes it afterwards |
-| Direct exit statuses are captured | A status read through `tee`, a pipeline or a monitor is the wrapper's, not the command's. FINDING-23 began as exactly this kind of substitution |
-| Temporary storage is `mktemp -d` with mode 0700 | A predictable path under `/tmp`, created by root, is a symlink target for any local account |
-| No predictable root-owned log path | Same reason. Output goes into the private directory created above, and the directory is removed at the end |
-| Existing deployment resources and secrets are preserved | Nothing below removes, rewrites, or reads the content of the real CA or the real password |
+| Every step stops on a failed precondition | A verification that continues past one is reporting on something other than what it names |
+| No `docker compose up`, and no `docker compose run` for B–D | `up` starts the whole definition in one opaque step. `run` cannot pin the image, cannot remove the secret mount for a credential-free probe, and creates project resources whose attribution has to be reconstructed afterwards |
+| Direct exit statuses are captured | A status read through `tee`, a pipeline or a monitor is the wrapper's, not the command's. FINDING-23 began as exactly this substitution, and the superseded procedure had reintroduced it |
+| Log capture is a **separate** result from the command's status | "The build succeeded" and "the build log was written" are two facts. Conflating them lets an unusable capture read as a clean run |
+| Temporary storage is `mktemp -d`, mode 0700 **set and read back** | A predictable path under `/tmp` created by root is a symlink target for any local account. `chmod` can fail, and an unchecked `chmod` is an assumption |
+| Logs are **kept**, not erased | The work directory holds the evidence the operator has to return. The path and the removal command are printed instead |
+| Existing deployment resources and secrets are preserved | Nothing here removes, rewrites, or reads the content of the real CA or the real password |
 | Results are bound to exact source **and** image identities | An unbound result is a claim about no particular artifact |
 
 **Do not repeat a step whose requirement has not changed.** If A passes and
@@ -3025,278 +3413,341 @@ nothing in the tree changes afterwards, B, C and D do not re-run A.
 
 ---
 
-#### Step 0 — one preamble for every step
+#### Step 0 — preflight
 
-Run once, in the shell the steps will use. It is deliberately separate: it
-establishes identity before anything acts on it.
-
-```bash
-# ---- Identity of the source, read AS scamwall -------------------------------
-CANDIDATE=7e1141997cc1f7484144f07c1fb05cde5d39e280
-REPO=/home/scamwall/scamwall
-
-HEAD_SHA="$(sudo -u scamwall git -C "$REPO" rev-parse HEAD)" || exit 1
-[ "$HEAD_SHA" = "$CANDIDATE" ] || {
-  echo "REFUSING: HEAD is $HEAD_SHA, expected $CANDIDATE"; exit 1; }
-
-# A dirty tree makes the result unattributable: the artifact would be built
-# from bytes no commit names.
-DIRTY="$(sudo -u scamwall git -C "$REPO" status --porcelain)" || exit 1
-[ -z "$DIRTY" ] || { echo "REFUSING: working tree is not clean"; printf '%s\n' "$DIRTY"; exit 1; }
-
-# ---- Private, non-predictable working directory -----------------------------
-WORK="$(mktemp -d)" || exit 1
-chmod 700 "$WORK"
-echo "work directory: $WORK"
-
-# ---- Fixture-path overrides must not be exported ----------------------------
-# CI passes throwaway fixture paths through these. If one is still set here it
-# silently redirects a bind SOURCE, and every step below would verify a fixture
-# while reporting the deployment.
-for v in SCAMWALL_CA_FILE SCAMWALL_SECRET_FILE SCAMWALL_CONFIG SCAMWALL_FEED SCAMWALL_IMAGE; do
-  if [ -n "${!v:-}" ]; then echo "REFUSING: $v is set to '${!v}'"; exit 1; fi
-done
-
-# ---- Identity of the real secret, recorded before anything runs -------------
-# The digest is compared at the end, never printed.
-SECRET_BEFORE="$(sudo sha256sum /etc/scamwall/secrets/pihole_app_password | cut -d' ' -f1)" || exit 1
-SECRET_MODE_BEFORE="$(sudo stat -c '%u:%g %a' /etc/scamwall/secrets/pihole_app_password)" || exit 1
-echo "secret metadata before: $SECRET_MODE_BEFORE"
 ```
+sudo scripts/operator-handoff.sh preflight --expected-commit <expected-checkout-sha>
+```
+
+It refuses unless: the expected commit is a full 40-character lowercase object
+name; `HEAD` equals it; the tree is clean; git could actually answer both
+questions; and none of `SCAMWALL_CA_FILE`, `SCAMWALL_SECRET_FILE`,
+`SCAMWALL_CONFIG`, `SCAMWALL_FEED`, `SCAMWALL_IMAGE`,
+`SCAMWALL_EXPECTED_IMAGE_ID`, `SCAMWALL_VERSION`, `SCAMWALL_COMMIT`,
+`SCAMWALL_BUILD_DATE`, `PIHOLE_HOST_IP` or `SCAMWALL_SECRET_GID` is set in the
+environment. Compose gives the shell environment precedence over `--env-file`,
+so one of those still exported would silently redirect a bind **source** and
+every step below would verify a fixture while reporting the deployment. The
+variable is named; its **value is never echoed**, because a path in an evidence
+log is an unnecessary disclosure and naming the variable is enough to fix it.
+
+A git failure and a dirty tree are distinguished. "git could not tell us" is
+reported as `source identity is UNKNOWN`, never as a mismatch and never as a
+clean tree.
+
+**Record:** the work-directory path it prints. Every later step takes
+`--work-dir <that path>`.
 
 ---
 
 #### A — complete the pending Phase 1 deployment verification (SW-P1-05)
 
-This is `§6.1`, re-pointed at `7e11419`, with one addition: the verifier now
-also judges whether the container identity could read the password file
-(FINDING-29). **That assertion has never been evaluated against this
-deployment.** If it fails, the finding is about the deployment, not about the
-verifier, and it takes precedence over closing the row.
-
-```bash
-# ---- What holds the tag now, before the build replaces it -------------------
-PRIOR_IMAGE="$(sudo docker image inspect -f '{{.Id}}' scamwall:local 2>/dev/null || echo none)"
-echo "prior scamwall:local = $PRIOR_IMAGE"
-
-# ---- Build, through the operator's Docker access ----------------------------
-# --no-cache and --pull: a layer cached from an earlier candidate would produce
-# an image that is not this source, and the result would name the wrong commit.
-sudo docker build --no-cache --pull \
-  -f "$REPO/container/Dockerfile" -t scamwall:local "$REPO" 2>&1 | tee "$WORK/build.log"
-BUILD_RC="${PIPESTATUS[0]}"
-echo "BUILD exit=$BUILD_RC"
-[ "$BUILD_RC" -eq 0 ] || exit 1
-
-# ---- The two in-build assertions, from the build's own output ---------------
-# Presence of the step is not enough: a CACHED step did not execute for this
-# build, so its assertion proves nothing about this source. --no-cache above
-# should prevent that; it is asserted anyway, because "should" is what §5
-# exists to distrust.
-show_step() { # <substring of the RUN command>
-  local n
-  n="$(sed -n "s|^#\([0-9][0-9]*\) \[[^]]*\] RUN .*$1.*|\1|p" "$WORK/build.log" | head -1)"
-  [ -n "$n" ] || { echo "  (no build step matched \"$1\" — read $WORK/build.log in full)"; return 1; }
-  grep -E "^#${n}( |$)" "$WORK/build.log"
-}
-
-echo "---- ELF linkage assertion (SW-P1-20) ----"
-ELF_STEP="$(show_step 'elfcheck')" || exit 1
-printf '%s\n' "$ELF_STEP"
-case "$ELF_STEP" in
-  *CACHED*) echo "REFUSING: the ELF assertion step was CACHED and did not execute"; exit 1 ;;
-esac
-
-echo "---- enforcement-absent assertion ----"
-ENF_STEP="$(show_step '/out/scamwall version')" || exit 1
-printf '%s\n' "$ENF_STEP"
-case "$ENF_STEP" in
-  *CACHED*) echo "REFUSING: the enforcement assertion step was CACHED and did not execute"; exit 1 ;;
-esac
-# ---- Image identity ---------------------------------------------------------
-IMAGE_ID="$(sudo docker image inspect -f '{{.Id}}' scamwall:local)" || exit 1
-echo "IMAGE_ID=$IMAGE_ID"
-[ "$IMAGE_ID" != "$PRIOR_IMAGE" ] || {
-  echo "REFUSING: the tag still points at the pre-build image; the build did not replace it"; exit 1; }
-
-# ---- Verify, pinned to exactly that image -----------------------------------
-# The verifier uses `docker compose create` and `docker create` only. It starts
-# nothing, so no credential is used and no authenticated command runs.
-sudo env SCAMWALL_IMAGE="$IMAGE_ID" bash "$REPO/scripts/container-runtime-verify.sh" 2>&1 \
-  | tee "$WORK/verify.log"
-VERIFY_RC="${PIPESTATUS[0]}"
-echo "VERIFY exit=$VERIFY_RC"
+```
+sudo scripts/operator-handoff.sh build --work-dir <work>
 ```
 
-**Record:** `BUILD exit`, `IMAGE_ID`, `VERIFY exit`, the passed/failed/blocked
-counts, and the line beginning `the application password would be readable by
-the container identity` — that line is the new evidence and is the one that has
-never been produced. It prints ownership metadata (`uid=`, `gid=`, `mode=`) and
-no content.
+**What it does, in order.**
 
-**Do not proceed to B, C or D if `VERIFY exit` is nonzero.**
+1. Re-checks source identity, then takes an unpredictable, length-checked
+   invocation identifier and refuses if anything already carries its label.
+2. Records what holds `scamwall:local` now — **for the record only**.
+3. Builds with `--no-cache --pull --progress=plain` and explicit
+   `--build-arg VERSION`, `--build-arg COMMIT=<expected checkout>`,
+   `--build-arg BUILD_DATE`. The superseded procedure passed none of these, so
+   the image it produced carried `commit=unknown` and could not be tied to a
+   source at all.
+4. Reports `BUILD exit=` from Docker itself, and reports the usability of the
+   capture separately.
+5. Checks the two in-build assertions **per build step**: it finds the step
+   number from its header line, then examines that step's own lines. A build
+   log that merely *contains* the text of an assertion proves nothing — the
+   text is in the Dockerfile, so it appears whether the step ran or was reused.
+   `CACHED` fails the step; so does a step that never reported `DONE`.
+6. Resolves `scamwall:local` to an immutable image ID and validates its shape.
+7. **Asks the artifact rather than the builder.** It creates a container from
+   that exact image ID with no network, no mounts and no credential, verifies
+   the created container's image identity *before starting it*, runs
+   `scamwall version`, and requires the binary to report the expected commit
+   and `enforcement compiled in false`.
+8. Re-resolves the tag and fails if it moved during the step.
+9. Runs `scripts/container-runtime-verify.sh` with **both** `SCAMWALL_IMAGE`
+   and `SCAMWALL_EXPECTED_IMAGE_ID` set to that ID, so a tag moving between the
+   two programs is a refusal rather than a silent substitution.
+10. Requires the verifier's output to contain the line beginning `the
+    application password would be readable by the container identity`. That
+    line is the FINDING-29 evidence, it has never been produced against this
+    deployment, and a verifier run that never emitted it has not produced it.
+
+**What was removed, and why.**
+
+* *"The new image ID must differ from the previous one."* Wrong. An image ID is
+  the digest of the image's content, so a build producing identical output
+  legitimately keeps the same ID — and reproducibility is a goal here, not a
+  fault. The program notes an unchanged ID and does not refuse.
+* *"A layer cached from an earlier candidate would produce an image that is not
+  this source."* Wrong. The build cache is keyed on the build context, so cache
+  reuse means the inputs were identical. `--no-cache` is used for a different
+  and real reason: **the two in-build assertions are `RUN` steps, and a cached
+  `RUN` step does not execute**, so it produces no evidence for this
+  collection. `--pull` re-resolves the digest-pinned base image. Neither flag
+  is a substitute for source identity or for a successful build, both of which
+  are checked separately.
+
+**If it fails:** the tag may still point at a stale image from an earlier
+build. The program says so, and runs nothing against it.
+
+**Record:** `BUILD exit`, `IMAGE_ID`, the binary's own reported commit,
+`VERIFY exit`, the verifier's passed/failed/blocked counts, and the
+FINDING-29 line, which prints `uid=`, `gid=` and `mode=` and no content.
+
+**Do not proceed to B, C or D if this step's verdict is not `RESULT: every
+check in this step ran and passed`.**
 
 ---
 
-#### B — unauthenticated destination and TLS checks through the container mapping
+#### B — unauthenticated destination and TLS checks, with no credential
 
-**PENDING REVIEW.** What it establishes: that the address behind the `pi.hole`
-pin is reachable *from inside the container's network mapping*, that it
-presents a certificate chaining to the mounted private CA, and that the
-certificate is valid for the name `pi.hole`. What it sends: one `GET
-/api/auth`, which the API contract documents as requiring no credential
-(§4 of `docs/PIHOLE_API_CONTRACT.md`). **No password is read and none is
-transmitted.**
-
-`doctor --offline` is not used here; the point of this step is the network.
-
-```bash
-PROBE_PROJECT="scamwall-probe-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" \
-  run --rm --no-deps scamwall doctor 2>&1 | tee "$WORK/doctor.log"
-DOCTOR_RC="${PIPESTATUS[0]}"
-echo "DOCTOR exit=$DOCTOR_RC"
-
-# Remove the network `run` created for this throwaway project, and nothing else.
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
-echo "probe project removed: $PROBE_PROJECT"
-sudo docker network ls --filter "label=com.docker.compose.project=$PROBE_PROJECT" --format '{{.Name}}'
+```
+sudo scripts/operator-handoff.sh probe --work-dir <work>
 ```
 
-The last command must print **nothing**. A name there is a resource this step
-created and failed to remove.
+**PENDING REVIEW.** What it establishes: that the address behind the `pi.hole`
+pin is reachable from inside the container's mapping, that it presents a
+certificate chaining to the mounted private CA, and that the certificate is
+valid for the name `pi.hole`. What it sends: one `GET /api/auth`, which
+`docs/PIHOLE_API_CONTRACT.md` **§3.4** documents as requiring no credential.
+It does not authenticate.
+
+**The contradiction this replaces.** The superseded step B stated "No password
+is read and none is transmitted" and then listed, in its own expected-output
+table, the line `ok application password readable, N bytes` — which is doctor
+reporting that it had opened the password. It was not a wording slip: `doctor`
+read `/run/secrets/pihole_app_password` unconditionally, before any network
+check, so there was no way to run it credential-free at all.
+
+Both halves are fixed:
+
+* **The command cannot read it.** `doctor --no-credential` skips the read and
+  reports the check as `SKIP`, not as a pass — a deliberately-not-performed
+  check reported as `ok` would be read as evidence that the credential is
+  fine, which is the opposite of what the flag establishes.
+  `TestDoctorNoCredentialDoesNotOpenTheSecret` proves it, with a control that
+  fails the same configuration *without* the flag.
+* **The container has nothing to read.** The probe is created from the pinned
+  image ID with the CA, config and feed binds and **no secret mount at all**,
+  and the absence of `/run/secrets/pihole_app_password` is asserted on the
+  created container *before it starts*. A claim that no password is read is
+  worth much less than a container that has no password to read.
+
+Nothing is hashed. Hashing the production secret is not needed to prove a step
+is credential-free, and the superseded preamble did it in every case.
+
+**Deliberate differences from the deployment**, both stated rather than
+discovered: the probe attaches to the default bridge rather than a Compose
+project network, and it mounts no secret. Everything else — the `65532:65532`
+identity, the supplementary group, `read_only`, `cap_drop: ALL`,
+`no-new-privileges`, the pids/memory/cpu bounds, the tmpfs, the three read-only
+binds and the `pi.hole` address mapping — is **derived from `docker compose
+config`**, which performs Compose's own interpolation, rather than re-derived
+by reading `.env`.
+
+The resolved bind sources are then checked against the deployment's real paths.
+`assert_no_overrides` catches a redirection arriving through the environment;
+this catches the same redirection arriving any other way, by checking the
+result rather than the mechanism.
 
 **Read the result like this:**
 
 | Line in `doctor.log` | Meaning |
 | --- | --- |
-| `ok  certificate authority  loaded and parsed` | The mounted CA is a real, parseable certificate. Distinct from A, which only checked that the mount exists and is a regular file |
-| `ok  pi-hole connectivity  reachable over TLS; authentication required` | The destination behind the pin answered, the chain verified against the private CA, and the name `pi.hole` matched the certificate. This is the Phase 2 `§6.4` item 6 evidence |
-| `FAIL pi-hole connectivity ... TLS verification failed` | The chain or the hostname did not verify. **Do not proceed to D.** Record the message; it is the diagnosis and contains no credential |
-| `FAIL pi-hole connectivity ... transport error` | Nothing answered at the pinned address, or the pin is wrong |
-| `ok  application password  readable, N bytes` | See C — this line is the C evidence and appears here too |
+| `SKIP application password  NOT READ (--no-credential)` | This run opened no credential and makes no claim about one. Required; its absence fails the step |
+| `ok certificate authority  loaded and parsed` | The mounted CA is a real, parseable certificate. Distinct from A, which only checked that the mount exists and is a regular file |
+| `ok pi-hole connectivity  reachable over TLS; authentication required` | The destination answered, the chain verified against the private CA, and `pi.hole` matched the certificate. This is the `§6.4` item 6 evidence |
+| `FAIL pi-hole connectivity … TLS verification failed` | The chain or the hostname did not verify. **Do not proceed to D.** The message is the diagnosis and carries no credential |
+| `FAIL pi-hole connectivity … transport error` | Nothing answered at the pinned address, or the pin is wrong |
 
 The negative control for the CA — that a *wrong* CA is refused — is exercised
-by the test suite (`TestTLSFailureWithWrongCA`, `TestHostnameMismatchIsRefused`)
-and is **not** repeated against the live appliance. Pointing the deployment at a
-wrong CA would mean editing the deployment, which this handoff does not do.
+by `TestTLSFailureWithWrongCA` and `TestHostnameMismatchIsRefused`, and is
+deliberately **not** repeated against the live appliance: it would mean editing
+the deployment, which this handoff does not do.
 
 ---
 
-#### C — verify the secret is readable, without revealing it
+#### C — the container identity can open the mounted secret
+
+```
+sudo scripts/operator-handoff.sh secret --work-dir <work>
+```
 
 **PENDING REVIEW.** This is `§6.4` work-order item 5: the one thing A
 deliberately does not establish. A judged the *metadata*; this performs the
 *read*, under the real container identity, against the real mount.
 
-It is already done by B: the `application password` line in `doctor.log` is
-produced by opening `/run/secrets/pihole_app_password` as uid 65532 with the
-configured supplementary group, and it reports **a byte count and nothing
-else**. If B was run, C needs no separate command — extract the line:
+It is a separate operation from B, not a line extracted from B's output. B is
+about the network and must open no credential; C is about the credential and
+must touch no network. The superseded section made C a `grep` over B's log,
+which is why B could not be credential-free in the first place.
 
-```bash
-grep -E '^(ok|FAIL)[[:space:]]+application password' "$WORK/doctor.log"
-```
-
-If B has not been run, or must not be (the network is the concern), C alone is:
-
-```bash
-PROBE_PROJECT="scamwall-secret-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" \
-  run --rm --no-deps scamwall doctor --offline 2>&1 | tee "$WORK/secret.log"
-echo "DOCTOR-OFFLINE exit=${PIPESTATUS[0]}"
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
-```
-
-`--offline` skips every connectivity check, so this reads the credential and
-touches no network.
+* **The network is disabled at the container level**, with `--network none`,
+  and the created container's network mode is asserted before it starts.
+  `doctor --offline` is a CLI flag that makes the program skip its connectivity
+  checks; it is not an isolation boundary, and the superseded text treated it
+  as one.
+* It runs under the intended `65532:65532` identity with the configured
+  supplementary group, both read from the resolved configuration.
+* It opens the secret and prints **no content and no length**. The byte count
+  the previous output carried has been removed from `doctor` entirely:
+  `LoadSecretFile` already refuses an empty credential, so the length diagnosed
+  nothing the pass/fail result did not, and a length is still a fact about a
+  credential in an operator's log. `TestDoctorNeverReportsTheCredentialLength`
+  keeps it out.
 
 **What the two outcomes mean:**
 
-* `ok  application password  readable, N bytes` — the container identity can
-  read the mounted secret. `§6.4` item 5 is satisfied, and FINDING-29's
-  metadata judgement is corroborated by an actual read.
-* `FAIL application password  open secret: ... permission denied` — it cannot.
-  If A passed its readability assertion and this fails, the two disagree, and
-  that disagreement is a finding that outranks either result. The likely causes
-  are the ones A names as assumptions: an ACL, a user-namespace remap, or a
-  rootless daemon.
+* `ok application password readable` — the container identity can read the
+  mounted secret. `§6.4` item 5 is satisfied, and FINDING-29's metadata
+  judgement is corroborated by an actual read.
+* `FAIL application password  open secret: … permission denied` — it cannot.
+  If A passed its readability judgement and this fails, the two disagree, and
+  that disagreement outranks either result. The likely causes are the ones A
+  names as assumptions: an ACL, a user-namespace remap, or a rootless daemon.
 
-`N` is a length. A length is not a secret, and it is the most that is ever
-disclosed. Nothing in ScamWall can print the value: `config.Secret` overrides
-every formatting path, and a test counts the two places the plaintext is
-reachable at all.
+**What protects the credential, stated accurately.** The superseded text said
+"Nothing in ScamWall can print the value: `config.Secret` overrides every
+formatting path, and a test counts the two places the plaintext is reachable at
+all." That overstates what those controls do. What is actually reviewed and
+tested:
+
+* `config.Secret` overrides `String`, `GoString`, `Format`, `MarshalJSON`,
+  `MarshalText` and `Redacted`, so the realistic leak — a struct containing a
+  secret reaching `%v`, or being marshalled into a debug dump — yields a
+  placeholder. `Format` covers `%x`, which would otherwise print the bytes.
+* `Reveal` is the single escape hatch, and a test asserts it appears at exactly
+  two call sites: building the authentication body, and setting the
+  `X-FTL-SID` header. Both are the moment a credential goes on the wire.
+* `Secret.Scrub` removes a value a peer echoed back, at the one call site that
+  holds the password.
+* `TestCredentialsNeverReachAnyStream` runs every command and asserts neither
+  the password nor the session id appears on stdout, stderr or the audit
+  stream, with both values generated per run so a match cannot be coincidence.
+
+**Its limits.** A call-site count is a lexical property of this tree at this
+commit; it constrains this code, not a future edit, and not a third-party
+dependency. `Reveal` necessarily materialises an immutable Go string that
+`Destroy` cannot wipe. `Scrub` compares against the plaintext and so
+materialises a copy for the duration. The formatting overrides bind
+`config.Secret`; a credential copied out into a plain `string` is outside all
+of it. Taken together these are **reviewed protections with tests**, not a
+proof that no code can disclose a credential.
 
 ---
 
-#### D — one reviewed authenticated read-only operation, and session cleanup
+#### D — one reviewed authenticated read-only operation
 
-**PENDING REVIEW, and the most consequential step here.** It is the first time
-ScamWall authenticates to the household Pi-hole. Do not run it until A, B and C
-have passed and been read.
-
-What it does: `POST /api/auth`, `GET /api/info/version`, `DELETE /api/auth`.
-That is the entire permitted set for a `status` run, it is enforced in code
-before any packet is sent (`docs/PIHOLE_API_CONTRACT.md` §7.1), and none of the
-three changes any Pi-hole state other than ScamWall's own session.
-
-```bash
-PROBE_PROJECT="scamwall-status-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" \
-  run --rm --no-deps scamwall status 2>&1 | tee "$WORK/status.log"
-STATUS_RC="${PIPESTATUS[0]}"
-echo "STATUS exit=$STATUS_RC"
-sudo docker compose -p "$PROBE_PROJECT" \
-  --env-file "$REPO/deploy/compose/.env" \
-  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
+```
+sudo scripts/operator-handoff.sh status --work-dir <work> --authorise-authenticated-read
 ```
 
-**Verify session cleanup, from Pi-hole's own view.** The client destroys its
-session on every exit path, but that is a claim about the client; the appliance
-is the authority. In the Pi-hole web interface, under *Settings → All settings →
-Web interface / API*, the current sessions list must not contain a session
-attributed to the ScamWall user agent after this run. Record what it shows.
+**PENDING ITS OWN OPERATOR REVIEW, and the most consequential step here.** It
+is the first time ScamWall authenticates to the household Pi-hole. The program
+**refuses without the flag**, and the flag exists so that reading this section
+cannot be mistaken for authorising the step. Do not run it until A, B and C
+have passed and been read.
 
-`status.log` must end with `session closed`. If it does not, and `STATUS exit`
-is 0, that is a contradiction and a finding.
+**What it may send, stated as it actually is.** The bound is the permitted
+**set**, enforced in `do()` before the URL is built and again on every
+redirect — not a request count. The superseded text said "exactly three
+requests", which is true only when nothing is retried:
 
-**Do not** run `sync` in this step even with `--dry-run`. It performs the same
-three network operations *and* reads and reports the feed; keeping D to the
+| Logical operation | Attempts | Notes |
+| --- | --- | --- |
+| `POST /api/auth` | 1 | Not retryable: Pi-hole rate-limits login and has finite session seats |
+| `GET /api/info/version` | up to `1 + max_retries` (**3** by default) | Retryable on 429/500/502/503/504 and on transport failures |
+| `DELETE /api/auth` | 1 | Not retryable; a 404 is already the desired end state |
+
+Each of those may additionally follow **up to two** same-origin redirects,
+whose method and path are re-checked against the same table and which are
+refused outright if they carry a query string. With the shipped defaults the
+worst case is therefore **15 HTTP requests**, every one to the pinned origin
+and within the four permitted operations. If `Login` fails there is no session
+and no logout, so that path is one logical operation.
+
+**Session teardown, and the three claims that are not the same claim.**
+
+`status` used to print `session closed` unconditionally whenever it returned
+successfully. That was untrue on a real path: `WithSession` performs the logout
+in a deferred call and deliberately does not let a logout failure mask the
+caller's error, so a run whose `DELETE /api/auth` had **failed** still returned
+`nil`, printed the success line, and exited 0. The failure was visible only as
+a `pihole.logout_incomplete` warning in the audit stream.
+
+`Client` now records the outcome it observed, and the command reports it:
+
+| Observed | Printed | Exit |
+| --- | --- | --- |
+| DELETE accepted | `session logout ACCEPTED by Pi-hole`, with the qualification below | 0 |
+| DELETE answered 404 | `session ALREADY ABSENT on Pi-hole` | 0 |
+| DELETE failed | `WARNING: session logout FAILED` — the id is discarded locally so nothing can retry it, and a session may remain valid until it expires | **1** |
+
+`TestAFailedLogoutIsNotReportedAsSuccess` covers the middle of those, including
+that the successfully-read version data is still reported: the failure is about
+cleanup, and saying which part failed is the point.
+
+`ACCEPTED` is a fact about a **request**. It is not confirmation that the
+appliance's session table no longer holds the session, and the printed line
+says so.
+
+**Independent confirmation is not available from here, and this is not a
+promise that it is available elsewhere.** The superseded text instructed the
+operator to look under *Settings → All settings → Web interface / API* for a
+session attributed to the ScamWall user agent. **This repository has not
+verified that menu path, or that Pi-hole attributes sessions by user agent, for
+any Pi-hole version**, and has no way to: doing so means contacting an
+appliance. ScamWall itself cannot ask — the endpoint that lists sessions is
+outside the permitted set, and adding it to check up on ourselves would widen
+this client's reach for a diagnostic.
+
+The supported method proposed instead: D prints the Core, Web and FTL versions
+it read. Take those, consult **that version's** own documentation for how
+active API sessions are listed, and confirm there. If no supported method
+exists for that version, record the outcome as *"teardown request accepted, not
+independently confirmed"* — which is a smaller claim, and a true one.
+
+**Do not** run `sync` in this step, even with `--dry-run`. It performs the same
+authenticated operations *and* reads and reports the feed; keeping D to the
 smallest authenticated operation means a failure has one candidate cause.
 
 ---
 
-#### Step Z — close out, whichever steps were run
+#### Step Z — close out
 
-```bash
-# The deployment's secret is exactly as it was.
-SECRET_AFTER="$(sudo sha256sum /etc/scamwall/secrets/pihole_app_password | cut -d' ' -f1)"
-SECRET_MODE_AFTER="$(sudo stat -c '%u:%g %a' /etc/scamwall/secrets/pihole_app_password)"
-[ "$SECRET_AFTER" = "$SECRET_BEFORE" ] && echo "secret content unchanged" || echo "ALERT: secret content CHANGED"
-[ "$SECRET_MODE_AFTER" = "$SECRET_MODE_BEFORE" ] && echo "secret metadata unchanged" || echo "ALERT: secret metadata CHANGED"
-
-# Nothing of these invocations is left behind.
-sudo docker ps -a --filter 'name=scamwall-probe-' --filter 'name=scamwall-secret-' --filter 'name=scamwall-status-' --format '{{.Names}}'
-sudo docker network ls --format '{{.Name}}' | grep -E '^scamwall-(probe|secret|status)-' || echo "no probe networks remain"
-
-# The working directory, with every log in it, is removed.
-rm -rf -- "$WORK"
+```
+sudo scripts/operator-handoff.sh closeout --work-dir <work>
 ```
 
-The two `docker ps`/`network ls` commands must print nothing (or "no probe
-networks remain"). Copy the recorded values out of `$WORK` before the last line
-if they are to be kept.
+* **The deployment's secret.** Owner, group, mode, size and modification time
+  are compared against the values recorded earlier in the same work directory.
+  That is what can be established without reading a credential, and it is
+  reported as exactly that: it does **not** prove the content is unchanged, and
+  a same-length rewrite with a restored mtime would pass it. A read that fails
+  is a failure and does not end the step — the leftover enumeration below is
+  the other half of closing out.
+* **Optional content integrity**, with `--verify-secret-integrity`, off by
+  default. **It reads the credential**, which is why it is opt-in and why it is
+  not used merely to show that some other step was credential-free.
+  `sha256sum`'s own exit status is checked *before* anything parses its output
+  (a `cut` of a failed command's empty output is an empty string, and comparing
+  two empty strings passes), the digest length is validated, the digest is
+  compared and **never printed**, and any read or comparison failure is
+  nonzero.
+* **Leftovers**, enumerated by label. An enumeration that could not run is
+  reported as `UNPROVEN` and fails the step; it is never answered "nothing
+  remains". Resources from earlier steps carried their own per-invocation
+  labels and were removed by those steps, and this step says so rather than
+  speaking for them.
+* **The logs are not deleted.** The work directory's path and the exact
+  `rm -rf` command are printed. Erasing a failing run's diagnosis before the
+  operator has read it is a defect, not tidiness.
 
 ---
 
@@ -3450,7 +3901,7 @@ published commit is still `72bc84c`.
 | A rejected credential produces exactly one authentication attempt | Asserted at the adapter and again end to end through the CLI |
 | No credential or session id reaches stdout, stderr or the audit log, for any of the six commands | `TestCredentialsNeverReachAnyStream`, with both values generated per run so a match cannot be a coincidence |
 | A peer echoing a credential back cannot get it into an error | `TestAServerEchoingTheCredentialDoesNotLeakItIntoAnError` and its session-id counterpart. FINDING-37 |
-| The approved read-only workflow performs exactly three network operations, in order | `TestStatusPerformsExactlyTheApprovedSequence`, comparing an ordered list — a set comparison would accept a logout that happened first |
+| The approved read-only workflow performs three network operations, in order, **when nothing is retried** | `TestStatusPerformsExactlyTheApprovedSequence`, comparing an ordered list — a set comparison would accept a logout that happened first. **Corrected at the handoff session:** `GET /api/info/version` is retryable, so the real worst case with the shipped defaults is 15 HTTP requests, all within the permitted set. `TestStatusIsNotLimitedToThreeRequests` pins it. The bound that holds is the permitted set, not a count |
 | An invalid configuration, or a missing credential, fails with ZERO network calls | Four configuration cases plus a missing-secret case, each asserting the fake server recorded nothing |
 | Enforcement is refused with a server reachable | `TestEnforcementIsRefusedEvenWithAReachableServer`, so the refusal does not depend on the network being down |
 | A syntactically valid mixed-script domain no longer destroys a signed feed, and does not thereby become eligible for blocking | `TestOneSuspiciousEntryNoLongerDestroysTheFeed` and `TestReviewEntriesAreWithheldWithoutBeingHidden`. SW-P3-05 |
@@ -3471,6 +3922,22 @@ published commit is still `72bc84c`.
 | The image builds, and its in-build assertions pass, on a host unrelated to the operator's | `docker build` PASSED in CI on Ubuntu 24.04.4 with Docker 28.0.4, at `2a18874` (§3.8) and again at `07154b6` (§3.11). Corroborates §3.7 from a second host |
 | The container hardening assertions hold on a second, independent host | `container runtime verification` PASSED in runs 34045148578 and 34047025567, against CI-built images with CI fixtures, including the three assertions added at `aa49797`. The passing run names the image: `sha256:d7c44949…`. §3.11, §3.12. **It does not renew SW-P1-05** — CI resolves a different deployment, with `group_add: 65532` rather than the operator's `989`, throwaway fixtures rather than the real CA and password, and an image built on the runner. It *does* close SW-P1-20, whose assertion is about the executable and reads none of those. §3.12 |
 
+**Established at the handoff-correction session, by local evidence only.** Same
+conditions as the block above: this host, as `scamwall`, no daemon, no network
+beyond loopback. §3.15.
+
+| Claim | Basis |
+| --- | --- |
+| `doctor` can perform a connectivity and TLS check without opening the application password | `doctor --no-credential` skips the read and reports `SKIP`, never `ok`. `TestDoctorNoCredentialDoesNotOpenTheSecret`, with a control asserting the same configuration FAILS without the flag — without that control the test would pass for a doctor that read the credential anyway |
+| `doctor --offline` is not a credential-free command | `TestDoctorOfflineStillReadsTheSecret`. Recorded because the `§6.5` step C rationale and a Dockerfile comment both asserted the opposite |
+| No command reports the credential's length | `TestDoctorNeverReportsTheCredentialLength`, which also asserts the literal length value is absent |
+| A failed session teardown is never reported as success | `Client` records a `Teardown` outcome and `status`/`sync` report which they observed. `TestAFailedLogoutIsNotReportedAsSuccess` asserts a nonzero exit, the absence of any "accepted" claim, that the successfully-read version data is still reported, and that the DELETE was in fact attempted. `TestALogoutAnswered404IsTheDesiredEndState` covers the third outcome |
+| `status` is not bounded to three requests | `TestStatusIsNotLimitedToThreeRequests`: the fake answers 503 twice and the observed sequence is five requests, all within the permitted set |
+| The operator procedure refuses an unexpected HEAD, a dirty tree, an unreadable tree, and a fixture redirection arriving by either route | `scripts/tests/operator-handoff-test.sh`, 141 cases against a scripted fake `docker` and a scripted fake `git`. §3.15 lists the covered failure modes |
+| Cleanup is installed before creation, is idempotent, preserves what it cannot attribute, distinguishes a failed enumeration from an empty one, and counts toward the verdict | The reviewed implementation, now shared as `scripts/lib/docker-resources.sh`. Its behaviour is unchanged over the extraction: the verifier's suite re-ran at **358** cases, 0 failed, including a new case asserting the verifier REFUSES to start if the library is absent |
+| A `SIGTERM` mid-run removes what was created and exits 143 | An interruption case in the handoff suite, delivered at the one moment a container exists |
+| A failing step's diagnostics carry no password-, session-id- or PEM-shaped value, and the logs survive for the operator to return | Four assertions in the redaction case, plus retention assertions on the work directory (mode 700) and the captured log (mode 600) |
+
 **Still not established:**
 
 | Claim | Status |
@@ -3481,9 +3948,13 @@ published commit is still `72bc84c`.
 | Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
 | A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported — FINDING-27 — was diagnosed and fixed from that log alone, and the next run passed |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4, and now also asserted *lexically* by `scripts/workflow-policy-check.sh` (FINDING-30) — which establishes what the workflow SAYS, not what GitHub DOES. Demonstrating the latter needs a pull request from a fork. §6.3, §6.4 item 10 |
-| The gate suite at `7e11419` passes on a hosted runner | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 26 gates, a changed workflow, and changed Go source. It needs its own run after an approved push, and the earlier run must not be relabelled as covering it |
-| An image built from `7e11419` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal |
-| The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C |
+| The gate suite passes on a hosted runner at the current candidate | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 25 gates, changed Go source, a changed Dockerfile comment, a new shared script library and two new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15 |
+| An image built from the current candidate satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
+| The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C, which is written, tested against a fake daemon, and **unexecuted** |
+| The operator handoff behaves correctly against a REAL Docker daemon | **Not established.** `scripts/operator-handoff.sh` is covered by 141 cases against a scripted fake Docker and a scripted fake git (§3.15). That establishes its control flow, its refusals, its attribution and its cleanup logic. It does not establish that the arguments it constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
+| `docker --add-host` accepts what the resolved configuration yields | **Established for the shape, not for the daemon.** The installed Compose renders `extra_hosts` as `["pi.hole=host-gateway"]`; the program normalises the `=` to the `:` form and a case cross-checks the filter against the real Compose CLI. Whether the daemon then maps the name as intended is observable only in step B |
+| A session created by ScamWall is confirmed absent from the appliance afterwards | **Not established, and no method for it is claimed.** ScamWall cannot ask: the endpoint that lists sessions is outside the permitted set. The superseded procedure named a Pi-hole UI path and a user-agent attribution that **this repository has never verified for any version**. §6.5 step D now states the limitation and proposes consulting the appliance version's own documentation, recording *"request accepted, not independently confirmed"* where no supported method exists |
+| The diagnostics filter catches every credential shape | **Not established, and narrowed further.** It is deny-by-pattern, so it establishes what its patterns catch. One instance is now recorded rather than left to be discovered: it is line-oriented, and a PEM's short final body line can fall under the 40-character threshold the long-opaque-value rule uses. §3.15 |
 | The domain policy separation is accepted | **Not claimed.** SW-P3-05 is implemented and locally tested at `7e11419`; its acceptance belongs to Phase 3, which has not begun |
 | The four fuzz targets show these paths are free of defects | **Not established, and not claimed.** Four bounded campaigns found two real defects and then stopped finding things. That is evidence about the inputs those runs reached and about nothing else. Durations and execution counts are recorded in §3.14 precisely so the claim cannot be inflated later |
 | The CI fixtures never enter an image or a log | **Established by construction and by test, and the step has now run.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; run 34045148578 created them 0600 in a 0700 directory, echoed only `ls -l` metadata, and removed them in a step that re-tests before reporting success. §3.11 |

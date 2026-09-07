@@ -63,7 +63,8 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Previous evidence commit | `b6b1769` — *fix(verify): check list processing, name scope, mounts, numbers and fields*. `ef40156`/`aa49797` changed `scripts/*.sh`, `compose.yaml` and the workflow, which demotes the rows §5 names; the script-bound rows were re-run and renewed at `aa49797`, the image-bound ones were not and cannot be from the service account |
 | Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. `b6b1769` changed `scripts/*.sh`, which demotes the rows §5 names; those were re-run and renewed |
 | Superseded candidate image | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier was ever run against this image**, and it predates all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. Retained as an identity on record for ID stability; it is not evidence and must not be deployed |
-| **Working candidate** | `7e1141997cc1f7484144f07c1fb05cde5d39e280`. Implementation and local verification only: not pushed, not built, not deployed. It changes Go source, `scripts/*.sh` and `.github/workflows/gates.yml`, so §5 demotes the rows named in §3 below. `docs/VERIFICATION.md` §3.14 |
+| Previous working candidate | `7e1141997cc1f7484144f07c1fb05cde5d39e280`. Implementation and local verification only: not pushed, not built, not deployed. It changes Go source, `scripts/*.sh` and `.github/workflows/gates.yml`, so §5 demotes the rows named in §3 below. `docs/VERIFICATION.md` §3.14 |
+| **Working candidate** | the handoff-correction session's last commit. Correction and local verification only: not pushed, not built, not deployed. It changes Go source (`cmd/scamwall/main.go`, `internal/adapters/pihole/client.go`), `scripts/check.sh`, `scripts/container-runtime-verify.sh`, a new `scripts/lib/docker-resources.sh`, a new `scripts/operator-handoff.sh` and a comment in `container/Dockerfile`, so §5 demotes the same rows again. It does **not** change `.github/workflows/gates.yml`. `docs/VERIFICATION.md` §3.15 |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -121,6 +122,19 @@ and neither can be performed from this account.
 24 gates, a different workflow file, and different Go source. The new candidate
 needs its own hosted run after a subsequently approved push, and until then the
 honest statement is that these three rows are implemented and unverified.
+
+**And do not relabel it as covering the handoff-correction candidate either.**
+That session changes Go source and three scripts and adds two more, so §5
+demotes the same rows a second time. Its local suite was re-run on the final
+clean committed tree and those rows rest on *that* transcript
+(`docs/VERIFICATION.md` §3.15); nothing about it was renewed by any earlier run.
+
+| Row | State at the handoff-correction candidate | Next step |
+| --- | --- | --- |
+| SW-P1-12 | **IMPLEMENTED-UNVERIFIED** | Still demoted. `.github/workflows/gates.yml` is unchanged by this session, so the property-by-property workflow re-review is not re-triggered — but `scripts/check.sh` gained a gate, so the gate list this tree runs is again not the list any hosted run has executed. Renewal: an approved push, then a hosted run |
+| SW-P1-20 | **IMPLEMENTED-UNVERIFIED** | Still demoted on both halves: the Go source changed again, so the executable this row is about is not the one in image `sha256:d7c44949…`. The controls (§3.6) are untouched and pass. Renewal: the assertion observed inside a real `docker build` of this source — `docs/VERIFICATION.md` §6.5 step A, or a hosted run |
+| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Still open. Its renewal procedure was **rewritten and tested** this session — `§6.5` step A now passes explicit build metadata, checks the in-build assertions per step, runs the built binary to confirm the commit it embeds, and pins the runtime verifier to the resolved image ID. That is a better renewal, not a renewal. It has not been executed |
+| SW-P1-15 | **IMPLEMENTED-UNVERIFIED** | Demoted by §5 on the Go change, and renewed on the local transcript: `go test -race -count=1 ./...` passes with six new CLI cases covering the credential-free doctor mode, the credential-length removal, and the three session-teardown outcomes. `docs/VERIFICATION.md` §3.15 |
 
 **Where the rows stood at `72bc84c`, retained because a row that was closed and
 then demoted is a different thing from one that was never closed.** Nineteen of
@@ -185,6 +199,8 @@ carried on assumption:
 | Evidence renewal at `7e11419` | **Local half done; hosted and image halves outstanding.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 and SW-P1-19 on any `scripts/*.sh` change, and every Go-source row plus SW-P1-13 on a Go change. The whole local suite was re-run on the final clean committed tree — 24 passed, 0 failed, 2 BLOCKED, `CHECK exit=1` — and those rows rest on that transcript (`docs/VERIFICATION.md` §3.14). SW-P1-12 and SW-P1-20 cannot be renewed from this account and are demoted rather than carried |
 | The API contract, enforced rather than described | **New at `0d620de`, locally evidenced.** A permitted-operation table is checked before any network activity and again on every redirect; the total deadline, `Retry-After` handling, session nesting and credential scrubbing are covered by tests against a local fake. `docs/PIHOLE_API_CONTRACT.md` §7 states the permitted set and, in its own subsection, that none of this is evidence about a real Pi-hole |
 | Runtime password access, live authentication, destination connectivity and TLS verification through the `pi.hole` pin | **Not established, and out of Phase 1 scope.** Phase 2 — SW-P2-02 and SW-P2-04. `docs/VERIFICATION.md` §6.2 |
+| The operator procedure that renews SW-P1-05 | **Rewritten and tested; still unexecuted.** It was a documentation code block that nothing ran, and it carried nine defects — including a hardcoded HEAD that refused its own documented checkout, a build passing no source metadata, a step claiming to read no password beside output showing it reading one, and steps B–D executing whatever the mutable tag pointed at. It is now `scripts/operator-handoff.sh` with 141 regression cases against a scripted fake Docker and git. `docs/VERIFICATION.md` §4.13 and §6.5. **Testing the procedure is not performing it**: SW-P1-05 closes when the operator runs step A and returns its result |
+| Evidence renewal at the handoff-correction candidate | **Local half done; hosted and image halves outstanding, as before.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 and SW-P1-19 on the `scripts/*.sh` change, and every Go-source row plus SW-P1-13 and SW-P1-15 on the Go change. The whole local suite was re-run on the final clean committed tree and those rows rest on that transcript (`docs/VERIFICATION.md` §3.15). SW-P1-12, SW-P1-20 and SW-P1-05 cannot be renewed from this account and are demoted rather than carried |
 
 ### SW-P1-01 — Runtime verification is built from checked operations
 
