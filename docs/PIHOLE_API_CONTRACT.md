@@ -270,18 +270,87 @@ server in the test suite. See "Open verification items" in
 
 ## 7. Client obligations derived from this contract
 
-These are requirements on ScamWall, enforced in `internal/adapters/pihole`:
+These are requirements on ScamWall, enforced in `internal/adapters/pihole`.
+
+### 7.1 The permitted set
+
+"Read-only" is **not** "GET only". A session has to be created and destroyed,
+and neither is a GET, so a method-only rule would either forbid authentication
+or permit every POST. What makes this client read-only is that the only non-GET
+requests it can construct act on **ScamWall's own session** and nothing else.
+
+The set is a table in `client.go` (`PermittedOperations`), enforced at run time
+rather than described in prose:
+
+| Operation | Retried | Why it is permitted |
+| --- | --- | --- |
+| `POST /api/auth` | No | Creates ScamWall's own session. Changes no Pi-hole state. Never retried: Pi-hole rate-limits login and has a finite number of session seats, so a retry storm could lock out an operator during an incident |
+| `DELETE /api/auth` | No | Destroys ScamWall's own session. Changes no Pi-hole state. Not retried: a second delete of an already-deleted session is answered `404`, which the caller already treats as the desired end state |
+| `GET /api/auth` | Yes | Reads session state without sending a credential |
+| `GET /api/info/version` | Yes | Reads component version numbers. Non-sensitive, and the only data endpoint Phase 1 touches |
+
+Two properties of the enforcement matter as much as the table:
+
+* **It runs before any network activity.** The check precedes URL construction,
+  name resolution, the dial and the TLS handshake. A request outside the
+  contract fails as a programming error and does not put a packet on the wire on
+  its way to failing. The test that proves this points the client at an address
+  nothing is listening on: if the check were moved later, the failure would be a
+  dial error rather than `ErrOperationNotPermitted`, and the test would say so.
+* **It runs again on every redirect.** A redirect is a request the *server*
+  chose. Same-origin is necessary but not sufficient: a Pi-hole answering
+  `GET /api/info/version` with a `302` to a configuration or DNS-control
+  endpoint would be steering the client, within the approved origin, to
+  something this contract forbids. A redirect target that is not in the table is
+  refused, and so is any redirect target carrying a query string — Pi-hole
+  accepts the session id as a `sid` parameter, and a redirect is the only way a
+  URL this client did not build could acquire one.
+
+### 7.2 The rest of the obligations
 
 1. HTTPS only; plaintext refused before a connection is attempted.
 2. Trust anchored to the configured private CA. System roots are not consulted.
 3. Hostname verified as `pi.hole`, independent of the address dialled.
-4. Session ID carried only in `X-FTL-SID`; never in a URL, never in a log.
-5. Password read from a file, held as narrowly as possible, never logged.
-6. CSRF token discarded immediately; unused under header authentication.
-7. `DELETE /api/auth` attempted on **every** exit path, including error and
-   cancellation, under its own bounded timeout.
-8. Response bodies bounded by a hard byte limit before decoding.
-9. `Content-Type` verified as JSON before decoding.
-10. Cross-origin redirects refused.
-11. Retries with jitter permitted only for idempotent, side-effect-free reads.
-12. All errors redacted: no bodies, no headers, no credentials.
+4. Destination pinned: the dialler refuses any address but the configured one,
+   so no response can steer the client at another host.
+5. No proxy. `Transport.Proxy` is nil, so `HTTPS_PROXY` in the environment
+   changes nothing — the peer is on the local network by definition, and a proxy
+   would terminate or observe that connection.
+6. Session ID carried only in `X-FTL-SID`; never in a URL, never in a log.
+7. Password read from a file, held as narrowly as possible, never logged.
+8. CSRF token discarded immediately; unused under header authentication.
+9. `DELETE /api/auth` attempted on **every** exit path, including error and
+   cancellation, under its own bounded timeout derived from — but not cancelled
+   by — the caller's context.
+10. A session is never nested. `WithSession` refuses when one is already active,
+    because a second login would overwrite the id held in memory and leave the
+    overwritten session valid on the server with no way left to destroy it.
+11. Response bodies bounded by a hard byte limit before decoding; error bodies
+    bounded by the same limit.
+12. `Content-Type` verified as JSON before decoding.
+13. Cross-origin redirects refused; redirect count capped.
+14. Retries with jitter permitted only for operations the table marks retryable.
+    A rejected credential is never retried.
+15. **One deadline for the whole operation.** `TotalTimeout` bounds the request,
+    its retries and the delays between them. `http.Client.Timeout` bounds a
+    single request and does not bound a sequence of them, so without this the
+    real ceiling would be `attempts x RequestTimeout` plus every backoff and
+    would grow with `MaxRetries`.
+16. `Retry-After` honoured where it is longer than the local backoff, and capped
+    either way, so a peer cannot park the process by naming a large number.
+    Both RFC 9110 forms are parsed and the raw header value is discarded.
+17. All errors redacted: no bodies, no headers, no credentials. In addition,
+    peer-supplied strings are scrubbed of the live session id, and the
+    authentication error is scrubbed of the password, so that a Pi-hole quoting
+    back what it was sent cannot put a credential into a log that ScamWall never
+    printed.
+
+### 7.3 What the test suite establishes, and against what
+
+Every network test in this repository runs against a **local fake HTTPS server**
+that impersonates the parts of this API ScamWall uses, with a throwaway CA
+generated per run. That establishes the client's behaviour — trust, pinning,
+redirects, bounds, deadlines, cancellation, redaction — and it establishes
+nothing whatever about compatibility with a real Pi-hole. The divergence
+assessment in section 6 is the only evidence about the real appliance, and it
+covers unauthenticated probes only.

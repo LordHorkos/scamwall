@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,10 +104,20 @@ func deref(p *string) string {
 	return sanitizeMessage(*p)
 }
 
-// do performs one API call, with bounded retries when the request is safe.
+// do performs one API call, with bounded retries when the operation permits.
 //
-// retryable must be true only for idempotent, side-effect-free requests.
-func (c *Client) do(ctx context.Context, method, path string, body []byte, out any, retryable bool) error {
+// The permitted-operation table is consulted FIRST, before the endpoint is
+// built and before anything is resolved, dialled or handshaken. A request
+// outside the contract must fail as a programming error, not as a network
+// error, and it must not put a packet on the wire on its way to failing.
+func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
+	op, permitted := lookupOperation(method, path)
+	if !permitted {
+		// The method and path are this process's own constants, not peer data,
+		// so naming them is safe and is the only useful thing to say.
+		return fmt.Errorf("%w: %s %s", ErrOperationNotPermitted, method, path)
+	}
+
 	endpoint := c.cfg.BaseURL() + path
 
 	u, err := url.Parse(endpoint)
@@ -125,19 +136,33 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		return errors.New("query parameters are not used by this client")
 	}
 
+	// One deadline for the whole operation, retries and backoff included.
+	//
+	// Without this the total is attempts x RequestTimeout plus the delays
+	// between them, which is not what TotalTimeout says and grows with
+	// MaxRetries. http.Client.Timeout bounds a single request; it does not
+	// bound a sequence of them.
+	ctx, cancel := context.WithTimeout(ctx, c.cfg.Pihole.TotalTimeout.D())
+	defer cancel()
+
 	attempts := 1
-	if retryable {
+	if op.Retryable {
 		attempts += c.cfg.Pihole.MaxRetries
 	}
 
 	var lastErr error
 	for attempt := range attempts {
 		if attempt > 0 {
-			delay := jitteredBackoff(c.cfg.Pihole.RetryBaseDelay.D(), attempt-1)
+			delay := c.retryDelay(lastErr, attempt-1)
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
+				timer.Stop()
+				// The deadline that expired may be this operation's own, so the
+				// error names the endpoint rather than surfacing a bare
+				// context error from an unidentified place.
+				return redactTransportError(path, ctx.Err())
+			case <-timer.C:
 			}
 		}
 
@@ -147,11 +172,12 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 		}
 		lastErr = err
 
-		// Context errors are terminal: the caller asked us to stop.
+		// Context errors are terminal: the caller asked us to stop, or the
+		// operation deadline above has expired.
 		if ctx.Err() != nil {
 			return err
 		}
-		if !retryable || !isRetryable(err) {
+		if !op.Retryable || !isRetryable(err) {
 			return err
 		}
 		c.log.Warn("pihole.retry",
@@ -160,6 +186,28 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, out a
 			audit.F("of", attempts))
 	}
 	return lastErr
+}
+
+// retryDelay is how long to wait before attempt n+1, given what went wrong.
+//
+// A server that answered 429 with a Retry-After has stated how long it wants
+// to be left alone, and ignoring that in favour of a shorter local backoff is
+// how a client turns rate limiting into an outage. The stated value is honoured
+// where it is longer than the local backoff, and capped either way: a hostile
+// or broken peer must not be able to park this process for an arbitrary time
+// by naming a large number.
+func (c *Client) retryDelay(lastErr error, attempt int) time.Duration {
+	delay := jitteredBackoff(c.cfg.Pihole.RetryBaseDelay.D(), attempt)
+	var apiErr *APIError
+	if errors.As(lastErr, &apiErr) && apiErr.RetryAfter > 0 {
+		if apiErr.RetryAfter > delay {
+			delay = apiErr.RetryAfter
+		}
+	}
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	return delay
 }
 
 // isRetryable reports whether an error is worth another attempt.
@@ -186,6 +234,7 @@ func isRetryable(err error) bool {
 		errors.Is(err, ErrUnexpectedContent) ||
 		errors.Is(err, ErrCrossOriginRedirect) ||
 		errors.Is(err, ErrTooManyRedirects) ||
+		errors.Is(err, ErrOperationNotPermitted) ||
 		errors.Is(err, ErrUnexpectedDial) {
 		return false
 	}
@@ -259,7 +308,11 @@ func (c *Client) attempt(ctx context.Context, method, fullURL, path string, body
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return newAPIError(resp.StatusCode, path, payload)
+		// The peer's own words are scrubbed of anything we sent it before
+		// they are allowed into an error. A Pi-hole that quoted a session id
+		// back at us in an error message would otherwise put it into a log
+		// without ScamWall having printed it anywhere.
+		return c.scrubAPIError(newAPIError(resp.StatusCode, path, resp.Header, payload))
 	}
 
 	if out == nil {
@@ -274,15 +327,73 @@ func (c *Client) attempt(ctx context.Context, method, fullURL, path string, body
 	return nil
 }
 
+// scrubAPIError removes any live session id the peer echoed back at us.
+//
+// The password is scrubbed at its own call site rather than here, because this
+// method is reached for every endpoint and only Login holds the credential.
+func (c *Client) scrubAPIError(err error) error {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	c.mu.Lock()
+	sid := c.sid
+	c.mu.Unlock()
+	apiErr.Key = sid.Scrub(apiErr.Key)
+	apiErr.Message = sid.Scrub(apiErr.Message)
+	return err
+}
+
 // newAPIError builds a redacted error from a failure response.
-func newAPIError(status int, path string, payload []byte) error {
+func newAPIError(status int, path string, hdr http.Header, payload []byte) error {
 	e := &APIError{Status: status, Endpoint: path}
 	var env apiErrorEnvelope
 	if err := json.Unmarshal(payload, &env); err == nil {
 		e.Key = sanitizeMessage(env.Error.Key)
 		e.Message = sanitizeMessage(env.Error.Message)
 	}
+	e.RetryAfter = parseRetryAfter(hdr.Get("Retry-After"), time.Now())
 	return e
+}
+
+// parseRetryAfter reads the two forms RFC 9110 allows and clamps the result.
+//
+// The header is peer-supplied, so it is treated as untrusted input: a
+// negative, absurd, or unparseable value yields zero, and a large one is
+// clamped by the caller rather than obeyed. The parsed value is a duration and
+// the raw string is discarded, so nothing the peer wrote survives into a log.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		// Clamped BEFORE the multiplication. time.Duration is an int64 of
+		// nanoseconds, so a large delta-seconds value overflows into a
+		// NEGATIVE duration, which sails past a later `> maxRetryDelay` test
+		// and turns a server asking us to wait into no wait at all. Found by
+		// the overflow case in TestParseRetryAfter.
+		const maxSeconds = int(maxRetryDelay / time.Second)
+		if secs > maxSeconds {
+			return maxRetryDelay
+		}
+		return time.Duration(secs) * time.Second
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return 0
+	}
+	d := t.Sub(now)
+	if d <= 0 {
+		return 0
+	}
+	if d > maxRetryDelay {
+		return maxRetryDelay
+	}
+	return d
 }
 
 // redactTransportError rewrites a transport error so that only its class and
@@ -299,6 +410,11 @@ func redactTransportError(path string, err error) error {
 		return fmt.Errorf("request to %s: %w", path, ErrTooManyRedirects)
 	case errors.Is(err, ErrUnexpectedDial):
 		return fmt.Errorf("request to %s: %w", path, ErrUnexpectedDial)
+	case errors.Is(err, ErrOperationNotPermitted):
+		// Raised by CheckRedirect. The wrapped message names the method and
+		// path the server tried to send us to, which is peer-influenced but
+		// already bounded and sanitised where it was built.
+		return fmt.Errorf("request to %s: %w", path, ErrOperationNotPermitted)
 	}
 
 	msg := err.Error()

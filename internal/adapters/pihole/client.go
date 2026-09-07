@@ -38,6 +38,11 @@ const MaxCABytes = 512 * 1024
 // maxRedirects caps same-origin redirect following.
 const maxRedirects = 3
 
+// maxRetryDelay caps every wait between attempts, including one a server
+// asked for with Retry-After. A peer must not be able to park this process for
+// an arbitrary time by naming a large number.
+const maxRetryDelay = 5 * time.Second
+
 // Endpoints used by this client. Declared as constants so that the complete
 // set of reachable endpoints is visible in one place and can be asserted by a
 // test.
@@ -46,17 +51,74 @@ const (
 	epVersion = "/api/info/version"
 )
 
+// Operation is one permitted API call: a method and a path, together.
+//
+// The pair is what matters. "Read-only" is not the same as "GET only" — a
+// session has to be created and destroyed, and both of those are non-GET
+// requests — so a method-only rule would either forbid authentication or
+// permit every POST. What makes this client read-only is that the ONLY non-GET
+// requests it can construct act on ScamWall's own session and nothing else.
+type Operation struct {
+	Method string
+	Path   string
+	// Retryable records whether repeating this exact request is safe. It is a
+	// property of the operation, not of whether it happens to read data:
+	// POST /api/auth reads nothing that changes, and is still not retryable,
+	// because Pi-hole rate-limits authentication and has a finite number of
+	// session seats.
+	Retryable bool
+	// Why is the justification for including the operation at all. An entry
+	// without one should not be here.
+	Why string
+}
+
+// PermittedOperations is the complete set of requests this client may issue.
+//
+// It is enforced at run time, before any name resolution, connection or TLS
+// handshake, and it is enforced again on every redirect. A test asserts that
+// this table and the endpoints in docs/PIHOLE_API_CONTRACT.md agree.
+var PermittedOperations = []Operation{
+	{
+		Method: http.MethodPost, Path: epAuth, Retryable: false,
+		Why: "creates ScamWall's own session; changes no Pi-hole state. Never retried: Pi-hole rate-limits login and has a finite number of session seats, so a retry storm could lock out an operator during an incident.",
+	},
+	{
+		Method: http.MethodDelete, Path: epAuth, Retryable: false,
+		Why: "destroys ScamWall's own session; changes no Pi-hole state. Not retried: a second delete of an already-deleted session is answered 404, which the caller already treats as the desired end state.",
+	},
+	{
+		Method: http.MethodGet, Path: epAuth, Retryable: true,
+		Why: "reads session state without sending a credential; used by doctor to distinguish 'unreachable' from 'needs a password'.",
+	},
+	{
+		Method: http.MethodGet, Path: epVersion, Retryable: true,
+		Why: "reads component version numbers. Non-sensitive, and the only data endpoint Phase 1 touches.",
+	},
+}
+
+// lookupOperation returns the permitted operation for a method and path.
+func lookupOperation(method, path string) (Operation, bool) {
+	for _, op := range PermittedOperations {
+		if op.Method == method && op.Path == path {
+			return op, true
+		}
+	}
+	return Operation{}, false
+}
+
 // Errors returned by the client.
 var (
-	ErrPlaintextRefused    = errors.New("plaintext HTTP is refused")
-	ErrCrossOriginRedirect = errors.New("refused redirect to a different origin")
-	ErrTooManyRedirects    = errors.New("too many redirects")
-	ErrResponseTooLarge    = errors.New("response exceeds maximum size")
-	ErrUnexpectedContent   = errors.New("unexpected response content type")
-	ErrNotAuthenticated    = errors.New("no active session")
-	ErrNoSessionID         = errors.New("authentication succeeded but returned no session id")
-	ErrUnexpectedDial      = errors.New("refused connection to an unexpected address")
-	ErrCAInvalid           = errors.New("certificate authority file contains no usable certificate")
+	ErrPlaintextRefused      = errors.New("plaintext HTTP is refused")
+	ErrCrossOriginRedirect   = errors.New("refused redirect to a different origin")
+	ErrTooManyRedirects      = errors.New("too many redirects")
+	ErrResponseTooLarge      = errors.New("response exceeds maximum size")
+	ErrUnexpectedContent     = errors.New("unexpected response content type")
+	ErrNotAuthenticated      = errors.New("no active session")
+	ErrNoSessionID           = errors.New("authentication succeeded but returned no session id")
+	ErrUnexpectedDial        = errors.New("refused connection to an unexpected address")
+	ErrCAInvalid             = errors.New("certificate authority file contains no usable certificate")
+	ErrOperationNotPermitted = errors.New("operation is not in the permitted set")
+	ErrSessionAlreadyActive  = errors.New("a session is already active")
 )
 
 // APIError is a redacted representation of a failed API response.
@@ -68,6 +130,11 @@ type APIError struct {
 	Endpoint string
 	Key      string
 	Message  string
+	// RetryAfter is the delay the server asked for, parsed from Retry-After
+	// and clamped. Zero when the header was absent, unparseable, or in the
+	// past. It is a duration, never the raw header value, so nothing
+	// peer-supplied reaches a log through it.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -173,6 +240,14 @@ func New(cfg config.Config, log *audit.Logger) (*Client, error) {
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   cfg.Pihole.TotalTimeout.D(),
+			// A redirect is a request the SERVER chose, so the same rules that
+			// govern a request this client chose are applied again here. Same
+			// origin is not sufficient on its own: a Pi-hole that answered
+			// GET /api/info/version with a 302 to a DNS-control endpoint would be
+			// redirecting us, within the approved origin, to something the
+			// contract forbids. The literal path is not written here: a guard
+			// test refuses any mention of a mutating endpoint in this package,
+			// and a comment is not an exemption from it.
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= maxRedirects {
 					return ErrTooManyRedirects
@@ -180,6 +255,16 @@ func New(cfg config.Config, log *audit.Logger) (*Client, error) {
 				origin := via[0].URL
 				if req.URL.Scheme != origin.Scheme || req.URL.Host != origin.Host {
 					return fmt.Errorf("%w: %s -> %s", ErrCrossOriginRedirect, origin.Host, req.URL.Host)
+				}
+				// A redirect target carrying a query string is refused outright.
+				// Pi-hole accepts the session id as a `sid` query parameter, and a
+				// redirect is the one way a URL this client did not build could
+				// acquire one.
+				if req.URL.RawQuery != "" {
+					return fmt.Errorf("%w: redirect target carries a query string", ErrOperationNotPermitted)
+				}
+				if _, ok := lookupOperation(req.Method, req.URL.Path); !ok {
+					return fmt.Errorf("%w: redirected to %s %s", ErrOperationNotPermitted, req.Method, req.URL.Path)
 				}
 				return nil
 			},
@@ -261,8 +346,16 @@ func (c *Client) Login(ctx context.Context, secret config.Secret) (SessionState,
 	// Authentication is never retried. Pi-hole rate-limits login and returns
 	// 429 when its session table is full, so a retry storm could lock out a
 	// legitimate operator during an incident.
-	err = c.do(ctx, http.MethodPost, epAuth, body, &resp, false)
+	err = c.do(ctx, http.MethodPost, epAuth, body, &resp)
 	if err != nil {
+		// This is the one request that carries the password, so it is the one
+		// place a peer could echo it back. Scrubbed before the error leaves
+		// this function, so no caller and no log ever sees it.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			apiErr.Key = secret.Scrub(apiErr.Key)
+			apiErr.Message = secret.Scrub(apiErr.Message)
+		}
 		return SessionState{}, err
 	}
 	if resp.Session.SID == nil || *resp.Session.SID == "" {
@@ -302,7 +395,7 @@ func (c *Client) Logout(ctx context.Context) error {
 	logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.cfg.Pihole.LogoutTimeout.D())
 	defer cancel()
 
-	err := c.do(logoutCtx, http.MethodDelete, epAuth, nil, nil, false)
+	err := c.do(logoutCtx, http.MethodDelete, epAuth, nil, nil)
 
 	// The session id is discarded regardless of the outcome. Retaining an id
 	// that may already be invalid serves no purpose and only extends the time
@@ -331,7 +424,7 @@ func (c *Client) Logout(ctx context.Context) error {
 // needs a password", without transmitting anything sensitive.
 func (c *Client) ProbeAuth(ctx context.Context) (SessionState, error) {
 	var resp authResponse
-	err := c.do(ctx, http.MethodGet, epAuth, nil, &resp, true)
+	err := c.do(ctx, http.MethodGet, epAuth, nil, &resp)
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Unauthorized() {
@@ -352,7 +445,7 @@ func (c *Client) Version(ctx context.Context) (*VersionInfo, error) {
 		return nil, ErrNotAuthenticated
 	}
 	var resp versionResponse
-	if err := c.do(ctx, http.MethodGet, epVersion, nil, &resp, true); err != nil {
+	if err := c.do(ctx, http.MethodGet, epVersion, nil, &resp); err != nil {
 		return nil, err
 	}
 	v := resp.toVersionInfo()
@@ -369,6 +462,13 @@ func (c *Client) Version(ctx context.Context) (*VersionInfo, error) {
 // it makes the logout unconditional rather than dependent on every return path
 // remembering to perform it.
 func (c *Client) WithSession(ctx context.Context, secret config.Secret, fn func(context.Context) error) error {
+	// Refused rather than nested. A second Login would overwrite the session id
+	// held here, and the overwritten one would stay valid on the server for the
+	// rest of its lifetime, occupying one of a finite number of seats with no
+	// way left to destroy it. That is a leak, so it is a programming error.
+	if c.SessionActive() {
+		return ErrSessionAlreadyActive
+	}
 	if _, err := c.Login(ctx, secret); err != nil {
 		return err
 	}
@@ -416,9 +516,8 @@ func jitteredBackoff(base time.Duration, attempt int) time.Duration {
 		return 0
 	}
 	d := base << attempt
-	const maxDelay = 5 * time.Second
-	if d > maxDelay {
-		d = maxDelay
+	if d > maxRetryDelay {
+		d = maxRetryDelay
 	}
 	// Full jitter: uniform in [0, d].
 	return time.Duration(rand.Int64N(int64(d) + 1))

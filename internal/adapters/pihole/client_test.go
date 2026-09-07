@@ -5,9 +5,12 @@ package pihole_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -633,5 +636,297 @@ func TestNoRetryOnUnauthorized(t *testing.T) {
 	})
 	if attempts != 1 {
 		t.Fatalf("401 must not be retried; got %d attempts", attempts)
+	}
+}
+
+// --- The permitted-operation contract, observed through a real server --------
+//
+// The internal tests assert that a forbidden operation this client CHOOSES is
+// refused before anything is dialled. These assert the other direction: a
+// forbidden operation the SERVER chooses, by answering an approved request
+// with a redirect, is refused too. Same origin is not enough — the redirect
+// target has to be an operation the contract permits.
+
+func TestSameOriginRedirectToAnUnapprovedPathIsRefused(t *testing.T) {
+	ca := newTestCA(t)
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth":
+			writeJSON(w, 200, loginOKBody())
+		case r.URL.Path == "/api/info/version":
+			// Same scheme, same host, same port. Only the path differs, and it
+			// names an endpoint Phase 1 must never reach.
+			w.Header().Set("Location", "/api/config")
+			w.WriteHeader(http.StatusFound)
+		default:
+			writeJSON(w, 200, `{"unexpected":true}`)
+		}
+	}))
+	c, err := pihole.New(configFor(t, f, ca.path), audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("pw")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Version(t.Context())
+	if !errors.Is(err, pihole.ErrOperationNotPermitted) {
+		t.Fatalf("got %v, want ErrOperationNotPermitted", err)
+	}
+	for _, req := range f.recorded() {
+		if req.Path == "/api/config" {
+			t.Fatal("the client followed the redirect to a forbidden endpoint")
+		}
+	}
+}
+
+func TestRedirectCarryingAQueryStringIsRefused(t *testing.T) {
+	// Pi-hole accepts the session id as a `sid` query parameter. This client
+	// never builds such a URL, so a redirect is the only way one could appear —
+	// which would put a live credential into every log that records a URL.
+	ca := newTestCA(t)
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth":
+			writeJSON(w, 200, loginOKBody())
+		case r.URL.Path == "/api/info/version" && r.URL.RawQuery == "":
+			w.Header().Set("Location", "/api/info/version?sid="+sessionSID)
+			w.WriteHeader(http.StatusFound)
+		default:
+			writeJSON(w, 200, `{"version":{}}`)
+		}
+	}))
+	c, err := pihole.New(configFor(t, f, ca.path), audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("pw")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Version(t.Context())
+	if !errors.Is(err, pihole.ErrOperationNotPermitted) {
+		t.Fatalf("got %v, want ErrOperationNotPermitted", err)
+	}
+	for _, req := range f.recorded() {
+		if req.RawQuery != "" {
+			t.Fatalf("a request carried a query string: %q", req.RawQuery)
+		}
+	}
+	if strings.Contains(err.Error(), sessionSID) {
+		t.Fatal("the refusal message contains the session id")
+	}
+}
+
+// --- Deadlines --------------------------------------------------------------
+
+func TestTotalTimeoutBoundsTheWholeOperationIncludingRetries(t *testing.T) {
+	// Without an operation-level deadline the ceiling is
+	// attempts x RequestTimeout plus every backoff, which is not what
+	// TotalTimeout says and grows with MaxRetries. http.Client.Timeout bounds
+	// one request; it does not bound a sequence of them.
+	ca := newTestCA(t)
+	var attempts atomic.Int32
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth" {
+			writeJSON(w, 200, loginOKBody())
+			return
+		}
+		attempts.Add(1)
+		writeJSON(w, http.StatusServiceUnavailable, `{"error":{"key":"busy","message":"try later","hint":null}}`)
+	}))
+	cfg := configFor(t, f, ca.path)
+	cfg.Pihole.MaxRetries = 50
+	cfg.Pihole.RetryBaseDelay = config.Duration(50 * time.Millisecond)
+	cfg.Pihole.TotalTimeout = config.Duration(400 * time.Millisecond)
+	c, err := pihole.New(cfg, audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("pw")); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err = c.Version(t.Context())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	// Generous, because the point is that a bound EXISTS, not that it is tight:
+	// 50 retries at 50ms of backoff alone would exceed a second and a half.
+	if elapsed > 2*time.Second {
+		t.Fatalf("the operation ran for %v with a %v total timeout", elapsed, cfg.Pihole.TotalTimeout.D())
+	}
+	if attempts.Load() < 2 {
+		t.Fatalf("only %d attempts were made; the retry path was not exercised", attempts.Load())
+	}
+}
+
+func TestRateLimitRespectsRetryAfter(t *testing.T) {
+	ca := newTestCA(t)
+	var n atomic.Int32
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth" {
+			writeJSON(w, 200, loginOKBody())
+			return
+		}
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, `{"error":{"key":"rate_limit","message":"slow down","hint":null}}`)
+			return
+		}
+		writeJSON(w, 200, `{"version":{"core":{"local":{"version":"v6.0"}}}}`)
+	}))
+	cfg := configFor(t, f, ca.path)
+	cfg.Pihole.MaxRetries = 2
+	// A local backoff far shorter than what the server asked for, so that a
+	// client which ignored Retry-After would return noticeably sooner.
+	cfg.Pihole.RetryBaseDelay = config.Duration(time.Millisecond)
+	cfg.Pihole.TotalTimeout = config.Duration(10 * time.Second)
+	c, err := pihole.New(cfg, audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("pw")); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if _, err := c.Version(t.Context()); err != nil {
+		t.Fatalf("the retry did not succeed: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Fatalf("returned after %v; the server asked for 1s and was not waited for", elapsed)
+	}
+}
+
+// --- Session lifecycle ------------------------------------------------------
+
+func TestWithSessionRefusesToNestASecondSession(t *testing.T) {
+	// A second Login would overwrite the session id held in memory, and the
+	// overwritten one would stay valid on the server with no way left to
+	// destroy it — a leaked seat, not a harmless duplicate.
+	ca := newTestCA(t)
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			writeJSON(w, 200, loginOKBody())
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeJSON(w, 200, `{"version":{}}`)
+		}
+	}))
+	c, err := pihole.New(configFor(t, f, ca.path), audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inner error
+	err = c.WithSession(t.Context(), config.NewSecretString("pw"), func(ctx context.Context) error {
+		inner = c.WithSession(ctx, config.NewSecretString("pw"), func(context.Context) error { return nil })
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("outer session: %v", err)
+	}
+	if !errors.Is(inner, pihole.ErrSessionAlreadyActive) {
+		t.Fatalf("nested session returned %v, want ErrSessionAlreadyActive", inner)
+	}
+	logins := 0
+	for _, req := range f.recorded() {
+		if req.Method == http.MethodPost {
+			logins++
+		}
+	}
+	if logins != 1 {
+		t.Fatalf("%d authentications were performed; the nested one was not prevented", logins)
+	}
+	if c.SessionActive() {
+		t.Fatal("a session survived the outer WithSession")
+	}
+}
+
+func TestFailedAuthenticationIsNotRepeated(t *testing.T) {
+	// A wrong password must not become a login storm. Pi-hole rate-limits
+	// authentication and has a finite number of session seats, so repeating a
+	// rejected credential can lock out an operator during an incident.
+	ca := newTestCA(t)
+	var logins atomic.Int32
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logins.Add(1)
+		writeJSON(w, http.StatusUnauthorized, `{"error":{"key":"unauthorized","message":"Unauthorized","hint":null}}`)
+	}))
+	cfg := configFor(t, f, ca.path)
+	cfg.Pihole.MaxRetries = 5
+	c, err := pihole.New(cfg, audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("wrong")); err == nil {
+		t.Fatal("expected authentication to fail")
+	}
+	if got := logins.Load(); got != 1 {
+		t.Fatalf("%d authentication attempts were made, want exactly 1", got)
+	}
+	if c.SessionActive() {
+		t.Fatal("a session is held after a failed authentication")
+	}
+}
+
+// --- Credential hygiene against a hostile peer -------------------------------
+
+func TestAServerEchoingTheCredentialDoesNotLeakItIntoAnError(t *testing.T) {
+	// The peer already knows the password — we sent it. The risk is the peer
+	// putting it back into a message that ScamWall then writes to a log or a
+	// diagnostic capture.
+	password := randomToken("password")
+	ca := newTestCA(t)
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		var sent struct {
+			Password string `json:"password"`
+		}
+		_ = json.Unmarshal(body, &sent)
+		writeJSON(w, http.StatusBadRequest,
+			`{"error":{"key":"password_inval","message":"the password `+sent.Password+` was rejected","hint":null}}`)
+	}))
+	c, err := pihole.New(configFor(t, f, ca.path), audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Login(t.Context(), config.NewSecretString(password))
+	if err == nil {
+		t.Fatal("expected authentication to fail")
+	}
+	if strings.Contains(err.Error(), password) {
+		t.Fatalf("the error carries the credential the server echoed back")
+	}
+	if !strings.Contains(err.Error(), "REDACTED") {
+		t.Fatalf("the echoed credential was not replaced by a placeholder: %v", err)
+	}
+}
+
+func TestAServerEchoingTheSessionIDDoesNotLeakItIntoAnError(t *testing.T) {
+	ca := newTestCA(t)
+	f := newFakePihole(t, ca, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/auth" {
+			writeJSON(w, 200, loginOKBody())
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized,
+			`{"error":{"key":"unauthorized","message":"session `+r.Header.Get("X-FTL-SID")+` is not valid","hint":null}}`)
+	}))
+	c, err := pihole.New(configFor(t, f, ca.path), audit.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Login(t.Context(), config.NewSecretString("pw")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Version(t.Context())
+	if err == nil {
+		t.Fatal("expected the read to fail")
+	}
+	if strings.Contains(err.Error(), sessionSID) {
+		t.Fatal("the error carries the session id the server echoed back")
 	}
 }

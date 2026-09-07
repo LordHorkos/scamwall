@@ -94,6 +94,26 @@ func (s Secret) Len() int { return len(s.b) }
 // almost certainly introducing a leak.
 func (s Secret) Reveal() string { return string(s.b) }
 
+// Scrub replaces every occurrence of the secret in s with the placeholder.
+//
+// It exists for one situation: a peer echoing back something we sent it. A
+// Pi-hole that answered POST /api/auth by quoting the value it was sent back
+// in its error message would put the credential into an error string, and from
+// there into a log or a diagnostic capture, without any code in ScamWall
+// having printed it.
+//
+// This is deliberately NOT Reveal. Reveal is the sanctioned way to put a
+// credential on the wire and its call sites are counted by a test; scrubbing is
+// the opposite operation and must not compete for that budget. The conversion
+// below does materialise a copy of the plaintext for the duration of the
+// comparison, which is the same limitation Destroy already documents.
+func (s Secret) Scrub(in string) string {
+	if len(s.b) == 0 || in == "" {
+		return in
+	}
+	return strings.ReplaceAll(in, string(s.b), redactedPlaceholder)
+}
+
 // Destroy zeroes the underlying bytes.
 //
 // This reduces the window in which the credential sits in process memory. It
