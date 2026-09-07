@@ -1219,6 +1219,92 @@ operator command was proposed.
 image, create a container, read the application password, contact a Pi-hole, or
 push anything. `origin/feat/phase-1-core` is still `72bc84c`.
 
+### 3.14 Implementation session at `f94214a` … `7e11419`
+
+Work performed while the operator was away, under an order that permitted
+implementation and local verification but not pushing, merging, contacting the
+live Pi-hole, or declaring any phase complete. Nothing here closes a
+requirement that needs a hosted run or a Docker daemon; where a boundary was
+reached it is named rather than worked around.
+
+**Identity.**
+
+| Item | Value |
+| --- | --- |
+| Starting HEAD | `f94214aba8d56c8b133b9049a168b11ce64f3156` |
+| Ending HEAD | `7e1141997cc1f7484144f07c1fb05cde5d39e280` |
+| Published commit at the start | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` — unchanged; **nothing was pushed** |
+| Branch | `feat/phase-1-core` — unchanged |
+| Diff | 30 files, +3857 / −223 |
+
+**Commits, and what each is for.**
+
+| Commit | Purpose |
+| --- | --- |
+| `bc5ad77` | The runtime verifier now relates the supplementary group to the password file's ownership. Phase 2 work-order item 9, carried forward from Phase 1 |
+| `511e1f6` | ShellCheck SC2155 in the change above |
+| `66199c8` | `scripts/workflow-policy-check.sh`: the workflow's security posture becomes a gate instead of a review |
+| `3cc7c5e` | The pipefail/SIGPIPE gate caught FINDING-01's shape in the new checker on its first run |
+| `0d620de` | The Pi-hole API contract is enforced at run time: a permitted-operation table, redirect-target enforcement, a total operation deadline, `Retry-After`, a session-nesting refusal, and credential scrubbing of peer-supplied strings |
+| `ee09fff` | SW-P3-05: domain syntax, risk signal, evidence and blocking eligibility separated |
+| `2a0af8f` | End-to-end CLI tests against a local fake HTTPS Pi-hole |
+| `7e11419` | Four fuzz targets, and the two real defects their first runs found |
+
+**Local suite on the final clean committed tree.** Run directly, as `scamwall`,
+not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own:
+
+```
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 24 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+The gate list is now **26**, not 24: `workflow policy self-test` and `workflow
+policy` were added. The two BLOCKED gates are the same two as before — `docker
+build` and `container runtime verification` — blocked because this account has
+no Docker socket, which is the intended boundary and not a defect. `CHECK
+exit=1` is therefore the correct outcome, and the exit status agrees with the
+printed verdict.
+
+Supporting suites, each run directly:
+
+| Suite | Result |
+| --- | --- |
+| `go test -race -count=1 ./...` | all 8 packages ok |
+| `staticcheck ./...` | clean |
+| `shellcheck --severity=style` over every tracked and untracked-but-not-ignored script | clean |
+| `scripts/tests/runtime-verify-test.sh` | **355** tests, 0 failed (was 336; 19 added) |
+| `scripts/tests/compose-fixture-test.sh` | **20** tests, 0 failed (was 19) |
+| `scripts/workflow-policy-check.sh --self-test` | 14 self-tests, 0 failed |
+| `scripts/secret-scan.sh --tree` | clean, 71 files |
+
+**Bounded fuzz campaigns.** Durations are stated because a fuzz result is
+meaningless without one. Each was run with an explicit `-fuzztime` and its
+executions recorded:
+
+| Target | Duration | Executions | Result |
+| --- | --- | --- | --- |
+| `internal/domain.FuzzAssess` | 180s | 1,406,144 | pass, after FINDING-34 |
+| `internal/config.FuzzLoad` | 90s | 539,642 | pass, after FINDING-35 |
+| `internal/feed.FuzzValidate` | 90s | 1,220,575 | pass |
+| `internal/adapters/pihole.FuzzAuthResponse` | 120s | 22,983 | pass. Slower by three orders of magnitude because every execution is a real TLS request through the real client |
+
+**This does not establish that these paths are free of defects.** It
+establishes that none were found in the inputs these runs reached, which is a
+much smaller claim. The one discovered failing input is preserved as a seed at
+`internal/domain/testdata/fuzz/FuzzAssess/d05714e1c72a5771` and runs on every
+ordinary `go test` from now on.
+
+**What this session did NOT do**, stated so that a reader of the commit log
+does not infer otherwise: nothing was pushed, no pull request was opened, no
+branch protection was touched, `main` was not modified, no Docker command was
+run, no `sudo` was used, the live Pi-hole was not contacted, and no production
+secret, certificate, `.env` or deployment resource was read or changed. Every
+network test in the tree talks to a server started by the test itself and
+listening on the loopback interface.
+
 ---
 
 ## 4. Findings raised by this session
@@ -1988,6 +2074,162 @@ against a named image, and a future CI run will record one; whether CI evidence
 question, and this document does not answer it here. What the fix removes is the
 situation where the question could not even be asked.
 
+### 4.12 FINDING-29 … FINDING-37 — the implementation session at `7e11419`
+
+Nine findings. Five are defects in shipped code, two are gaps in what evidence
+existed rather than in behaviour, and two things that looked like findings were
+defects in the tests that found them — recorded here because a reader who
+cannot tell those apart cannot use this document.
+
+#### FINDING-29 — the supplementary group was never related to the file it opens
+
+*Severity: high (deployment correctness).* Carried forward from Phase 1 as
+`§6.4` work-order item 9. `scripts/container-runtime-verify.sh` asserted that
+`group_add` resolved to a single valid non-root gid, and asserted that the
+password file was not world-reachable. It never asked whether that gid was the
+gid that **owns** the file, or whether the group-read bit was set. A deployment
+could therefore satisfy every assertion in the suite — all ninety of them —
+while the container identity had no permission to read its own credential.
+
+Fixed at `bc5ad77`. The verifier derives the container identity from the
+resolved configuration (`user:`, refused unless it is a numeric `uid:gid`) and
+judges from host metadata whether the ordinary UNIX permission check would
+grant that identity a read, through the owner class or the group class. Three
+assumptions between the metadata and the outcome are checked rather than
+assumed: an ACL mask that strips read from the group class, user-namespace
+remapping, and rootless Docker. Each produces a failure or an UNDETERMINED
+verdict; none produces a pass. Path traversal is deliberately not re-checked —
+the daemon resolves the bind source as root, so ancestor modes gate the host,
+not the container.
+
+**This is metadata, and the output says so.** It states that the permission
+check would grant a read. It does not state that a read was performed; no
+container is started. The actual read remains `§6.4` work-order item 5.
+
+*Discrimination.* Seven new regression cases, including a PRE-FIX CONTROL that
+asserts both superseded assertions still report PASS in the very world the new
+one rejects — the group is a valid non-root gid, and the file is not
+world-readable, and the container still cannot read it.
+
+#### FINDING-30 — the workflow's security posture was carried by review alone
+
+*Severity: medium (evidence).* Not a vulnerability: every property held. The
+gap was that nothing would have noticed if one stopped holding. The trigger
+being `pull_request` rather than `pull_request_target`, the read-only
+`permissions` blocks, the SHA-pinned actions, `persist-credentials: false`, the
+absence of any secret reference — all of it rested on §3.4, a human reading the
+file. Each is a one-line edit away from being lost and none would have failed a
+test.
+
+Fixed at `66199c8`: `scripts/workflow-policy-check.sh`, wired into
+`scripts/check.sh` as two gates. It also checks a property review had not
+covered — that no attacker-chosen context (`github.event.pull_request.*`,
+`github.head_ref`) is interpolated into a `run:` block, where `${{ }}` is
+expanded before the shell sees it.
+
+**What it does not close.** It is lexical: it establishes what the workflow
+*says*. That GitHub withholds secrets and issues a read-only token to a fork
+pull request is a fact about GitHub, and observing it needs a run from a fork.
+`§6.4` item 10 is unchanged.
+
+#### FINDING-31 — a same-origin redirect could reach a forbidden endpoint
+
+*Severity: high.* `CheckRedirect` refused cross-origin redirects and capped the
+count. It said nothing about the target **path**. A Pi-hole answering
+`GET /api/info/version` with a `302` to a configuration or DNS-control endpoint
+would have been followed, within the approved origin, to an endpoint the
+contract forbids — and the client would have sent its session id there.
+
+A second defect in the same place: the redirect target's query string was not
+examined. Pi-hole accepts the session id as a `sid` query parameter, and a
+redirect is the only way a URL this client did not build could acquire one.
+Every log that records a URL would then have held a live credential.
+
+Fixed at `0d620de`. The permitted-operation table is enforced in
+`CheckRedirect` as well as in `do`, and any redirect target carrying a query
+string is refused outright.
+
+#### FINDING-32 — `TotalTimeout` did not bound a retried operation
+
+*Severity: medium.* `http.Client.Timeout` bounds one request. `do` gave each
+attempt a fresh `RequestTimeout` context, so the real ceiling for a retried
+read was `attempts × RequestTimeout` plus every backoff — growing with
+`MaxRetries`, and unrelated to the number the configuration calls the total.
+Fixed at `0d620de` by deriving one operation-level deadline in `do`.
+
+#### FINDING-33 — `Retry-After` overflowed into no delay at all
+
+*Severity: low.* Found by the overflow case in a table-driven test, before the
+fuzzer reached it. `time.Duration` is an int64 of nanoseconds, so
+`time.Duration(secs) * time.Second` with a large delta-seconds value overflows
+to a **negative** duration, which then sails past a `> maxRetryDelay` test and
+is used as the wait. A peer answering `429` with `Retry-After:
+9223372036854775807` would have removed the backoff rather than extended it.
+The clamp now happens before the multiplication.
+
+#### FINDING-34 — `domain.Assess` was not idempotent
+
+*Severity: high.* Found by `FuzzAssess` within a second of the target existing,
+on the input `"0.\xd00"`. The input is not valid UTF-8; the IDNA mapper
+replaces the bad byte with U+FFFD and encodes **that**, producing an ACE label
+that the same profile then refuses on the way back in. The canonical form was
+not canonicalisable.
+
+That is not cosmetic. Feed deduplication, the conflicting-record check, and the
+plan digest all rest on the premise that two spellings of one name converge on
+one canonical form. Fixed at `7e11419` in two layers: invalid UTF-8 is rejected
+before anything else looks at the bytes — a domain arriving in a JSON feed is a
+UTF-8 string by definition — and the round trip is then asserted in the code
+rather than assumed, so a future change in the IDNA tables cannot reintroduce
+the defect silently.
+
+#### FINDING-35 — `config.Load` returned a populated `Config` alongside an error
+
+*Severity: medium.* Found by `FuzzLoad`. On a validation failure `Load`
+returned the decoded configuration together with the error. Every caller in the
+tree checks the error, so nothing was broken today — but a caller that logged
+it and carried on would have been acting on settings that failed their own
+checks, with the credential still on disk and the network still available.
+`Load` now fails closed with the zero `Config`, which has no host and no paths
+and cannot authenticate to anything.
+
+#### FINDING-36 — `WithSession` could nest and leak a session seat
+
+*Severity: medium.* A second `Login` overwrote the session id held in memory.
+The overwritten session stayed valid on the server for the remainder of its
+lifetime, occupying one of a finite number of seats, with no way left to
+destroy it. Refused at `0d620de` with `ErrSessionAlreadyActive`.
+
+#### FINDING-37 — a peer echoing a credential back would put it into an error
+
+*Severity: medium.* The peer already knows the password; we sent it. The risk
+is the peer putting it into a message ScamWall then writes to a log or a
+diagnostic capture, without any code here having printed it. `APIError.Message`
+carried Pi-hole's own words verbatim, sanitised for control characters and
+length but not for content.
+
+Fixed at `0d620de` with `config.Secret.Scrub`, applied to the live session id on
+every endpoint and to the password on the authentication error specifically. It
+is deliberately not `Reveal`: `Reveal`'s call sites are counted by a test and
+are the moment a credential goes on the wire; scrubbing is the opposite
+operation and must not compete for that budget.
+
+#### Two things that were NOT findings
+
+Both were reported by a test as a defect in the code and were defects in the
+test. They are written down because the alternative is a reader who sees them
+in a transcript and cannot tell.
+
+* **"status 120 was interpreted as a successful authorisation."** It was not.
+  `net/http`'s *server* treats a 1xx passed to `WriteHeader` as an
+  informational block and then sends its own `200` as the final status, so the
+  client correctly saw a `200` while the test believed it had sent a `120`.
+  `FuzzAuthResponse` now fuzzes final statuses only, and says why.
+* **"fuzzing process hung or terminated unexpectedly"** at roughly 17,000
+  executions. The target was constructing a fresh client, and hence a fresh
+  never-closed `http.Transport`, on every iteration, and exhausted the
+  process's file descriptors. One client for the campaign.
+
 ---
 
 ## 5. Critical Go path review (SW-P1-10)
@@ -2756,6 +2998,296 @@ Item 5 and item 6 are the two that require a live Pi-hole. Both stay pending a
 reviewed operator procedure; neither is started by this session or by the
 Phase 1 closure.
 
+### 6.5 Operator handoff for candidate `7e11419` — **PENDING REVIEW**
+
+Four steps, A to D, in order. **A is the renewal SW-P1-05 has been waiting
+for.** B, C and D are Phase 2 evidence and are *pending operator review and
+execution*: reading them is not authorisation to run them, and none of them may
+be run until the operator has read what each does and decided to.
+
+Common properties, and why each is there:
+
+| Property | Reason |
+| --- | --- |
+| Repository metadata is obtained **as `scamwall`** | The tree is owned by `scamwall`; `git` refuses to operate on it as root without a `safe.directory` exception, and adding one is a permanent widening for a momentary convenience |
+| Docker is used **only** through the operator | The service account has no socket access, deliberately. Nothing here asks for any |
+| Every step stops on failure, and on an unexpected source identity | A verification that continues past a failed precondition is reporting on something other than what it names |
+| No `docker compose up` | `up` starts the whole definition with its restart policy, its logging and its default command in one opaque step. Each step below states exactly what it starts and removes it afterwards |
+| Direct exit statuses are captured | A status read through `tee`, a pipeline or a monitor is the wrapper's, not the command's. FINDING-23 began as exactly this kind of substitution |
+| Temporary storage is `mktemp -d` with mode 0700 | A predictable path under `/tmp`, created by root, is a symlink target for any local account |
+| No predictable root-owned log path | Same reason. Output goes into the private directory created above, and the directory is removed at the end |
+| Existing deployment resources and secrets are preserved | Nothing below removes, rewrites, or reads the content of the real CA or the real password |
+| Results are bound to exact source **and** image identities | An unbound result is a claim about no particular artifact |
+
+**Do not repeat a step whose requirement has not changed.** If A passes and
+nothing in the tree changes afterwards, B, C and D do not re-run A.
+
+---
+
+#### Step 0 — one preamble for every step
+
+Run once, in the shell the steps will use. It is deliberately separate: it
+establishes identity before anything acts on it.
+
+```bash
+# ---- Identity of the source, read AS scamwall -------------------------------
+CANDIDATE=7e1141997cc1f7484144f07c1fb05cde5d39e280
+REPO=/home/scamwall/scamwall
+
+HEAD_SHA="$(sudo -u scamwall git -C "$REPO" rev-parse HEAD)" || exit 1
+[ "$HEAD_SHA" = "$CANDIDATE" ] || {
+  echo "REFUSING: HEAD is $HEAD_SHA, expected $CANDIDATE"; exit 1; }
+
+# A dirty tree makes the result unattributable: the artifact would be built
+# from bytes no commit names.
+DIRTY="$(sudo -u scamwall git -C "$REPO" status --porcelain)" || exit 1
+[ -z "$DIRTY" ] || { echo "REFUSING: working tree is not clean"; printf '%s\n' "$DIRTY"; exit 1; }
+
+# ---- Private, non-predictable working directory -----------------------------
+WORK="$(mktemp -d)" || exit 1
+chmod 700 "$WORK"
+echo "work directory: $WORK"
+
+# ---- Fixture-path overrides must not be exported ----------------------------
+# CI passes throwaway fixture paths through these. If one is still set here it
+# silently redirects a bind SOURCE, and every step below would verify a fixture
+# while reporting the deployment.
+for v in SCAMWALL_CA_FILE SCAMWALL_SECRET_FILE SCAMWALL_CONFIG SCAMWALL_FEED SCAMWALL_IMAGE; do
+  if [ -n "${!v:-}" ]; then echo "REFUSING: $v is set to '${!v}'"; exit 1; fi
+done
+
+# ---- Identity of the real secret, recorded before anything runs -------------
+# The digest is compared at the end, never printed.
+SECRET_BEFORE="$(sudo sha256sum /etc/scamwall/secrets/pihole_app_password | cut -d' ' -f1)" || exit 1
+SECRET_MODE_BEFORE="$(sudo stat -c '%u:%g %a' /etc/scamwall/secrets/pihole_app_password)" || exit 1
+echo "secret metadata before: $SECRET_MODE_BEFORE"
+```
+
+---
+
+#### A — complete the pending Phase 1 deployment verification (SW-P1-05)
+
+This is `§6.1`, re-pointed at `7e11419`, with one addition: the verifier now
+also judges whether the container identity could read the password file
+(FINDING-29). **That assertion has never been evaluated against this
+deployment.** If it fails, the finding is about the deployment, not about the
+verifier, and it takes precedence over closing the row.
+
+```bash
+# ---- What holds the tag now, before the build replaces it -------------------
+PRIOR_IMAGE="$(sudo docker image inspect -f '{{.Id}}' scamwall:local 2>/dev/null || echo none)"
+echo "prior scamwall:local = $PRIOR_IMAGE"
+
+# ---- Build, through the operator's Docker access ----------------------------
+# --no-cache and --pull: a layer cached from an earlier candidate would produce
+# an image that is not this source, and the result would name the wrong commit.
+sudo docker build --no-cache --pull \
+  -f "$REPO/container/Dockerfile" -t scamwall:local "$REPO" 2>&1 | tee "$WORK/build.log"
+BUILD_RC="${PIPESTATUS[0]}"
+echo "BUILD exit=$BUILD_RC"
+[ "$BUILD_RC" -eq 0 ] || exit 1
+
+# ---- The two in-build assertions, from the build's own output ---------------
+grep -q 'enforcement compiled in.*false' "$WORK/build.log" || {
+  echo "REFUSING: the enforcement-absent assertion did not run"; exit 1; }
+grep -qi 'ELF' "$WORK/build.log" || {
+  echo "REFUSING: the ELF linkage assertion did not run"; exit 1; }
+
+# ---- Image identity ---------------------------------------------------------
+IMAGE_ID="$(sudo docker image inspect -f '{{.Id}}' scamwall:local)" || exit 1
+echo "IMAGE_ID=$IMAGE_ID"
+[ "$IMAGE_ID" != "$PRIOR_IMAGE" ] || {
+  echo "REFUSING: the tag still points at the pre-build image; the build did not replace it"; exit 1; }
+
+# ---- Verify, pinned to exactly that image -----------------------------------
+# The verifier uses `docker compose create` and `docker create` only. It starts
+# nothing, so no credential is used and no authenticated command runs.
+sudo env SCAMWALL_IMAGE="$IMAGE_ID" bash "$REPO/scripts/container-runtime-verify.sh" 2>&1 \
+  | tee "$WORK/verify.log"
+VERIFY_RC="${PIPESTATUS[0]}"
+echo "VERIFY exit=$VERIFY_RC"
+```
+
+**Record:** `BUILD exit`, `IMAGE_ID`, `VERIFY exit`, the passed/failed/blocked
+counts, and the line beginning `the application password would be readable by
+the container identity` — that line is the new evidence and is the one that has
+never been produced. It prints ownership metadata (`uid=`, `gid=`, `mode=`) and
+no content.
+
+**Do not proceed to B, C or D if `VERIFY exit` is nonzero.**
+
+---
+
+#### B — unauthenticated destination and TLS checks through the container mapping
+
+**PENDING REVIEW.** What it establishes: that the address behind the `pi.hole`
+pin is reachable *from inside the container's network mapping*, that it
+presents a certificate chaining to the mounted private CA, and that the
+certificate is valid for the name `pi.hole`. What it sends: one `GET
+/api/auth`, which the API contract documents as requiring no credential
+(§4 of `docs/PIHOLE_API_CONTRACT.md`). **No password is read and none is
+transmitted.**
+
+`doctor --offline` is not used here; the point of this step is the network.
+
+```bash
+PROBE_PROJECT="scamwall-probe-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" \
+  run --rm --no-deps scamwall doctor 2>&1 | tee "$WORK/doctor.log"
+DOCTOR_RC="${PIPESTATUS[0]}"
+echo "DOCTOR exit=$DOCTOR_RC"
+
+# Remove the network `run` created for this throwaway project, and nothing else.
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
+echo "probe project removed: $PROBE_PROJECT"
+sudo docker network ls --filter "label=com.docker.compose.project=$PROBE_PROJECT" --format '{{.Name}}'
+```
+
+The last command must print **nothing**. A name there is a resource this step
+created and failed to remove.
+
+**Read the result like this:**
+
+| Line in `doctor.log` | Meaning |
+| --- | --- |
+| `ok  certificate authority  loaded and parsed` | The mounted CA is a real, parseable certificate. Distinct from A, which only checked that the mount exists and is a regular file |
+| `ok  pi-hole connectivity  reachable over TLS; authentication required` | The destination behind the pin answered, the chain verified against the private CA, and the name `pi.hole` matched the certificate. This is the Phase 2 `§6.4` item 6 evidence |
+| `FAIL pi-hole connectivity ... TLS verification failed` | The chain or the hostname did not verify. **Do not proceed to D.** Record the message; it is the diagnosis and contains no credential |
+| `FAIL pi-hole connectivity ... transport error` | Nothing answered at the pinned address, or the pin is wrong |
+| `ok  application password  readable, N bytes` | See C — this line is the C evidence and appears here too |
+
+The negative control for the CA — that a *wrong* CA is refused — is exercised
+by the test suite (`TestTLSFailureWithWrongCA`, `TestHostnameMismatchIsRefused`)
+and is **not** repeated against the live appliance. Pointing the deployment at a
+wrong CA would mean editing the deployment, which this handoff does not do.
+
+---
+
+#### C — verify the secret is readable, without revealing it
+
+**PENDING REVIEW.** This is `§6.4` work-order item 5: the one thing A
+deliberately does not establish. A judged the *metadata*; this performs the
+*read*, under the real container identity, against the real mount.
+
+It is already done by B: the `application password` line in `doctor.log` is
+produced by opening `/run/secrets/pihole_app_password` as uid 65532 with the
+configured supplementary group, and it reports **a byte count and nothing
+else**. If B was run, C needs no separate command — extract the line:
+
+```bash
+grep -E '^(ok|FAIL)[[:space:]]+application password' "$WORK/doctor.log"
+```
+
+If B has not been run, or must not be (the network is the concern), C alone is:
+
+```bash
+PROBE_PROJECT="scamwall-secret-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" \
+  run --rm --no-deps scamwall doctor --offline 2>&1 | tee "$WORK/secret.log"
+echo "DOCTOR-OFFLINE exit=${PIPESTATUS[0]}"
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
+```
+
+`--offline` skips every connectivity check, so this reads the credential and
+touches no network.
+
+**What the two outcomes mean:**
+
+* `ok  application password  readable, N bytes` — the container identity can
+  read the mounted secret. `§6.4` item 5 is satisfied, and FINDING-29's
+  metadata judgement is corroborated by an actual read.
+* `FAIL application password  open secret: ... permission denied` — it cannot.
+  If A passed its readability assertion and this fails, the two disagree, and
+  that disagreement is a finding that outranks either result. The likely causes
+  are the ones A names as assumptions: an ACL, a user-namespace remap, or a
+  rootless daemon.
+
+`N` is a length. A length is not a secret, and it is the most that is ever
+disclosed. Nothing in ScamWall can print the value: `config.Secret` overrides
+every formatting path, and a test counts the two places the plaintext is
+reachable at all.
+
+---
+
+#### D — one reviewed authenticated read-only operation, and session cleanup
+
+**PENDING REVIEW, and the most consequential step here.** It is the first time
+ScamWall authenticates to the household Pi-hole. Do not run it until A, B and C
+have passed and been read.
+
+What it does: `POST /api/auth`, `GET /api/info/version`, `DELETE /api/auth`.
+That is the entire permitted set for a `status` run, it is enforced in code
+before any packet is sent (`docs/PIHOLE_API_CONTRACT.md` §7.1), and none of the
+three changes any Pi-hole state other than ScamWall's own session.
+
+```bash
+PROBE_PROJECT="scamwall-status-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" \
+  run --rm --no-deps scamwall status 2>&1 | tee "$WORK/status.log"
+STATUS_RC="${PIPESTATUS[0]}"
+echo "STATUS exit=$STATUS_RC"
+sudo docker compose -p "$PROBE_PROJECT" \
+  --env-file "$REPO/deploy/compose/.env" \
+  -f "$REPO/deploy/compose/compose.yaml" down --remove-orphans
+```
+
+**Verify session cleanup, from Pi-hole's own view.** The client destroys its
+session on every exit path, but that is a claim about the client; the appliance
+is the authority. In the Pi-hole web interface, under *Settings → All settings →
+Web interface / API*, the current sessions list must not contain a session
+attributed to the ScamWall user agent after this run. Record what it shows.
+
+`status.log` must end with `session closed`. If it does not, and `STATUS exit`
+is 0, that is a contradiction and a finding.
+
+**Do not** run `sync` in this step even with `--dry-run`. It performs the same
+three network operations *and* reads and reports the feed; keeping D to the
+smallest authenticated operation means a failure has one candidate cause.
+
+---
+
+#### Step Z — close out, whichever steps were run
+
+```bash
+# The deployment's secret is exactly as it was.
+SECRET_AFTER="$(sudo sha256sum /etc/scamwall/secrets/pihole_app_password | cut -d' ' -f1)"
+SECRET_MODE_AFTER="$(sudo stat -c '%u:%g %a' /etc/scamwall/secrets/pihole_app_password)"
+[ "$SECRET_AFTER" = "$SECRET_BEFORE" ] && echo "secret content unchanged" || echo "ALERT: secret content CHANGED"
+[ "$SECRET_MODE_AFTER" = "$SECRET_MODE_BEFORE" ] && echo "secret metadata unchanged" || echo "ALERT: secret metadata CHANGED"
+
+# Nothing of these invocations is left behind.
+sudo docker ps -a --filter 'name=scamwall-probe-' --filter 'name=scamwall-secret-' --filter 'name=scamwall-status-' --format '{{.Names}}'
+sudo docker network ls --format '{{.Name}}' | grep -E '^scamwall-(probe|secret|status)-' || echo "no probe networks remain"
+
+# The working directory, with every log in it, is removed.
+rm -rf -- "$WORK"
+```
+
+The two `docker ps`/`network ls` commands must print nothing (or "no probe
+networks remain"). Copy the recorded values out of `$WORK` before the last line
+if they are to be kept.
+
+---
+
+#### What this handoff does **not** authorise
+
+Pushing, merging, opening or merging a pull request, tagging, releasing,
+publishing an image, changing any repository setting, editing the deployment,
+running `sync` against the live appliance, or enabling enforcement. Enforcement
+is not compiled into this build, so the last of those is not merely
+unauthorised — there is no binary that can do it.
+
 ---
 
 ## 7. Evidence status, item by item
@@ -2783,6 +3315,28 @@ evidence about `b6b1769`.
 | The workflow runs on GitHub and runs the same gate list as the local suite | Runs 34036997074 (`2a18874`) and **34047025567 (`72bc84c`, passing)**. §3.8, §3.12 | **Yes.** The workflow file as it now stands ran and passed; `b6e70f4` does not touch it |
 | The image builds, and its in-build assertions pass, on an unrelated host | CI `docker build` at `2a18874` (§3.8) and at **`72bc84c`** (§3.12), the latter in a run that passed end to end | **Yes, at `72bc84c`.** `b6e70f4` changes no build input, so it applies to this tree |
 
+**Established at `7e11419`, by local evidence only.** Every claim in this block
+rests on tests and gates run on this host, as `scamwall`, with no daemon and no
+network beyond loopback. None of it has been through a hosted run, and the
+published commit is still `72bc84c`.
+
+| Claim | Basis |
+| --- | --- |
+| The client cannot issue a request outside the permitted set, and cannot be redirected to one | `PermittedOperations` enforced in `do` before the URL is built, and again in `CheckRedirect`. Nine forbidden (method, path) pairs refused against an origin nothing is listening on, so a refusal that came from the network rather than from the table would show as a dial error. §3.14, `internal/adapters/pihole/allowlist_internal_test.go` |
+| A same-origin redirect to a forbidden path, or to a URL carrying a query string, is refused | Two tests against the local fake, each asserting the forbidden request was never recorded by the server. FINDING-31 |
+| One deadline bounds a retried operation, retries and backoff included | `TestTotalTimeoutBoundsTheWholeOperationIncludingRetries`. FINDING-32 |
+| A server's `Retry-After` is honoured and capped | `TestRateLimitRespectsRetryAfter`, plus an eleven-case table over both RFC 9110 forms including the overflow that was FINDING-33 |
+| A rejected credential produces exactly one authentication attempt | Asserted at the adapter and again end to end through the CLI |
+| No credential or session id reaches stdout, stderr or the audit log, for any of the six commands | `TestCredentialsNeverReachAnyStream`, with both values generated per run so a match cannot be a coincidence |
+| A peer echoing a credential back cannot get it into an error | `TestAServerEchoingTheCredentialDoesNotLeakItIntoAnError` and its session-id counterpart. FINDING-37 |
+| The approved read-only workflow performs exactly three network operations, in order | `TestStatusPerformsExactlyTheApprovedSequence`, comparing an ordered list — a set comparison would accept a logout that happened first |
+| An invalid configuration, or a missing credential, fails with ZERO network calls | Four configuration cases plus a missing-secret case, each asserting the fake server recorded nothing |
+| Enforcement is refused with a server reachable | `TestEnforcementIsRefusedEvenWithAReachableServer`, so the refusal does not depend on the network being down |
+| A syntactically valid mixed-script domain no longer destroys a signed feed, and does not thereby become eligible for blocking | `TestOneSuspiciousEntryNoLongerDestroysTheFeed` and `TestReviewEntriesAreWithheldWithoutBeingHidden`. SW-P3-05 |
+| Unicode, a non-Latin script, and punycode alone change no blocking disposition | `TestUnicodeAloneIsNeverEvidence` |
+| Domain normalisation is idempotent, deterministic, and bounded | Eight invariants over 1,406,144 fuzz executions, after FINDING-34 |
+| The workflow declares the posture SW-P1-12 describes | `scripts/workflow-policy-check.sh`, thirteen negative cases and one positive. **Lexical only** — see the row below |
+
 **Established at `b6b1769`:**
 
 | Claim | Basis |
@@ -2805,7 +3359,12 @@ evidence about `b6b1769`.
 | `bind.create_host_path: false` is honoured by the runner's Compose | **Not established, and known to be unknown.** The runner has Compose v2.38.2, which omits the field from rendered output, so it cannot be observed there; the CI fixtures existed, so nothing would have been auto-created either way. The load-bearing defence against FINDING-25 is the verifier's host-side regular-file check, which does not depend on Compose and passed on the runner. §4.11 |
 | Why the CI runtime verification failed | **Not established, and not recoverable from that run.** The run has no artifacts and its log holds exactly the twenty-five lines `head -25` kept (§3.8). The precondition for the predicted cause IS now established — under runner conditions the definition resolves two bind sources that cannot exist there, and `docker compose config` exits 0 anyway (§3.9) — but a demonstrated precondition is not a demonstrated mechanism, and this row stays open until a run says so itself |
 | A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported — FINDING-27 — was diagnosed and fixed from that log alone, and the next run passed |
-| A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4; demonstrating it needs a fork PR, which even a successful branch run does not provide. §6.3 |
+| A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4, and now also asserted *lexically* by `scripts/workflow-policy-check.sh` (FINDING-30) — which establishes what the workflow SAYS, not what GitHub DOES. Demonstrating the latter needs a pull request from a fork. §6.3, §6.4 item 10 |
+| The gate suite at `7e11419` passes on a hosted runner | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has 26 gates, a changed workflow, and changed Go source. It needs its own run after an approved push, and the earlier run must not be relabelled as covering it |
+| An image built from `7e11419` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal |
+| The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C |
+| The domain policy separation is accepted | **Not claimed.** SW-P3-05 is implemented and locally tested at `7e11419`; its acceptance belongs to Phase 3, which has not begun |
+| The four fuzz targets show these paths are free of defects | **Not established, and not claimed.** Four bounded campaigns found two real defects and then stopped finding things. That is evidence about the inputs those runs reached and about nothing else. Durations and execution counts are recorded in §3.14 precisely so the claim cannot be inflated later |
 | The CI fixtures never enter an image or a log | **Established by construction and by test, and the step has now run.** `scripts/tests/compose-fixture-test.sh` asserts the fixture paths lie outside the resolved build context and that the password fixture is not world-reachable; run 34045148578 created them 0600 in a 0700 directory, echoed only `ls -l` metadata, and removed them in a step that re-tests before reporting success. §3.11 |
 | The uploaded gate diagnostics contain nothing credential-shaped | **Established for eleven decoy shapes, on the retained artifact as well as the log** (§4.9), and one artifact has now actually been produced and uploaded (792 bytes, §3.11). That is a deny-by-pattern filter, so it establishes what those patterns catch and nothing wider. A credential of an unanticipated shape would pass through it |
 | The container identity can read the mounted secret | **Not established, and `aa49797` does not change it.** The verifier now checks that the password file is not readable by every account on the HOST (FINDING-26) — the opposite question. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read, and no container has been started |

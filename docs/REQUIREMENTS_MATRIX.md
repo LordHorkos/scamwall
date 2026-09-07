@@ -63,6 +63,7 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Previous evidence commit | `b6b1769` — *fix(verify): check list processing, name scope, mounts, numbers and fields*. `ef40156`/`aa49797` changed `scripts/*.sh`, `compose.yaml` and the workflow, which demotes the rows §5 names; the script-bound rows were re-run and renewed at `aa49797`, the image-bound ones were not and cannot be from the service account |
 | Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. `b6b1769` changed `scripts/*.sh`, which demotes the rows §5 names; those were re-run and renewed |
 | Superseded candidate image | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier was ever run against this image**, and it predates all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. Retained as an identity on record for ID stability; it is not evidence and must not be deployed |
+| **Working candidate** | `7e1141997cc1f7484144f07c1fb05cde5d39e280`. Implementation and local verification only: not pushed, not built, not deployed. It changes Go source, `scripts/*.sh` and `.github/workflows/gates.yml`, so §5 demotes the rows named in §3 below. `docs/VERIFICATION.md` §3.14 |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -93,7 +94,7 @@ visible rather than silently absent.
 | SW-P1-09 | An independent secret detector runs alongside the project-specific scanner | VERIFIED |
 | SW-P1-10 | Critical Go paths are reviewed and the review is recorded | VERIFIED |
 | SW-P1-11 | govulncheck results are handled by content, not by exit status alone | VERIFIED |
-| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | VERIFIED |
+| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | IMPLEMENTED-UNVERIFIED |
 | SW-P1-13 | Pre-existing functional, security, race, and offline-plan tests are preserved and rerun | VERIFIED |
 | SW-P1-14 | The gate suite is deterministic: no gate passes or fails at random | VERIFIED |
 | SW-P1-15 | The CLI's read-only guarantee is covered by a test | VERIFIED |
@@ -101,9 +102,29 @@ visible rather than silently absent.
 | SW-P1-17 | Every resource is attributed to this invocation before it is deleted; pre-existing resources are preserved | VERIFIED |
 | SW-P1-18 | One resolved Compose configuration drives creation, listing and expectation | VERIFIED |
 | SW-P1-19 | The deployment's mounts are asserted exactly: presence, type, source, mode, no extras | VERIFIED |
-| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | VERIFIED |
+| SW-P1-20 | Static linkage is proven by checked ELF inspection of the built artifact | IMPLEMENTED-UNVERIFIED |
 
-**Phase 1 is not complete.** Nineteen of twenty requirements are verified at
+**Phase 1 is not complete, and at `7e11419` it is further from complete than it
+was at `72bc84c`.** That is the renewal rule working, not a regression. Nineteen
+of twenty requirements were verified at `72bc84c`; the working candidate changes
+Go source, `scripts/*.sh` and the workflow, so §5 demotes three rows rather than
+one. Restoring them needs an operator build and a hosted run — in that order,
+and neither can be performed from this account.
+
+| Row | State at `7e11419` | Next step |
+| --- | --- | --- |
+| SW-P1-12 | **IMPLEMENTED-UNVERIFIED** | Demoted by §5: `.github/workflows/gates.yml` changed at `bc5ad77` (fixture ownership) and `scripts/check.sh` at `66199c8`/`3cc7c5e`. The gate list is now **26**, not the 24 run 34047025567 executed, so that run cannot be read as covering this tree. It also needs the property-by-property re-review §5 requires for a workflow change — begun, and partly mechanised: `scripts/workflow-policy-check.sh` now asserts seven of the properties on every run (`docs/VERIFICATION.md` FINDING-30). Renewal: an approved push, then a hosted run |
+| SW-P1-20 | **IMPLEMENTED-UNVERIFIED** | Demoted by §5 on both halves. The commit half lapsed because the Go source changed, so the executable this row is about is not the one image `sha256:d7c44949…` contains; the image half lapses with it. The controls (§3.6) are untouched and pass. Renewal: the assertion must be observed inside a real `docker build` of this source — `docs/VERIFICATION.md` §6.5 step A produces exactly that, or a hosted run does |
+| SW-P1-05 | IMPLEMENTED-UNVERIFIED | Still open, and its renewal now has **wider scope**: `bc5ad77` adds assertions relating the supplementary group to the password file's ownership, the container identity's ability to read it, and the daemon's user-namespace posture. None has ever been evaluated against this deployment. Renewal is an operator action: `docs/VERIFICATION.md` §6.5 step A |
+
+**Do not relabel run 34047025567 as covering `7e11419`.** It covers `72bc84c`:
+24 gates, a different workflow file, and different Go source. The new candidate
+needs its own hosted run after a subsequently approved push, and until then the
+honest statement is that these three rows are implemented and unverified.
+
+**Where the rows stood at `72bc84c`, retained because a row that was closed and
+then demoted is a different thing from one that was never closed.** Nineteen of
+twenty requirements were verified at
 `72bc84c`. No requirement is BLOCKED any more — SW-P1-12 closed on a passing
 hosted run, and SW-P1-20 closed on the build inside it — and one remains
 demoted, awaiting an operator action this account cannot perform:
@@ -160,7 +181,9 @@ carried on assumption:
 | Diagnosability of a failed CI gate | **Fixed at `ef40156`, and demonstrated locally.** A failing gate now reports its reason, verdict and cleanup result before any length limit, states any truncation, and preserves the omitted material in a sanitized artifact CI uploads. 62 regression cases, three PRE-FIX CONTROLS, and an end-to-end demonstration through `check.sh` with an injected failing gate — `docs/VERIFICATION.md` §4.9 and §3.10. **Not yet observed on a runner**: the `::group::` markers and the artifact upload have never been exercised by GitHub |
 | Why the `2a18874` CI run failed | **Not established, and unrecoverable from that run.** It has no artifacts and its log holds exactly the twenty-five lines the old `head -25` kept. The *precondition* for the predicted cause is now established by resolving the real definition under runner conditions (`docs/VERIFICATION.md` §3.9), but a precondition is not a mechanism |
 | CI's ability to run the container gates at all | **Addressed at `aa49797`, unobserved.** The workflow now creates disposable fixtures under `RUNNER_TEMP`, outside the build context, 0700/0600, and removes them in a step that fails the job if the removal did not take. No CI-specific assertion was weakened or skipped. `docs/VERIFICATION.md` §3.4 and §6.3 |
-| Fork-pull-request secret handling | **Not demonstrated**, and not demonstrable by a branch push. Reviewed only. It is registered in `docs/VERIFICATION.md` §7 so it is not lost when SW-P1-12 closes |
+| Fork-pull-request secret handling | **Not demonstrated**, and not demonstrable by a branch push. Reviewed in `docs/VERIFICATION.md` §3.4, and since `66199c8` also asserted *lexically* on every gate run by `scripts/workflow-policy-check.sh` — which establishes what the workflow says, not what GitHub does. Registered in `docs/VERIFICATION.md` §6.4 item 10 so it is not lost when SW-P1-12 closes again |
+| Evidence renewal at `7e11419` | **Local half done; hosted and image halves outstanding.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 and SW-P1-19 on any `scripts/*.sh` change, and every Go-source row plus SW-P1-13 on a Go change. The whole local suite was re-run on the final clean committed tree — 24 passed, 0 failed, 2 BLOCKED, `CHECK exit=1` — and those rows rest on that transcript (`docs/VERIFICATION.md` §3.14). SW-P1-12 and SW-P1-20 cannot be renewed from this account and are demoted rather than carried |
+| The API contract, enforced rather than described | **New at `0d620de`, locally evidenced.** A permitted-operation table is checked before any network activity and again on every redirect; the total deadline, `Retry-After` handling, session nesting and credential scrubbing are covered by tests against a local fake. `docs/PIHOLE_API_CONTRACT.md` §7 states the permitted set and, in its own subsection, that none of this is evidence about a real Pi-hole |
 | Runtime password access, live authentication, destination connectivity and TLS verification through the `pi.hole` pin | **Not established, and out of Phase 1 scope.** Phase 2 — SW-P2-02 and SW-P2-04. `docs/VERIFICATION.md` §6.2 |
 
 ### SW-P1-01 — Runtime verification is built from checked operations
@@ -510,7 +533,40 @@ amended: option B in `docs/VERIFICATION.md` §6.3 proposed relaxing it to "every
 gate that could run passed", which would have permanently exempted the container
 gates from the only independent host available. Making CI able to satisfy the
 criterion was chosen over making the criterion able to accept CI.
-**Status.** **VERIFIED** at `72bc84c` — run 34047025567, 24 passed / 0 failed /
+**Status at `7e11419`.** **IMPLEMENTED-UNVERIFIED.** Demoted by §5: the
+workflow file and `scripts/check.sh` both changed, and the gate list is now 26
+rather than the 24 run 34047025567 executed. Renewal is a hosted run of *this*
+tree after an approved push. `docs/VERIFICATION.md` §3.14.
+
+**A mismatch inside this row, recorded rather than resolved by moving the
+requirement.** Its *Intended behavior* says "no secret exposure to untrusted
+contributions — meaning fork pull requests get no repository secrets and no
+elevated token". Its *Acceptance* says only that a hosted run exists, passes,
+and matches the local gate list. Those are not the same thing, and the second
+does not entail the first: run 34047025567 satisfied the acceptance criterion
+in full while demonstrating nothing whatever about fork pull requests.
+
+The disposition, stated explicitly because the tempting move is the wrong one:
+
+* The acceptance criterion **is not reopened**. It was met on its own terms at
+  `72bc84c`, and it was met without being relaxed — `docs/VERIFICATION.md` §6.3
+  records that a proposal to weaken it was rejected. Reopening a criterion that
+  was satisfied would make the record less trustworthy, not more.
+* The fork-PR property **stays assigned to Phase 2** (`docs/VERIFICATION.md`
+  §6.4 item 10), where it was assigned before this session. It is not being
+  moved to a later phase in order to close Phase 1: it was already there, and
+  it cannot be demonstrated without a pull request from a fork — which is not
+  an artefact of scheduling but of what GitHub will and will not do for a
+  branch push.
+* What *was* closable was closed now. `scripts/workflow-policy-check.sh`
+  (`docs/VERIFICATION.md` FINDING-30) turns seven properties from "reviewed"
+  into "asserted on every gate run", including one review had not covered:
+  that no attacker-chosen context reaches a `run:` block. That removes the risk
+  of the declaration being silently changed. It does not, and cannot, establish
+  what GitHub does at run time.
+
+**Superseded status, retained.**
+ **VERIFIED** at `72bc84c` — run 34047025567, 24 passed / 0 failed /
 0 BLOCKED, `RESULT: all required gates passed`, gate list identical to the local
 suite's in content and order. `docs/VERIFICATION.md` §3.12.
 
@@ -904,6 +960,22 @@ compatibility assumptions are documented.
 baseline (`internal/adapters/pihole/`) and tested against a fake HTTPS server;
 what is missing is evidence against anything real.
 
+*Implementation advanced at `7e11419`, without acceptance.* `0d620de` closes
+four gaps these rows depend on and that no test previously covered: the
+permitted set of API operations is enforced in code before any network activity
+and again on every redirect target (FINDING-31); one deadline bounds a retried
+operation rather than each attempt separately (FINDING-32); `Retry-After` is
+honoured and capped (FINDING-33); and a session cannot be nested, which
+previously leaked a seat on the appliance (FINDING-36). `2a0af8f` adds
+end-to-end coverage of the CLI against a local fake, asserting the exact ordered
+network sequence, that an invalid configuration fails with zero network calls,
+and that no credential reaches any stream.
+
+**None of that is acceptance.** Phase 2 opens when SW-P1-05 closes, and every
+row here still needs evidence against something real. `docs/VERIFICATION.md`
+§6.5 steps B, C and D are the procedures that would produce it, and they are
+pending operator review.
+
 *Carried into this phase from the `b6b1769` runtime verification.* The verified
 run resolved the API destination through the compose default mapping,
 `pi.hole:host-gateway`, with `PIHOLE_HOST_IP` unset. What that established is
@@ -942,7 +1014,7 @@ here as Phase 2 scope so that neither is mistaken for something Phase 1 closed.
 | SW-P3-02 | Key provisioning, rotation, revocation, sequence/freshness, expiry, and replay protection | MISSING |
 | SW-P3-03 | An established signed-update design (e.g. TUF) is evaluated before any custom lifecycle protocol; the decision and its scope are recorded | MISSING |
 | SW-P3-04 | Publisher provenance, review, withdrawal, and signing-key separation | MISSING |
-| SW-P3-05 | Domain **validity** is separated from **maliciousness** classification; mixed scripts or Unicode alone never establish maliciousness | MISSING |
+| SW-P3-05 | Domain **validity** is separated from **maliciousness** classification; mixed scripts or Unicode alone never establish maliciousness | IMPLEMENTED-UNVERIFIED |
 | SW-P3-06 | Exact-domain/subdomain semantics, duplicates, source conflicts, confidence rules, expiry, user exceptions, reason codes | MISSING |
 | SW-P3-07 | Defined behavior for unavailable, stale, revoked, or invalid feeds, including effect on existing state | MISSING |
 | SW-P3-08 | Bounded input processing; fuzzing of critical parsers and normalization | MISSING |
@@ -956,17 +1028,53 @@ precedence is explicit and deterministic; state survives tested interruption
 without silently accepting corruption; documentation states that signing
 establishes **authenticity only** and never implies detection accuracy.
 
-*Known gap carried into this phase.* `internal/domain/domain.go` currently
-rejects mixed-script labels inside `Normalize`, and a rejected record makes the
-whole feed fail to load. That conflates "this name is not a valid domain" with
-"this name is suspicious", which SW-P3-05 forbids. The homograph signal must
-become a classification input with its own reason code, not a validity verdict.
+*Known gap, and its resolution at `7e11419`.* Until that commit,
+`internal/domain/domain.go` rejected mixed-script labels inside `Normalize`,
+and a rejected record made the whole feed fail to load. That conflated "this
+name is not a valid domain" with "this name is suspicious", which SW-P3-05
+forbids — and the blast radius was the sharper half of the defect: one
+suspicious-looking entry destroyed every unrelated indicator in a signed feed.
 
-Writing this paragraph does not fix it. SW-P3-05 stays **MISSING**, and it is
-deliberately not restated as a Phase 1 item or closed by documentation: the
-conflation is in `internal/domain/domain.go`, and only a code change removes
-it. Recording a defect and resolving it are different acts, and this matrix
-distinguishes them everywhere.
+The conflation is removed, in both directions:
+
+| Question | Where it is answered now |
+| --- | --- |
+| Is this a syntactically valid domain, and what is its canonical form? | `domain.Normalize`. Its errors are about syntax only; `ErrMixedScript` no longer exists |
+| Is there anything notable about the name? | `domain.Assess` returns observations — `non_ascii`, `punycode_input`, `single_non_latin_script`, `mixed_script` — carrying no judgement |
+| Is the domain malicious? | Nothing in the domain package answers this, and its package comment says so |
+| Is it eligible for a proposed block? | `policy.Decide`, from the feed's own claims first and the name's signals second |
+
+The disposition is three-valued, not two. A mixed-script name the feed asserts
+with high confidence is **neither proposed nor excluded**: it is held for
+review, visible, with the signals that put it there and a stable reason code.
+Excluding on a signal would silently withdraw protection from entries the
+publisher was confident about; proposing it would treat a signal as evidence.
+Unicode, a non-Latin script and punycode alone change no disposition, and a
+test asserts each of them individually.
+
+Plan format `scamwall-plan-v1` becomes `v2`: the review section is inside the
+digest, because a plan that withheld an entry and one that never saw it are
+different plans and an operator approving the first must not thereby authorise
+the second. Every digest changes, deliberately. **No signing fixture was
+regenerated** — none needed to be, and none may be regenerated to make a test
+pass.
+
+**SW-P3-05 is `IMPLEMENTED-UNVERIFIED`, not VERIFIED.** The code exists and is
+covered by regressions for Cyrillic and Greek lookalikes in four positions,
+legitimate Japanese Han+kana combinations, ordinary IDNs in five scripts,
+invalid encodings and disallowed input, duplicate and conflicting canonical
+forms through the feed validator, stable signal and reason codes, and
+determinism over repeated runs. Its **acceptance** is a Phase 3 activity and
+Phase 3 has not begun; implementing a requirement early does not accelerate the
+phase that accepts it. `docs/VERIFICATION.md` §3.14.
+
+*Bounded parsing and fuzzing (SW-P3-08).* Four native fuzz targets now exist —
+domain normalisation, configuration decoding, feed decoding, and the
+authentication response — and their first runs found two real defects
+(`docs/VERIFICATION.md` FINDING-34, FINDING-35). The row stays **MISSING**: it
+requires fuzzing of *critical parsers and normalisation* as an accepted,
+sustained practice with recorded corpora and durations, and four bounded
+campaigns on one afternoon is a start, not that.
 
 *Plan binding gap.* `policy.Plan` at the baseline binds format version, feed
 ID, manifest version, entries, and exclusions. SW-P3-10 additionally requires
@@ -1077,6 +1185,13 @@ touches it:
 | Feed schema or trust key | SW-P3-01 … SW-P3-04, SW-P3-07 |
 | Detection behavior | Every Phase 4 row |
 
+Applied to `7e11419`, that table demotes SW-P1-12 (workflow and `check.sh`
+changed), SW-P1-20 (Go source changed, so the executable the row is about is
+not the one the verified image contains), and every Go-source row plus
+SW-P1-13 — the last of which the local re-run then renews. SW-P1-05 was already
+demoted and its renewal scope has widened. §3 above states each one and its
+next step.
+
 The `scripts/*.sh` row is written to include test scripts and future ones on
 purpose. `ef40156` added `scripts/gate-diagnostics.sh` and
 `scripts/tests/gate-diagnostics-test.sh`; `aa49797` added
@@ -1102,6 +1217,11 @@ an image ID *and* to a commit. Both must hold. At `b6e70f4`:
 | --- | --- | --- |
 | SW-P1-20 | image `sha256:d7c44949…`, commit `72bc84c` | **Yes.** `b6e70f4` changes documentation only, so the commit half is intact; the image half is the artifact the assertion ran against |
 | SW-P1-05 | image `sha256:b95cc07c…`, commit `b6b1769` | **No.** The commit half lapsed at `aa49797`, which changed the verifier and `compose.yaml` — so the row is `IMPLEMENTED-UNVERIFIED` in §3 rather than carried forward on the image alone |
+
+At `7e11419` neither holds. SW-P1-20's commit half lapsed when the Go source
+changed, and no image has been built from this source on any host, so both
+identities are absent rather than merely stale. A rebuild is the only route,
+and `docs/VERIFICATION.md` §6.5 step A is that rebuild.
 
 A rebuild from the same commit produces an image that has not been verified,
 however confident one is that it is equivalent — reproducibility is a property
