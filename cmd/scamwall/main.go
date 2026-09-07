@@ -90,6 +90,8 @@ Usage:
 Commands:
   version         Print build and enforcement information
   doctor          Check configuration, trust material and connectivity
+                    --offline        skip every connectivity check
+                    --no-credential  do not open the application password
   status          Authenticate, read Pi-hole version, log out
   validate-feed   Verify and validate the configured signed feed
   plan            Compute the proposed blocking plan (offline)
@@ -142,16 +144,40 @@ func cmdVersion(w *os.File, args []string) int {
 	return exitOK
 }
 
+// checkState is the outcome of one doctor check.
+//
+// Three states, not two. A check that was deliberately not performed is not a
+// pass: reporting it as one would let `doctor --no-credential` be read as
+// evidence that the credential is readable, which is the exact opposite of
+// what that flag establishes.
+type checkState int
+
+const (
+	checkOK checkState = iota
+	checkFailed
+	checkSkipped
+)
+
 // check is one doctor result line.
 type check struct {
 	name   string
-	ok     bool
+	state  checkState
 	detail string
 }
 
 func cmdDoctor(ctx context.Context, w *os.File, log *audit.Logger, args []string) int {
 	fs, cfgPath := newFlagSet("doctor", w)
 	skipNet := fs.Bool("offline", false, "skip connectivity checks")
+	// --no-credential exists for one operator step: a connectivity and TLS
+	// probe that must be provably credential-free. Without it there is no way
+	// to run doctor at all without opening /run/secrets/pihole_app_password,
+	// because the secret check is unconditional — so a procedure claiming "no
+	// password is read" while running plain `doctor` was contradicted by
+	// doctor's own output line.
+	//
+	// It skips the read entirely. It does not weaken any other check, and it
+	// makes no claim about the credential in either direction.
+	noSecret := fs.Bool("no-credential", false, "do not open the application password; make no claim about it")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -159,11 +185,14 @@ func cmdDoctor(ctx context.Context, w *os.File, log *audit.Logger, args []string
 	var checks []check
 	add := func(name string, err error, okDetail string) bool {
 		if err != nil {
-			checks = append(checks, check{name, false, err.Error()})
+			checks = append(checks, check{name, checkFailed, err.Error()})
 			return false
 		}
-		checks = append(checks, check{name, true, okDetail})
+		checks = append(checks, check{name, checkOK, okDetail})
 		return true
+	}
+	skip := func(name, detail string) {
+		checks = append(checks, check{name, checkSkipped, detail})
 	}
 
 	cfg, err := loadConfig(*cfgPath)
@@ -179,10 +208,19 @@ func cmdDoctor(ctx context.Context, w *os.File, log *audit.Logger, args []string
 	}(), "not compiled in")
 
 	// The secret is checked for presence and shape only. Its content is never
-	// read into a report, and its length is the most that is ever disclosed.
-	secret, secErr := config.LoadSecretFile(cfg.Pihole.SecretPath)
-	if add("application password", secErr, fmt.Sprintf("readable, %d bytes", secret.Len())) {
-		defer secret.Destroy()
+	// read into a report.
+	//
+	// The byte count this line used to carry has been removed. LoadSecretFile
+	// already refuses an empty credential, so the length diagnosed nothing
+	// that the pass/fail result did not, and a length is still a fact about a
+	// credential disclosed into an operator log.
+	if *noSecret {
+		skip("application password", "NOT READ (--no-credential): this run makes no claim about the credential")
+	} else {
+		secret, secErr := config.LoadSecretFile(cfg.Pihole.SecretPath)
+		if add("application password", secErr, "readable") {
+			defer secret.Destroy()
+		}
 	}
 
 	client, cliErr := pihole.New(cfg, log)
@@ -204,18 +242,26 @@ func cmdDoctor(ctx context.Context, w *os.File, log *audit.Logger, args []string
 }
 
 func report(w *os.File, checks []check) int {
-	failed := 0
+	failed, skipped := 0, 0
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, c := range checks {
 		mark := "ok"
-		if !c.ok {
+		switch c.state {
+		case checkFailed:
 			mark = "FAIL"
 			failed++
+		case checkSkipped:
+			mark = "SKIP"
+			skipped++
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", mark, c.name, c.detail)
 	}
 	_ = tw.Flush()
-	fmt.Fprintf(w, "\n%d checks, %d failed\n", len(checks), failed)
+	// Skipped checks are counted separately and are NOT folded into the passed
+	// total. A summary that said "5 checks, 0 failed" for a run in which one
+	// check never happened would be the false-pass shape this repository keeps
+	// finding.
+	fmt.Fprintf(w, "\n%d checks, %d failed, %d skipped\n", len(checks), failed, skipped)
 	if failed > 0 {
 		return exitFailure
 	}
@@ -259,8 +305,39 @@ func cmdStatus(ctx context.Context, w *os.File, log *audit.Logger, args []string
 	fmt.Fprintf(tw, "web\t%s\t%s\t%s\n", info.Web.LocalVersion, info.Web.LocalBranch, info.Web.RemoteVersion)
 	fmt.Fprintf(tw, "ftl\t%s\t%s\t%s\n", info.FTL.LocalVersion, info.FTL.LocalBranch, info.FTL.RemoteVersion)
 	_ = tw.Flush()
-	fmt.Fprintln(w, "\nsession closed")
-	return exitOK
+	return reportTeardown(w, client.SessionTeardown())
+}
+
+// reportTeardown states what actually became of the session and returns the
+// exit status that outcome deserves.
+//
+// This replaced an unconditional "session closed" line. WithSession attempts
+// the logout in a deferred call and deliberately does not let a logout failure
+// mask the caller's error, so a run whose logout failed still returned nil —
+// and the command printed a success line for a cleanup it had not observed
+// succeed. The three outcomes are kept distinct because they are three
+// different claims, and none of them is "the appliance has confirmed the
+// session is gone", which this client cannot establish at all: the endpoint
+// that would list sessions is outside the permitted set.
+func reportTeardown(w *os.File, t pihole.Teardown) int {
+	switch t {
+	case pihole.TeardownAccepted:
+		fmt.Fprintln(w, "\nsession logout ACCEPTED by Pi-hole")
+		fmt.Fprintln(w, "  This records that the DELETE was accepted. It is not independent")
+		fmt.Fprintln(w, "  confirmation that the appliance's session table no longer holds it.")
+		return exitOK
+	case pihole.TeardownAlreadyAbsent:
+		fmt.Fprintln(w, "\nsession ALREADY ABSENT on Pi-hole (nothing was left to destroy)")
+		return exitOK
+	case pihole.TeardownFailed:
+		fmt.Fprintln(w, "\nWARNING: session logout FAILED.")
+		fmt.Fprintln(w, "  The session id has been discarded locally, so nothing can retry it.")
+		fmt.Fprintln(w, "  A session may remain valid on the appliance until it expires.")
+		return exitFailure
+	default:
+		fmt.Fprintln(w, "\nWARNING: no session logout was attempted.")
+		return exitFailure
+	}
 }
 
 func loadFeed(cfg config.Config) (*feed.Validated, error) {
@@ -410,7 +487,10 @@ func cmdSync(ctx context.Context, w *os.File, log *audit.Logger, args []string) 
 
 	fmt.Fprintln(w, "\nDRY RUN: nothing was submitted to Pi-hole.")
 	fmt.Fprintln(w, "No blocking change was made. Enforcement is not compiled into this build.")
-	return exitOK
+	// Same reason as status: the session this command created is its own to
+	// clean up, and a failed cleanup is part of the verdict rather than a line
+	// in an audit stream nobody reads.
+	return reportTeardown(w, client.SessionTeardown())
 }
 
 func fail(w *os.File, err error) int {

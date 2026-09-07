@@ -147,12 +147,19 @@ USER 65532:65532
 # implying to a reader that liveness is being monitored. That is worse than
 # having none.
 #
-# `scamwall doctor --offline` remains the right pre-flight check: it validates
-# configuration, the CA, the feed signature, and the absence of enforcement,
-# without touching the network and without a credential. Run it as its own
-# invocation, where its exit status is actually observed:
+# `scamwall doctor` remains the right pre-flight check: it validates
+# configuration, the CA, the feed signature, and the absence of enforcement.
+# Run it as its own invocation, where its exit status is actually observed.
 #
+# The two flags are independent and neither implies the other. `--offline`
+# skips the network and STILL OPENS the mounted password — the claim that it
+# runs "without a credential" was wrong and is corrected here. `--no-credential`
+# skips the password and still uses the network.
+#
+#   # no network, reads the password:
 #   docker compose -f deploy/compose/compose.yaml run --rm scamwall doctor --offline
+#   # uses the network, opens no password:
+#   docker compose -f deploy/compose/compose.yaml run --rm scamwall doctor --no-credential
 #
 # When Phase 2 introduces a long-running service, a healthcheck becomes
 # meaningful and should be added then.

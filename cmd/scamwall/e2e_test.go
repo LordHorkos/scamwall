@@ -120,6 +120,14 @@ type e2eEnv struct {
 	requests []string
 	// authStatus, when non-zero, is what POST /api/auth answers with.
 	authStatus int
+	// deleteStatus, when non-zero, is what DELETE /api/auth answers with. It
+	// exists so a FAILED session teardown can be exercised: that path used to
+	// print a success line and exit 0.
+	deleteStatus int
+	// versionFailures is how many times GET /api/info/version answers 503
+	// before succeeding. It exists to pin the ACTUAL maximum request
+	// behaviour of a status run, which is not three requests.
+	versionFailures int
 }
 
 func (e *e2eEnv) record(method, path string) {
@@ -176,6 +184,10 @@ func newE2EEnv(t *testing.T, mutate func(*config.Config)) *e2eEnv {
 			writeJSON(http.StatusUnauthorized,
 				`{"session":{"valid":false,"totp":false,"sid":null,"validity":-1,"message":"no SID provided"},"took":0.001}`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/auth":
+			if e.deleteStatus != 0 {
+				writeJSON(e.deleteStatus, `{"error":{"key":"server_error","message":"Internal Error","hint":null},"took":0.001}`)
+				return
+			}
 			if r.Header.Get("X-FTL-SID") != e.sid {
 				writeJSON(http.StatusUnauthorized, `{"error":{"key":"unauthorized","message":"Unauthorized","hint":null},"took":0.001}`)
 				return
@@ -184,6 +196,17 @@ func newE2EEnv(t *testing.T, mutate func(*config.Config)) *e2eEnv {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/info/version":
 			if r.Header.Get("X-FTL-SID") != e.sid {
 				writeJSON(http.StatusUnauthorized, `{"error":{"key":"unauthorized","message":"Unauthorized","hint":null},"took":0.001}`)
+				return
+			}
+			e.mu.Lock()
+			retryThis := e.versionFailures > 0
+			if retryThis {
+				e.versionFailures--
+			}
+			e.mu.Unlock()
+			if retryThis {
+				writeJSON(http.StatusServiceUnavailable,
+					`{"error":{"key":"unavailable","message":"Temporarily unavailable","hint":null},"took":0.001}`)
 				return
 			}
 			writeJSON(200, `{"version":{`+
@@ -286,7 +309,7 @@ func TestStatusPerformsExactlyTheApprovedSequence(t *testing.T) {
 		}
 	}
 	// The output must describe what actually happened.
-	for _, s := range []string{"v6.0.4", "v6.0.1", "v6.0.2", "session closed"} {
+	for _, s := range []string{"v6.0.4", "v6.0.1", "v6.0.2", "session logout ACCEPTED"} {
 		if !strings.Contains(stdout, s) {
 			t.Errorf("stdout does not report %q:\n%s", s, stdout)
 		}
@@ -433,8 +456,184 @@ func TestAnUnreachableServerFailsWithoutClaimingSuccess(t *testing.T) {
 	if code != exitFailure {
 		t.Fatalf("exit %d, want %d\nstdout: %s", code, exitFailure, stdout)
 	}
-	if strings.Contains(stdout, "session closed") {
-		t.Errorf("the output claims a session was closed:\n%s", stdout)
+	if strings.Contains(stdout, "ACCEPTED") || strings.Contains(stdout, "ALREADY ABSENT") {
+		t.Errorf("the output claims a session was torn down:\n%s", stdout)
+	}
+	e.assertNoCredentials(t, stdout, stderr)
+}
+
+// --- Truthful session teardown ----------------------------------------------
+
+// TestAFailedLogoutIsNotReportedAsSuccess covers the defect directly.
+//
+// WithSession performs the logout in a deferred call and deliberately does not
+// let a logout failure mask the caller's error, so a run whose DELETE failed
+// still returned nil from WithSession. `status` printed "session closed" and
+// exited 0 on exactly that path: a success line for a cleanup it had never
+// observed succeed.
+func TestAFailedLogoutIsNotReportedAsSuccess(t *testing.T) {
+	e := newE2EEnv(t, nil)
+	e.deleteStatus = http.StatusInternalServerError
+
+	code, stdout, stderr := capture(t, "status", "-config", e.configPath)
+
+	if code == exitOK {
+		t.Errorf("exit %d: a failed session teardown was reported as success\nstdout: %s", code, stdout)
+	}
+	if strings.Contains(stdout, "ACCEPTED") {
+		t.Errorf("stdout claims the logout was accepted:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "session logout FAILED") {
+		t.Errorf("stdout does not state that the logout failed:\n%s", stdout)
+	}
+	// The version read DID succeed, and the output still reports it. The
+	// failure is about cleanup, and saying so precisely is the point.
+	if !strings.Contains(stdout, "v6.0.4") {
+		t.Errorf("stdout dropped the result the command actually obtained:\n%s", stdout)
+	}
+	// DELETE was attempted, which is the distinction between "cleanup not
+	// attempted" and "cleanup attempted and refused".
+	if got := e.sequence(); len(got) != 3 || got[2] != "DELETE /api/auth" {
+		t.Errorf("network sequence = %v, want the DELETE to have been attempted", got)
+	}
+	e.assertNoCredentials(t, stdout, stderr)
+}
+
+// TestALogoutAnswered404IsTheDesiredEndState distinguishes "already gone" from
+// both "accepted" and "failed".
+func TestALogoutAnswered404IsTheDesiredEndState(t *testing.T) {
+	e := newE2EEnv(t, nil)
+	e.deleteStatus = http.StatusNotFound
+
+	code, stdout, stderr := capture(t, "status", "-config", e.configPath)
+
+	if code != exitOK {
+		t.Errorf("exit %d: an already-absent session is the desired end state\nstdout: %s", code, stdout)
+	}
+	if !strings.Contains(stdout, "ALREADY ABSENT") {
+		t.Errorf("stdout does not distinguish an already-absent session:\n%s", stdout)
+	}
+	e.assertNoCredentials(t, stdout, stderr)
+}
+
+// TestStatusIsNotLimitedToThreeRequests pins the ACTUAL maximum request
+// behaviour of a status run.
+//
+// The operator procedure described `status` as "exactly three requests". It is
+// three only when nothing is retried: GET /api/info/version is in the
+// permitted set as RETRYABLE, so a Pi-hole answering 503 produces more. The
+// bound that is real is the permitted SET, not a request count.
+func TestStatusIsNotLimitedToThreeRequests(t *testing.T) {
+	e := newE2EEnv(t, nil)
+	e.versionFailures = 2 // exhausts MaxRetries=2, then succeeds
+
+	code, stdout, stderr := capture(t, "status", "-config", e.configPath)
+	if code != exitOK {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	got := e.sequence()
+	want := []string{
+		"POST /api/auth",
+		"GET /api/info/version",
+		"GET /api/info/version",
+		"GET /api/info/version",
+		"DELETE /api/auth",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("network sequence = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("network sequence = %v, want %v", got, want)
+		}
+	}
+	e.assertNoCredentials(t, stdout, stderr)
+}
+
+// --- The credential-free probe ----------------------------------------------
+
+// TestDoctorNoCredentialDoesNotOpenTheSecret is the proof the operator
+// procedure's step B needs.
+//
+// The control is the second half: the SAME configuration, without the flag,
+// must fail on the secret. If it did not, this test would pass for a doctor
+// that reads the credential anyway.
+func TestDoctorNoCredentialDoesNotOpenTheSecret(t *testing.T) {
+	e := newE2EEnv(t, func(c *config.Config) {
+		// A path that cannot be opened. Anything that reads it fails loudly.
+		c.Pihole.SecretPath = filepath.Join(t.TempDir(), "absent", "pihole_app_password")
+	})
+
+	code, stdout, stderr := capture(t, "doctor", "--no-credential", "-config", e.configPath)
+	if code != exitOK {
+		t.Fatalf("doctor --no-credential exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "SKIP") || !strings.Contains(stdout, "NOT READ") {
+		t.Errorf("the skipped credential check is not reported as skipped:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "readable") {
+		t.Errorf("stdout claims the credential is readable:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 skipped") {
+		t.Errorf("the summary does not count the skipped check:\n%s", stdout)
+	}
+	// It is still a real connectivity probe: the unauthenticated GET happened.
+	if got := e.sequence(); len(got) != 1 || got[0] != "GET /api/auth" {
+		t.Errorf("network sequence = %v, want exactly [GET /api/auth]", got)
+	}
+
+	// Control: without the flag, the same configuration must fail.
+	code, stdout, _ = capture(t, "doctor", "-config", e.configPath)
+	if code == exitOK {
+		t.Fatalf("control: doctor without --no-credential passed on an unreadable secret:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "FAIL") || !strings.Contains(stdout, "application password") {
+		t.Errorf("control: the failure is not attributed to the credential:\n%s", stdout)
+	}
+}
+
+// TestDoctorOfflineStillReadsTheSecret records the fact the operator procedure
+// depends on for step C, and which its step B contradicted.
+//
+// `doctor --offline` is not a credential-free command. It skips the network
+// and reads the password; that combination is exactly what a secret-read test
+// under a disabled network needs, and exactly what a connectivity probe
+// claiming to read no password must not use.
+func TestDoctorOfflineStillReadsTheSecret(t *testing.T) {
+	e := newE2EEnv(t, func(c *config.Config) {
+		c.Pihole.SecretPath = filepath.Join(t.TempDir(), "absent", "pihole_app_password")
+	})
+
+	code, stdout, stderr := capture(t, "doctor", "--offline", "-config", e.configPath)
+	if code == exitOK {
+		t.Fatalf("doctor --offline passed with an unreadable secret, so it did not read it:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "application password") {
+		t.Errorf("stdout does not report the credential check:\n%s", stdout)
+	}
+	if n := len(e.sequence()); n != 0 {
+		t.Errorf("doctor --offline made %d request(s); it must touch no network", n)
+	}
+	e.assertNoCredentials(t, stdout, stderr)
+}
+
+// TestDoctorNeverReportsTheCredentialLength closes the disclosure the
+// procedure relied on. A length is a fact about a credential, and it diagnosed
+// nothing: LoadSecretFile already refuses an empty one.
+func TestDoctorNeverReportsTheCredentialLength(t *testing.T) {
+	e := newE2EEnv(t, nil)
+	code, stdout, stderr := capture(t, "doctor", "--offline", "-config", e.configPath)
+	if code != exitOK {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "application password") {
+		t.Fatalf("the credential check did not run:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "bytes") {
+		t.Errorf("stdout reports a credential length:\n%s", stdout)
+	}
+	if strings.Contains(stdout, strconv.Itoa(len(e.password))) {
+		t.Errorf("stdout contains the credential's length:\n%s", stdout)
 	}
 	e.assertNoCredentials(t, stdout, stderr)
 }

@@ -170,6 +170,48 @@ type SessionState struct {
 	Message  string
 }
 
+// Teardown is what became of the session this client created.
+//
+// It exists because "the client attempted a logout", "Pi-hole accepted the
+// logout" and "the session is gone from the appliance" are three different
+// claims. A caller that prints a success line has to be able to say which of
+// them it actually observed. Before this type existed, `status` printed
+// "session closed" on a path where the logout had FAILED and the failure was
+// visible only as a warning in the audit stream.
+type Teardown int
+
+const (
+	// TeardownNotAttempted: no logout was performed, because no session was
+	// ever established.
+	TeardownNotAttempted Teardown = iota
+	// TeardownAccepted: Pi-hole answered the DELETE successfully. This is the
+	// strongest claim this client can make on its own, and it is still a claim
+	// about a REQUEST — not independent confirmation that the session is
+	// absent from the appliance's session table.
+	TeardownAccepted
+	// TeardownAlreadyAbsent: Pi-hole answered 404. There was no such session
+	// to destroy, which is the desired end state.
+	TeardownAlreadyAbsent
+	// TeardownFailed: the DELETE could not be completed. The session id is
+	// discarded locally regardless, so nothing can retry it, and the session
+	// may remain valid on the appliance until it expires.
+	TeardownFailed
+)
+
+// String renders the outcome for an operator-facing line.
+func (t Teardown) String() string {
+	switch t {
+	case TeardownAccepted:
+		return "accepted"
+	case TeardownAlreadyAbsent:
+		return "already absent"
+	case TeardownFailed:
+		return "failed"
+	default:
+		return "not attempted"
+	}
+}
+
 // ComponentVersion is the local and remote version of one Pi-hole component.
 type ComponentVersion struct {
 	LocalBranch   string
@@ -193,8 +235,9 @@ type Client struct {
 	log  *audit.Logger
 	http *http.Client
 
-	mu  sync.Mutex
-	sid config.Secret
+	mu       sync.Mutex
+	sid      config.Secret
+	teardown Teardown
 }
 
 // New builds a client with TLS pinned to the configured private CA.
@@ -315,6 +358,14 @@ func (c *Client) SessionActive() bool {
 	return !c.sid.IsZero()
 }
 
+// SessionTeardown reports what became of the session, as this client observed
+// it. It is meaningful only after Logout, or WithSession, has run.
+func (c *Client) SessionTeardown() Teardown {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.teardown
+}
+
 // Login authenticates and stores the session id in memory.
 //
 // The session id is never written to disk, never placed in a URL, and never
@@ -400,22 +451,36 @@ func (c *Client) Logout(ctx context.Context) error {
 	// The session id is discarded regardless of the outcome. Retaining an id
 	// that may already be invalid serves no purpose and only extends the time
 	// a credential sits in memory.
+	//
+	// The observed outcome is recorded in the same critical section, so a
+	// caller cannot read a teardown state that disagrees with whether a
+	// session id is still held.
+	outcome := TeardownAccepted
+	var apiErr *APIError
+	switch {
+	// 404 means the session is already gone, which is the desired end state.
+	case errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound:
+		outcome = TeardownAlreadyAbsent
+	case err != nil:
+		outcome = TeardownFailed
+	}
+
 	c.mu.Lock()
 	c.sid.Destroy()
+	c.teardown = outcome
 	c.mu.Unlock()
 
-	var apiErr *APIError
-	// 404 means the session is already gone, which is the desired end state.
-	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+	switch outcome {
+	case TeardownAlreadyAbsent:
 		c.log.Info("pihole.logout", audit.F("result", "no_session"))
 		return nil
-	}
-	if err != nil {
+	case TeardownFailed:
 		c.log.Error("pihole.logout_failed", err)
 		return err
+	default:
+		c.log.Info("pihole.logout", audit.F("result", "ok"))
+		return nil
 	}
-	c.log.Info("pihole.logout", audit.F("result", "ok"))
-	return nil
 }
 
 // ProbeAuth queries session state without sending a credential.
@@ -475,7 +540,11 @@ func (c *Client) WithSession(ctx context.Context, secret config.Secret, fn func(
 	defer func() {
 		if err := c.Logout(ctx); err != nil {
 			// Logout failure must not mask the caller's error, so it is logged
-			// rather than returned.
+			// rather than returned. It is NOT thereby discarded: Logout has
+			// recorded TeardownFailed, and SessionTeardown is what a caller
+			// must consult before printing anything that claims the session
+			// was closed. A warning in an audit stream is not a substitute for
+			// a truthful exit status.
 			c.log.Warn("pihole.logout_incomplete", audit.F("reason", "see previous error"))
 		}
 	}()
