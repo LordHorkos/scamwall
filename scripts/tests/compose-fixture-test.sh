@@ -87,12 +87,37 @@ chmod 640 "$FIX/pihole_app_password"
 # Restating "the approved mount set" here would create a second copy that can
 # drift from the one the verifier enforces, and a test that agrees with a stale
 # copy proves nothing.
-eval "$(sed -n '/^in_list()/,/^}$/p' "$VERIFIER")"
+# in_list moved to the shared resource library when scripts/operator-handoff.sh
+# began using the same attribution and cleanup implementation. Extracting it
+# from the verifier silently yielded NOTHING, and approved_mount_problems then
+# reported every approved mount as unapproved AND unmounted at once — which is
+# the shape of a helper that is missing rather than a definition that is wrong.
+RESOURCE_LIB="$REPO/scripts/lib/docker-resources.sh"
+[ -f "$RESOURCE_LIB" ] || { printf 'fatal: resource library not found: %s\n' "$RESOURCE_LIB" >&2; exit 2; }
+eval "$(sed -n '/^in_list()/,/^}$/p' "$RESOURCE_LIB")"
+declare -F in_list >/dev/null ||
+  { printf 'fatal: in_list could not be extracted from %s\n' "$RESOURCE_LIB" >&2; exit 2; }
 eval "$(sed -n '/^APPROVED_MOUNT_DESTS=/,/pihole_app_password.$/p' "$VERIFIER")"
 eval "$(sed -n '/^APPROVED_MOUNT_COUNT=/p' "$VERIFIER")"
 eval "$(sed -n '/^approved_mount_problems()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^secret_world_reachable()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^secret_identity_read()/,/^}$/p' "$VERIFIER")"
+
+# Every lift is checked, not just the one that broke.
+#
+# `eval "$(sed ...)"` that matched nothing evaluates the empty string and
+# succeeds, so a helper that MOVED and a helper that is present are the same
+# outcome until something calls it. That is how a definition disappearing from
+# the verifier turned into "every approved mount is unapproved" rather than
+# into an error naming the missing helper.
+for lifted in in_list approved_mount_problems secret_world_reachable secret_identity_read; do
+  declare -F "$lifted" >/dev/null ||
+    { printf 'fatal: %s could not be lifted from the verifier\n' "$lifted" >&2; exit 2; }
+done
+[ "${#APPROVED_MOUNT_DESTS[@]}" -gt 0 ] ||
+  { printf 'fatal: APPROVED_MOUNT_DESTS could not be lifted from the verifier\n' >&2; exit 2; }
+[ -n "${APPROVED_MOUNT_COUNT:-}" ] ||
+  { printf 'fatal: APPROVED_MOUNT_COUNT could not be lifted from the verifier\n' >&2; exit 2; }
 [ -n "${APPROVED_MOUNT_DESTS:-}" ] || { printf 'fatal: could not lift the approved mount set from the verifier\n' >&2; exit 2; }
 declare -F approved_mount_problems >/dev/null || { printf 'fatal: could not lift approved_mount_problems\n' >&2; exit 2; }
 declare -F secret_world_reachable  >/dev/null || { printf 'fatal: could not lift secret_world_reachable\n' >&2; exit 2; }

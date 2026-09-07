@@ -37,6 +37,8 @@ SRC_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 REPO="$(cd -- "$SRC_DIR/../.." >/dev/null 2>&1 && pwd -P)" || exit 2
 VERIFIER="$REPO/scripts/container-runtime-verify.sh"
 [ -f "$VERIFIER" ] || { printf 'fatal: verifier not found: %s\n' "$VERIFIER" >&2; exit 2; }
+RESOURCE_LIB="$REPO/scripts/lib/docker-resources.sh"
+[ -f "$RESOURCE_LIB" ] || { printf 'fatal: resource library not found: %s\n' "$RESOURCE_LIB" >&2; exit 2; }
 
 ROOT="$(mktemp -d)" || exit 2
 trap 'rm -rf "$ROOT"' EXIT
@@ -70,6 +72,12 @@ chmod +x "$CHECKOUT/scripts/container-runtime-verify.sh"
 # below exercise the path an operator and CI actually take, rather than the
 # fail-closed branch.
 cp "$REPO/scripts/gate-diagnostics.sh" "$CHECKOUT/scripts/gate-diagnostics.sh"
+# The resource attribution and cleanup implementation is shared with
+# scripts/operator-handoff.sh and lives in scripts/lib. The verifier refuses to
+# run without it — creating Docker resources with no cleanup implementation is
+# the one failure it must not have — so the synthetic checkout carries it too.
+mkdir -p "$CHECKOUT/scripts/lib"
+cp "$REPO/scripts/lib/docker-resources.sh" "$CHECKOUT/scripts/lib/docker-resources.sh"
 cp "$REPO/container/Dockerfile" "$CHECKOUT/container/Dockerfile"
 cp "$REPO/deploy/compose/compose.yaml" "$CHECKOUT/deploy/compose/compose.yaml"
 printf 'SCAMWALL_SECRET_GID=%s\nPIHOLE_HOST_IP=host-gateway\n' "$ENV_GID" > "$CHECKOUT/deploy/compose/.env"
@@ -564,11 +572,35 @@ eval "$(sed -n '/^SIZE_MAX_BYTES=/p' "$VERIFIER")"
 eval "$(sed -n '/^to_decimal()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^size_to_bytes()/,/^}$/p' "$VERIFIER")"
 eval "$(sed -n '/^is_uint()/,/^}$/p' "$VERIFIER")"
-eval "$(sed -n '/^in_list()/,/^}$/p' "$VERIFIER")"
-eval "$(sed -n '/^combine_ids()/,/^}$/p' "$VERIFIER")"
+# in_list and combine_ids moved to the shared resource library when
+# scripts/operator-handoff.sh began using the same attribution and cleanup
+# implementation. They are extracted from where they now live; extracting from
+# the verifier silently yielded NOTHING, and an undefined in_list made every
+# approved mount look unapproved.
+eval "$(sed -n '/^in_list()/,/^}$/p' "$RESOURCE_LIB")"
+eval "$(sed -n '/^combine_ids()/,/^}$/p' "$RESOURCE_LIB")"
 eval "$(sed -n '/^APPROVED_MOUNT_DESTS=/,/pihole_app_password.$/p' "$VERIFIER")"
 eval "$(sed -n '/^APPROVED_MOUNT_COUNT=/p' "$VERIFIER")"
 eval "$(sed -n '/^approved_mount_problems()/,/^}$/p' "$VERIFIER")"
+
+# Every lift is checked, not just the two that moved.
+#
+# `eval "$(sed ...)"` that matched nothing evaluates the empty string and
+# succeeds, so a helper that MOVED and a helper that is still there are the
+# same outcome until something calls it. That is how in_list disappearing from
+# the verifier turned into "every approved mount is unapproved and unmounted"
+# rather than into an error naming the missing helper.
+for extracted in search_file count_matches to_decimal size_to_bytes is_uint \
+                 in_list combine_ids approved_mount_problems; do
+  declare -F "$extracted" >/dev/null ||
+    { printf 'fatal: %s could not be extracted\n' "$extracted" >&2; exit 2; }
+done
+[ -n "${SIZE_MAX_BYTES:-}" ] ||
+  { printf 'fatal: SIZE_MAX_BYTES could not be extracted\n' >&2; exit 2; }
+[ "${#APPROVED_MOUNT_DESTS[@]}" -gt 0 ] ||
+  { printf 'fatal: APPROVED_MOUNT_DESTS could not be extracted\n' >&2; exit 2; }
+[ -n "${APPROVED_MOUNT_COUNT:-}" ] ||
+  { printf 'fatal: APPROVED_MOUNT_COUNT could not be extracted\n' >&2; exit 2; }
 
 echo "== container-runtime-verify.sh regression tests =="
 echo
@@ -696,6 +728,17 @@ else
   fail "each container is removed exactly once (cleanup is idempotent)" "counts: fs=$(log_count "^rm -f $FS_CID\$") dep=$(log_count "^rm -f $DEP_CID\$")"
 fi
 log_lacks "no project-wide compose down is issued" '^compose .*down'
+
+# The cleanup implementation is now a separate file. If it is absent the
+# verifier must refuse to start — creating Docker resources with no way to
+# attribute or remove them is the one condition it must never proceed under.
+setup_case cleanup-lib-missing
+mv "$CHECKOUT/scripts/lib/docker-resources.sh" "$ROOT/docker-resources.sh.away"
+run_verifier
+expect_rc_nonzero "an absent resource-tracking library refuses to run"
+expect_output "the refusal names the missing library" "resource-tracking library not found"
+log_lacks "nothing is created when the cleanup implementation is missing" '^(create|compose create|run)'
+mv "$ROOT/docker-resources.sh.away" "$CHECKOUT/scripts/lib/docker-resources.sh"
 
 setup_case cleanup-fails
 echo 1 > "$FAKE_DIR/rc.rm"
