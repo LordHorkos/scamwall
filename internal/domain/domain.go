@@ -1,11 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Package domain provides a canonical domain type with strict validation.
+// Package domain provides a canonical domain type with strict validation, and
+// a separate, non-judgemental report of what is notable about a name.
 //
-// Every domain entering ScamWall passes through Normalize. Producing a single
-// canonical form matters for correctness (two spellings of the same name must
-// not both appear in a plan) and for safety (a name that looks harmless but
-// resolves differently must not slip through).
+// # Four questions, kept apart
+//
+// This package answers the first two and refuses to answer the last two:
+//
+//  1. Is this a syntactically valid domain, and what is its canonical form?
+//     That is Normalize. Its errors are about SYNTAX.
+//  2. Is there anything about this name a reviewer would want to know — that
+//     it is internationalised, that a label mixes scripts, that the publisher
+//     wrote punycode rather than the readable form? That is Assess, and what
+//     it returns are SIGNALS, not verdicts.
+//  3. Is this domain malicious? Nothing here can answer that. A signal is not
+//     evidence, and evidence is not a signal.
+//  4. Should this domain be blocked? That is policy, and it lives in
+//     internal/policy, where the feed's own claims are also in scope.
+//
+// The distinction is not academic. Until this separation existed, a
+// syntactically valid mixed-script name made Normalize return an error, and a
+// caller validating a signed feed could not tell "this entry is suspicious"
+// apart from "this file is corrupt" — so one suspicious entry invalidated the
+// whole feed, including every unrelated indicator in it. Removing that
+// rejection without putting the signal somewhere would have been the opposite
+// mistake: every such name would silently have become eligible for blocking.
+// Both failures are the same confusion, in opposite directions.
 //
 // This package intentionally has no ScamWall dependencies, so its guarantees
 // hold regardless of the caller.
@@ -33,6 +53,9 @@ const (
 
 // Validation errors. Each rejected class has a distinct error so that a caller
 // can report precisely why a feed record was refused.
+//
+// Every one of these is a statement about SYNTAX. None of them means a name is
+// suspicious, and none of them may be used to mean that.
 var (
 	ErrEmpty            = errors.New("domain is empty")
 	ErrTooLong          = errors.New("domain exceeds maximum length")
@@ -47,8 +70,100 @@ var (
 	ErrPublicSuffix     = errors.New("domain is a public suffix")
 	ErrInvalidCharacter = errors.New("domain contains an invalid character")
 	ErrNumericTLD       = errors.New("domain has an all-numeric top-level label")
-	ErrMixedScript      = errors.New("domain label mixes scripts")
 )
+
+// Signal is something notable about a syntactically valid name.
+//
+// A signal is an OBSERVATION. It carries no judgement, no score and no
+// implication that anything is wrong: most internationalised domains in the
+// world are entirely legitimate, and a great many of them are not written in
+// Latin script. What a signal is for is letting a policy that has other
+// evidence — a signed feed's own claims, a publisher's stated confidence —
+// decide what to do about a name it would otherwise treat as ordinary.
+//
+// Values are stable strings so they can appear in a plan, a report, or a
+// regression fixture without changing when the code is refactored.
+type Signal string
+
+// The signals this package can raise.
+const (
+	// SignalNonASCII: the input contained characters outside ASCII, so the
+	// canonical form is punycode. On its own this describes most of the
+	// internationalised internet and means nothing at all.
+	SignalNonASCII Signal = "non_ascii"
+
+	// SignalPunycodeInput: the input was ALREADY in punycode. Distinct from
+	// SignalNonASCII because it is a fact about the publisher rather than
+	// about the name: a feed that writes "xn--80ak6aa92e" instead of the
+	// readable form has given a reviewer no way to see what the name looks
+	// like. Not suspicious by itself; useful when reading a plan.
+	SignalPunycodeInput Signal = "punycode_input"
+
+	// SignalSingleNonLatinScript: a label is written wholly in one script that
+	// is not Latin. Explicitly NOT a risk signal — it is recorded so that a
+	// policy which wants to say "leave ordinary internationalised names alone"
+	// can distinguish them from mixed-script ones without re-deriving it.
+	SignalSingleNonLatinScript Signal = "single_non_latin_script"
+
+	// SignalMixedScript: one label combines scripts in a way that is not a
+	// known legitimate combination. This is the classic homograph
+	// construction — a Cyrillic character inside an otherwise Latin word — and
+	// it is the one signal here a policy is expected to act on. It still is
+	// not evidence of anything: a name can mix scripts for entirely ordinary
+	// reasons, which is why the disposition it drives is review rather than
+	// exclusion.
+	SignalMixedScript Signal = "mixed_script"
+)
+
+// Observation is one signal, with enough context to act on or report.
+type Observation struct {
+	// Signal is what was observed.
+	Signal Signal
+	// Label is the label the observation is about, in its ASCII (punycode)
+	// form. The ASCII form is deliberate: reporting the Unicode form would
+	// print the confusable characters into a terminal, an issue tracker or a
+	// log, where they look like whatever they were chosen to look like.
+	Label string
+	// Detail is a short, bounded description — for a mixed-script observation,
+	// the script names involved, joined and sorted. Never peer-supplied text.
+	Detail string
+}
+
+// Assessment is the canonical form of a name together with what was observed
+// about it.
+type Assessment struct {
+	// Domain is the canonical form. Always valid: an Assessment is only
+	// returned when normalisation succeeded.
+	Domain Domain
+	// Observations are sorted by (Signal, Label) so that two runs over the
+	// same input produce byte-identical output.
+	Observations []Observation
+}
+
+// Has reports whether the assessment carries the given signal.
+func (a Assessment) Has(s Signal) bool {
+	for _, o := range a.Observations {
+		if o.Signal == s {
+			return true
+		}
+	}
+	return false
+}
+
+// Signals returns the distinct signals, sorted and deduplicated.
+func (a Assessment) Signals() []Signal {
+	seen := make(map[Signal]bool, len(a.Observations))
+	out := make([]Signal, 0, len(a.Observations))
+	for _, o := range a.Observations {
+		if seen[o.Signal] {
+			continue
+		}
+		seen[o.Signal] = true
+		out = append(out, o.Signal)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
 
 // Domain is a validated, canonical, lowercase, ASCII (punycode) domain name
 // with no trailing root dot.
@@ -90,125 +205,155 @@ var internalTLDs = map[string]struct{}{
 
 // Normalize validates raw and returns its canonical form.
 //
+// It answers exactly one question: is this a syntactically valid domain, and
+// what is its canonical spelling? It does not judge the name. A mixed-script
+// name, a punycode name and an ordinary ASCII name are all equally valid here,
+// and Assess is where the difference between them is recorded.
+func Normalize(raw string) (Domain, error) {
+	a, err := Assess(raw)
+	if err != nil {
+		return "", err
+	}
+	return a.Domain, nil
+}
+
+// Assess validates raw and reports what is notable about it.
+//
 // The order of checks is deliberate. Structural rejections (wildcards, IP
 // literals, stray URL syntax) happen before IDNA conversion, because feeding
 // such input to a normaliser produces confusing errors and, in the worst case,
 // a name that converts "successfully" into something unintended.
-func Normalize(raw string) (Domain, error) {
+func Assess(raw string) (Assessment, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "", ErrEmpty
+		return Assessment{}, ErrEmpty
 	}
 
 	// Control characters and embedded whitespace are always malformed and are
 	// a common way to smuggle a different name past a naive parser.
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
-			return "", fmt.Errorf("%w: control or whitespace character", ErrInvalidCharacter)
+			return Assessment{}, fmt.Errorf("%w: control or whitespace character", ErrInvalidCharacter)
 		}
 	}
 
 	// Wildcards are rejected outright. ScamWall blocks exact domains only, so
 	// a wildcard is never a narrowing of scope, only a widening of it.
 	if strings.ContainsAny(s, "*?") {
-		return "", ErrWildcard
+		return Assessment{}, ErrWildcard
 	}
 
 	// Strip surrounding brackets so that "[::1]" is recognised as an address
 	// rather than as a name containing punctuation.
 	unbracketed := strings.TrimSuffix(strings.TrimPrefix(s, "["), "]")
 	if net.ParseIP(unbracketed) != nil {
-		return "", ErrIPLiteral
+		return Assessment{}, ErrIPLiteral
 	}
 
 	// Remove exactly one trailing root dot. More than one is malformed.
 	s = strings.TrimSuffix(s, ".")
 	if s == "" {
-		return "", ErrEmpty
+		return Assessment{}, ErrEmpty
 	}
 	if strings.HasSuffix(s, ".") {
-		return "", fmt.Errorf("%w: repeated trailing dot", ErrEmptyLabel)
+		return Assessment{}, fmt.Errorf("%w: repeated trailing dot", ErrEmptyLabel)
 	}
 	// Re-check: "192.0.2.1." is an address once the root dot is removed.
 	if net.ParseIP(s) != nil {
-		return "", ErrIPLiteral
+		return Assessment{}, ErrIPLiteral
 	}
 
 	// Reject URL syntax rather than silently extracting a host from it. A feed
 	// is expected to contain bare domains; anything else is a schema violation
 	// and should be visible as one.
 	if i := strings.IndexAny(s, "/\\@:?#%,;\"'<>()[]{}|^`"); i >= 0 {
-		return "", fmt.Errorf("%w: %q", ErrInvalidCharacter, s[i:i+1])
+		return Assessment{}, fmt.Errorf("%w: %q", ErrInvalidCharacter, s[i:i+1])
 	}
 	if strings.HasPrefix(s, ".") || strings.Contains(s, "..") {
-		return "", ErrEmptyLabel
+		return Assessment{}, ErrEmptyLabel
 	}
 
-	// Guard against mixed-script labels before conversion, while the original
-	// runes are still visible. After punycode conversion the distinction is
-	// gone.
-	if err := checkMixedScript(s); err != nil {
-		return "", err
-	}
+	// Recorded before conversion, because after it the distinction is gone.
+	inputWasNonASCII := !isASCII(s)
+	inputWasPunycode := strings.Contains(strings.ToLower(s), acePrefix)
 
 	ascii, err := idnaProfile.ToASCII(s)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrMalformedIDN, err)
+		return Assessment{}, fmt.Errorf("%w: %v", ErrMalformedIDN, err)
 	}
 	ascii = strings.ToLower(ascii)
 	if ascii == "" {
-		return "", ErrEmpty
+		return Assessment{}, ErrEmpty
 	}
 
 	if len(ascii) > MaxLength {
-		return "", fmt.Errorf("%w: %d > %d", ErrTooLong, len(ascii), MaxLength)
+		return Assessment{}, fmt.Errorf("%w: %d > %d", ErrTooLong, len(ascii), MaxLength)
 	}
 
 	// Checked before the label-count rule so that the bare name reports the
 	// specific reason rather than the generic "single label".
 	if ascii == "localhost" || strings.HasSuffix(ascii, ".localhost") {
-		return "", ErrLocalhost
+		return Assessment{}, ErrLocalhost
 	}
 
 	labels := strings.Split(ascii, ".")
 	if len(labels) < MinLabels {
-		return "", ErrSingleLabel
+		return Assessment{}, ErrSingleLabel
 	}
 	for _, l := range labels {
 		if l == "" {
-			return "", ErrEmptyLabel
+			return Assessment{}, ErrEmptyLabel
 		}
 		if len(l) > MaxLabelLength {
-			return "", fmt.Errorf("%w: %q is %d > %d", ErrLabelTooLong, l, len(l), MaxLabelLength)
+			return Assessment{}, fmt.Errorf("%w: %q is %d > %d", ErrLabelTooLong, l, len(l), MaxLabelLength)
 		}
 		if strings.HasPrefix(l, "-") || strings.HasSuffix(l, "-") {
-			return "", fmt.Errorf("%w: label %q starts or ends with a hyphen", ErrInvalidCharacter, l)
+			return Assessment{}, fmt.Errorf("%w: label %q starts or ends with a hyphen", ErrInvalidCharacter, l)
 		}
 	}
 
 	tld := labels[len(labels)-1]
 	if _, bad := internalTLDs[tld]; bad {
 		if tld == "localhost" {
-			return "", ErrLocalhost
+			return Assessment{}, ErrLocalhost
 		}
-		return "", fmt.Errorf("%w: .%s", ErrLocalTLD, tld)
-	}
-	if ascii == "localhost" {
-		return "", ErrLocalhost
+		return Assessment{}, fmt.Errorf("%w: .%s", ErrLocalTLD, tld)
 	}
 	if isAllDigits(tld) {
-		return "", ErrNumericTLD
+		return Assessment{}, ErrNumericTLD
 	}
 
 	// A public suffix is a registry boundary, not a site. Blocking "com" or
 	// "co.uk" would take out an enormous portion of the internet, so an entry
 	// that *is* a public suffix is refused rather than trusted.
 	if suffix, _ := publicsuffix.PublicSuffix(ascii); suffix == ascii {
-		return "", fmt.Errorf("%w: %q", ErrPublicSuffix, ascii)
+		return Assessment{}, fmt.Errorf("%w: %q", ErrPublicSuffix, ascii)
 	}
 
-	return Domain(ascii), nil
+	// --- Syntax is settled. Everything below is observation, never rejection.
+	a := Assessment{Domain: Domain(ascii)}
+	if inputWasNonASCII {
+		a.Observations = append(a.Observations, Observation{Signal: SignalNonASCII, Label: ascii})
+	}
+	if inputWasPunycode {
+		a.Observations = append(a.Observations, Observation{Signal: SignalPunycodeInput, Label: ascii})
+	}
+	a.Observations = append(a.Observations, scriptObservations(labels)...)
+
+	sort.Slice(a.Observations, func(i, j int) bool {
+		if a.Observations[i].Signal != a.Observations[j].Signal {
+			return a.Observations[i].Signal < a.Observations[j].Signal
+		}
+		if a.Observations[i].Label != a.Observations[j].Label {
+			return a.Observations[i].Label < a.Observations[j].Label
+		}
+		return a.Observations[i].Detail < a.Observations[j].Detail
+	})
+	return a, nil
 }
+
+// acePrefix marks a punycode-encoded label.
+const acePrefix = "xn--"
 
 // isAllDigits reports whether s consists only of ASCII digits.
 func isAllDigits(s string) bool {
@@ -225,41 +370,92 @@ func isAllDigits(s string) bool {
 
 // allowedScriptGroups are sets of scripts that legitimately co-occur inside a
 // single label. Japanese mixes Han with the two kana scripts, Chinese mixes Han
-// with Bopomofo, and Korean mixes Han with Hangul. Rejecting those would break
-// real names.
+// with Bopomofo, and Korean mixes Han with Hangul. Treating those as notable
+// would flag a large part of the legitimate internet.
 var allowedScriptGroups = []map[string]bool{
 	{"Han": true, "Hiragana": true, "Katakana": true}, // Japanese
 	{"Han": true, "Bopomofo": true},                   // Chinese
 	{"Han": true, "Hangul": true},                     // Korean
 }
 
-// checkMixedScript rejects labels that combine scripts in a confusable way.
+// scriptObservations reports script composition for each label, working from
+// the CANONICAL form rather than from the input.
 //
-// This is a defence against homograph attacks: "аpple.example.com" with a
-// Cyrillic а converts to perfectly valid punycode and would otherwise be
-// accepted as a distinct, legitimate-looking name.
+// Decoding each ACE label back to Unicode, rather than analysing the input
+// before conversion, means the observation is a property of the name that was
+// accepted — so two spellings of the same name produce the same observations,
+// and the label reported alongside is the ASCII one that is safe to print.
 //
 // The rule follows the shape of UTS #39's moderately restrictive profile:
 // Latin may accompany the CJK script groups, but a label mixing Latin with
 // Cyrillic or Greek — the pairs that supply nearly all confusable characters —
-// is refused. A label written wholly in one non-Latin script is fine.
+// is notable. A label written wholly in one non-Latin script is ordinary, and
+// is reported as such rather than not at all.
 //
 // It is not a complete UTS #39 implementation. Whole-script confusables, where
 // a name is written entirely in one script that resembles another, are not
-// detected here.
-func checkMixedScript(s string) error {
-	for _, label := range strings.Split(s, ".") {
-		if isASCII(label) {
-			// Pure ASCII is Latin-only by construction; skip the expensive
-			// per-rune script lookup for the overwhelmingly common case.
+// detected. That limitation is stated rather than papered over.
+func scriptObservations(asciiLabels []string) []Observation {
+	var out []Observation
+	for _, alabel := range asciiLabels {
+		if !strings.HasPrefix(alabel, acePrefix) {
+			// A label with no ACE prefix is pure ASCII, hence Latin-only by
+			// construction, and carries no script observation at all.
 			continue
 		}
-		scripts := scriptsIn(label)
-		if err := scriptsCompatible(label, scripts); err != nil {
-			return err
+		u, err := idna.Punycode.ToUnicode(alabel)
+		if err != nil {
+			// Unreachable for a label the profile above already converted, and
+			// treated as "nothing observable" rather than as an error: this
+			// function is not allowed to reject anything.
+			continue
+		}
+		scripts := scriptsIn(u)
+		if len(scripts) == 0 {
+			continue
+		}
+		hasLatin := scripts["Latin"]
+		rest := make(map[string]bool, len(scripts))
+		for name := range scripts {
+			if name != "Latin" {
+				rest[name] = true
+			}
+		}
+		switch {
+		case len(rest) == 0:
+			// Latin written in an ACE label: unusual, but not a mixture.
+		case len(rest) == 1 && !hasLatin:
+			out = append(out, Observation{
+				Signal: SignalSingleNonLatinScript,
+				Label:  alabel,
+				Detail: joinScripts(rest),
+			})
+		case scriptGroupAllowed(rest):
+			// A known legitimate combination. Reported as an ordinary
+			// internationalised name, not as a mixture.
+			out = append(out, Observation{
+				Signal: SignalSingleNonLatinScript,
+				Label:  alabel,
+				Detail: joinScripts(rest),
+			})
+		default:
+			out = append(out, Observation{
+				Signal: SignalMixedScript,
+				Label:  alabel,
+				Detail: joinScripts(scripts),
+			})
 		}
 	}
-	return nil
+	return out
+}
+
+func scriptGroupAllowed(rest map[string]bool) bool {
+	for _, group := range allowedScriptGroups {
+		if subsetOf(rest, group) {
+			return true
+		}
+	}
+	return false
 }
 
 // isASCII reports whether s contains only ASCII.
@@ -290,38 +486,6 @@ func scriptsIn(label string) map[string]bool {
 	return found
 }
 
-// scriptsCompatible reports whether a set of scripts may share one label.
-func scriptsCompatible(label string, scripts map[string]bool) error {
-	if len(scripts) <= 1 {
-		return nil
-	}
-
-	// Latin is permitted alongside a CJK group, so consider the non-Latin
-	// remainder when matching against the allowed groups.
-	hasLatin := scripts["Latin"]
-	rest := make(map[string]bool, len(scripts))
-	for name := range scripts {
-		if name != "Latin" {
-			rest[name] = true
-		}
-	}
-
-	if len(rest) == 0 {
-		return nil
-	}
-	for _, group := range allowedScriptGroups {
-		if subsetOf(rest, group) {
-			return nil
-		}
-	}
-	// A single non-Latin script on its own is fine; combined with Latin it is
-	// the classic confusable construction and is refused.
-	if len(rest) == 1 && !hasLatin {
-		return nil
-	}
-	return fmt.Errorf("%w: %q combines %s", ErrMixedScript, label, joinScripts(scripts))
-}
-
 func subsetOf(sub, super map[string]bool) bool {
 	for k := range sub {
 		if !super[k] {
@@ -331,7 +495,7 @@ func subsetOf(sub, super map[string]bool) bool {
 	return true
 }
 
-// joinScripts renders a script set deterministically for error messages.
+// joinScripts renders a script set deterministically.
 func joinScripts(scripts map[string]bool) string {
 	names := make([]string, 0, len(scripts))
 	for k := range scripts {

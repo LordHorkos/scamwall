@@ -143,26 +143,74 @@ func TestNormalizeRejects(t *testing.T) {
 	}
 }
 
-func TestNormalizeRejectsMixedScript(t *testing.T) {
-	// "аpple" with a Cyrillic а converts to valid punycode and would otherwise
-	// be accepted as a legitimate-looking distinct name.
-	mixed := "аpple.example.com"
-	_, err := domain.Normalize(mixed)
-	if err == nil {
-		t.Fatal("mixed-script label should be rejected")
+// TestMixedScriptIsASignalNotARejection is the heart of SW-P3-05.
+//
+// "аpple" with a Cyrillic а converts to perfectly valid punycode. It is a
+// SYNTACTICALLY VALID DOMAIN, and saying otherwise was the defect: a validator
+// that returns an error for it cannot be told apart from one reporting a
+// corrupt file, so a single suspicious entry destroyed an entire signed feed.
+func TestMixedScriptIsASignalNotARejection(t *testing.T) {
+	const mixed = "аpple.example.com"
+
+	d, err := domain.Normalize(mixed)
+	if err != nil {
+		t.Fatalf("a mixed-script name is syntactically valid; Normalize returned %v", err)
 	}
-	if !errors.Is(err, domain.ErrMixedScript) {
-		t.Fatalf("want ErrMixedScript, got %v", err)
+	if d == "" {
+		t.Fatal("Normalize returned an empty canonical form")
+	}
+
+	a, err := domain.Assess(mixed)
+	if err != nil {
+		t.Fatalf("Assess: %v", err)
+	}
+	if !a.Has(domain.SignalMixedScript) {
+		t.Fatalf("the mixed-script signal was lost; signals: %v", a.Signals())
+	}
+	if a.Domain != d {
+		t.Fatalf("Assess and Normalize disagree: %q vs %q", a.Domain, d)
+	}
+	// The observation must name the ASCII label, never the Unicode one: the
+	// point of the report is to be readable in a terminal that would otherwise
+	// render the confusable as whatever it was chosen to look like.
+	for _, o := range a.Observations {
+		if o.Signal != domain.SignalMixedScript {
+			continue
+		}
+		if !strings.HasPrefix(o.Label, "xn--") {
+			t.Errorf("observation label %q is not the ASCII form", o.Label)
+		}
+		if o.Detail == "" {
+			t.Error("a mixed-script observation carries no script detail")
+		}
 	}
 }
 
-func TestNormalizeAcceptsSingleNonLatinScript(t *testing.T) {
-	// A name written entirely in one script is legitimate and must not be
-	// caught by the mixed-script rule.
-	for _, in := range []string{"пример.example.com", "例え.example.com"} {
-		if _, err := domain.Normalize(in); err != nil {
-			t.Errorf("Normalize(%q) should succeed, got %v", in, err)
-		}
+func TestOrdinaryInternationalisedNamesAreNotFlaggedAsMixed(t *testing.T) {
+	// Every one of these is a legitimate name. None may carry the mixed-script
+	// signal, because a policy acts on that signal and flagging these would
+	// quietly withdraw protection from a large part of the internet.
+	for _, in := range []string{
+		"пример.example.com",     // Cyrillic
+		"παράδειγμα.example.com", // Greek
+		"例え.example.com",         // Japanese: Han + Hiragana
+		"テスト.example.com",        // Japanese: Katakana
+		"한국.example.com",         // Korean: Hangul
+		"münchen.example.com",    // Latin with a diacritic
+		"日本語.example.com",        // Han
+	} {
+		t.Run(in, func(t *testing.T) {
+			a, err := domain.Assess(in)
+			if err != nil {
+				t.Fatalf("Assess(%q) should succeed, got %v", in, err)
+			}
+			if a.Has(domain.SignalMixedScript) {
+				t.Fatalf("%q was flagged as mixed-script; observations: %+v", in, a.Observations)
+			}
+			if !a.Has(domain.SignalNonASCII) {
+				t.Fatalf("%q should be reported as non-ASCII", in)
+			}
+		})
 	}
 }
 
@@ -196,45 +244,5 @@ func TestDomainString(t *testing.T) {
 	}
 	if d.String() != "example.com" {
 		t.Errorf("String() = %q", d.String())
-	}
-}
-
-// TestMixedScriptRegression pins the behaviour of the confusable check.
-//
-// An earlier implementation skipped ASCII entirely when collecting scripts,
-// which meant a label like "аpple" (Cyrillic а followed by ASCII letters)
-// registered as Cyrillic-only and passed. That is precisely the homograph case
-// the check exists to stop, so each direction is asserted explicitly.
-func TestMixedScriptRegression(t *testing.T) {
-	reject := map[string]string{
-		"cyrillic a with latin":    "аpple.example.com",
-		"latin with cyrillic o":    "gо ogle.example.com",
-		"greek omicron with latin": "gοogle.example.com",
-		"cyrillic e in latin word": "paypаl.example.com",
-	}
-	for name, in := range reject {
-		t.Run("reject/"+name, func(t *testing.T) {
-			if _, err := domain.Normalize(in); err == nil {
-				t.Fatalf("Normalize(%q) should be rejected", in)
-			}
-		})
-	}
-
-	accept := map[string]string{
-		"pure latin":        "apple.example.com",
-		"latin with umlaut": "münchen.example.com",
-		"pure cyrillic":     "пример.example.com",
-		"pure greek":        "παράδειγμα.example.com",
-		"japanese han+kana": "例え.example.com",
-		"japanese katakana": "テスト.example.com",
-		"korean hangul":     "한국.example.com",
-		"digits with latin": "web3.example.com",
-	}
-	for name, in := range accept {
-		t.Run("accept/"+name, func(t *testing.T) {
-			if _, err := domain.Normalize(in); err != nil {
-				t.Fatalf("Normalize(%q) should succeed, got %v", in, err)
-			}
-		})
 	}
 }

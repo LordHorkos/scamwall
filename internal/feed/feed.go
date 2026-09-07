@@ -130,6 +130,12 @@ type Indicator struct {
 	Confidence Confidence
 	Category   string
 	ExpiresAt  *time.Time
+	// Signals are what the domain package observed about the name. They are
+	// carried, not acted on: this package decides whether a feed is WELL
+	// FORMED, and whether a name is worth blocking is a policy question with
+	// different inputs. Sorted and deduplicated, so a plan built from them is
+	// deterministic.
+	Signals []domain.Signal
 }
 
 // Validated is the result of loading and validating a feed.
@@ -273,13 +279,24 @@ func Validate(data []byte, opts Options) (*Validated, error) {
 	seen := make(map[domain.Domain]Action, len(m.Records))
 
 	for i, r := range m.Records {
-		canonical, err := domain.Normalize(r.Domain)
+		// Assess, not Normalize: this needs both the canonical form and what
+		// was observed about the name.
+		//
+		// Only a SYNTAX failure rejects the feed. That distinction is the
+		// whole of SW-P3-05: a syntactically valid name that happens to mix
+		// scripts used to return an error here, and an error here destroys
+		// the entire signed feed — every unrelated indicator in it — because
+		// a malformed file and a suspicious entry were the same outcome.
+		// Whole-feed rejection is retained for exactly what it is for:
+		// integrity, signature and structural failures.
+		assessment, err := domain.Assess(r.Domain)
 		if err != nil {
 			// The raw value is included because it came from a signed feed and
 			// an operator needs to know which entry is wrong. It is feed
 			// content, never a credential.
 			return nil, fmt.Errorf("%w: record %d (%q): %v", ErrInvalidRecord, i, r.Domain, err)
 		}
+		canonical := assessment.Domain
 		if !r.Action.Valid() {
 			return nil, fmt.Errorf("%w: record %d (%s): %q", ErrInvalidAction, i, canonical, r.Action)
 		}
@@ -308,6 +325,7 @@ func Validate(data []byte, opts Options) (*Validated, error) {
 			Confidence: r.Confidence,
 			Category:   r.Category,
 			ExpiresAt:  r.ExpiresAt,
+			Signals:    assessment.Signals(),
 		})
 	}
 

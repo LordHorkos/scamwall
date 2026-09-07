@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -336,8 +337,24 @@ func printPlan(w *os.File, p *policy.Plan) {
 		}
 	}
 
-	fmt.Fprintf(w, "\n%d proposed, %d excluded (%d not block, %d below confidence, %d expired)\n",
-		p.Count(), p.Exclusions.Total(),
+	if p.ReviewCount() > 0 {
+		fmt.Fprintln(w, "\nheld for review — eligible on the feed's terms, not proposed:")
+		for _, r := range p.Review {
+			fmt.Fprintf(w, "  review %s  [%s]", r.Domain, r.Reason)
+			if len(r.Signals) > 0 {
+				signals := make([]string, 0, len(r.Signals))
+				for _, s := range r.Signals {
+					signals = append(signals, string(s))
+				}
+				fmt.Fprintf(w, "  signals: %s", strings.Join(signals, ","))
+			}
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, "  A signal is not evidence. Nothing above is claimed to be malicious.")
+	}
+
+	fmt.Fprintf(w, "\n%d proposed, %d held for review, %d excluded (%d not block, %d below confidence, %d expired)\n",
+		p.Count(), p.ReviewCount(), p.Exclusions.Total(),
 		p.Exclusions.NotBlockAction, p.Exclusions.BelowConfidence, p.Exclusions.ExpiredInFeed)
 }
 
