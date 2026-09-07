@@ -395,6 +395,22 @@ build_ok() {
   [ "$RC" -eq 0 ] || { fail "setup: build should have passed" "rc=$RC: $(tail -8 <<<"$OUT" | tr '\n' '|')"; return 1; }
   return 0
 }
+# secret_ok — 0, A, B and C, which is what step D now REQUIRES before it will
+# authenticate. Before this, step D ran off a passing step A and a flag; the
+# cases that exercise step D therefore had to be changed to get there
+# legitimately, and that change is itself part of the fix.
+probe_ok() {
+  build_ok || return 1
+  run_step probe --work-dir "$WORK"
+  [ "$RC" -eq 0 ] || { fail "setup: probe should have passed" "rc=$RC: $(tail -8 <<<"$OUT" | tr '\n' '|')"; return 1; }
+  return 0
+}
+secret_ok() {
+  probe_ok || return 1
+  run_step secret --work-dir "$WORK"
+  [ "$RC" -eq 0 ] || { fail "setup: secret should have passed" "rc=$RC: $(tail -8 <<<"$OUT" | tr '\n' '|')"; return 1; }
+  return 0
+}
 
 matches() { # pattern -> 0 match, 1 no match, 2 grep failed
   local rc
@@ -509,15 +525,15 @@ build_ok && {
   # The verifier's own capture, not the program's stdout: the whole point of
   # capture_run is that a subordinate program's output goes to a file whose
   # path the operator is told, rather than into the middle of the verdict.
-  if grep -qx "SCAMWALL_EXPECTED_IMAGE_ID=$IMAGE_A" "$WORK/verify.log" 2>/dev/null; then
+  if grep -qx "SCAMWALL_EXPECTED_IMAGE_ID=$IMAGE_A" "$WORK/raw/verify.log" 2>/dev/null; then
     pass "the runtime verifier is pinned to the resolved image id"
   else
-    fail "the runtime verifier is pinned to the resolved image id" "verify.log: $(tr '\n' '|' < "$WORK/verify.log" 2>/dev/null)"
+    fail "the runtime verifier is pinned to the resolved image id" "verify.log: $(tr '\n' '|' < "$WORK/raw/verify.log" 2>/dev/null)"
   fi
-  if grep -qx "SCAMWALL_IMAGE=$IMAGE_A" "$WORK/verify.log" 2>/dev/null; then
+  if grep -qx "SCAMWALL_IMAGE=$IMAGE_A" "$WORK/raw/verify.log" 2>/dev/null; then
     pass "the runtime verifier is pointed at the resolved image id, not the tag"
   else
-    fail "the runtime verifier is pointed at the resolved image id, not the tag" "verify.log: $(tr '\n' '|' < "$WORK/verify.log" 2>/dev/null)"
+    fail "the runtime verifier is pointed at the resolved image id, not the tag" "verify.log: $(tr '\n' '|' < "$WORK/raw/verify.log" 2>/dev/null)"
   fi
   expect_output "the FINDING-29 judgement is required from the verifier" 'FINDING-29'
 }
@@ -712,7 +728,7 @@ build_ok && {
 }
 
 setup_case status-ok
-build_ok && {
+secret_ok && {
   run_step status --work-dir "$WORK" --authorise-authenticated-read
   expect_rc_zero "an accepted session teardown passes"
   expect_output "acceptance is reported as a fact about a REQUEST" 'fact about a REQUEST'
@@ -722,7 +738,7 @@ build_ok && {
 }
 
 setup_case status-logout-fails
-build_ok && {
+secret_ok && {
   sed 's/^session logout ACCEPTED by Pi-hole/session logout FAILED./' \
     "$FAKE_DIR/status-output" > "$FAKE_DIR/s" && mv "$FAKE_DIR/s" "$FAKE_DIR/status-output"
   printf '1' > "$FAKE_DIR/rc.start"
@@ -733,7 +749,7 @@ build_ok && {
 }
 
 setup_case status-silent-on-teardown
-build_ok && {
+secret_ok && {
   printf 'component  local\ncore       v6.0.4\n' > "$FAKE_DIR/status-output"
   run_step status --work-dir "$WORK" --authorise-authenticated-read
   expect_rc_nonzero "output that says nothing about the teardown is UNPROVEN, not a pass"
@@ -840,8 +856,12 @@ preflight_ok && {
   printf '%s' "$IMAGE_B" > "$FAKE_DIR/image-id"
   run_step build --work-dir "$WORK"
   expect_rc_zero "a second build into the same work directory passes"
-  expect_output "the replacement of the recorded image id is announced" \
-    'IMAGE_ID was already recorded with a different value'
+  # The message changed with the fix and says something stronger. The previous
+  # one announced a REPLACEMENT after the fact; this one announces that the
+  # previous identity was INVALIDATED before the rebuild started, which is what
+  # makes a failed rebuild safe as well as a successful one.
+  expect_output "the invalidation of the recorded image id is announced" \
+    'previously recorded IMAGE_ID is INVALIDATED'
 
   N_IDS="$(grep -c '^IMAGE_ID=' "$WORK/state.env" 2>/dev/null)" || N_IDS="?"
   if [ "$N_IDS" = "1" ]; then
@@ -1076,19 +1096,32 @@ preflight_ok && {
   printf '1' > "$FAKE_DIR/rc.build"
   run_step build --work-dir "$WORK"
   expect_rc_nonzero "the failing build fails"
-  expect_output "the operator is told where the evidence is" "Evidence and sanitized logs remain in: $WORK"
+  expect_output "the operator is told where this step's files are" "This step's files are in: $WORK"
+  expect_output "the raw directory is named as unsanitized"        "$WORK/raw"
+  expect_output "the raw directory is labelled DO NOT SHARE"       'DO NOT SHARE IT'
+  expect_output "the evidence directory is named as the shareable one" "$WORK/evidence"
+  expect_output "the deny-by-pattern limit is stated where the evidence is offered" \
+    'establishes what its patterns catch'
   expect_output "the operator is told how to remove it safely" "rm -rf -- $WORK"
-  if [ -f "$WORK/build.log" ]; then
+  if [ -f "$WORK/raw/build.log" ]; then
     pass "a FAILING run's log is not erased before the operator can read it"
   else
-    fail "a FAILING run's log is not erased before the operator can read it" "$WORK/build.log is gone"
+    fail "a FAILING run's log is not erased before the operator can read it" "$WORK/raw/build.log is gone"
   fi
   MODE="$(stat -c '%a' "$WORK" 2>/dev/null)"
   if [ "$MODE" = "700" ]; then pass "the work directory is mode 700"
   else fail "the work directory is mode 700" "mode is $MODE"; fi
-  LOGMODE="$(stat -c '%a' "$WORK/build.log" 2>/dev/null)"
+  for D in raw evidence; do
+    DMODE="$(stat -c '%a' "$WORK/$D" 2>/dev/null)"
+    if [ "$DMODE" = "700" ]; then pass "the $D directory is mode 700"
+    else fail "the $D directory is mode 700" "mode is $DMODE"; fi
+  done
+  LOGMODE="$(stat -c '%a' "$WORK/raw/build.log" 2>/dev/null)"
   if [ "$LOGMODE" = "600" ]; then pass "a captured log is mode 600"
   else fail "a captured log is mode 600" "mode is $LOGMODE"; fi
+  EMODE="$(stat -c '%a' "$WORK/evidence/build.log" 2>/dev/null)"
+  if [ "$EMODE" = "600" ]; then pass "a published evidence file is mode 600"
+  else fail "a published evidence file is mode 600" "mode is $EMODE"; fi
 }
 
 setup_case work-dir-loose
@@ -1143,6 +1176,513 @@ else
   printf '\033[33mskip\033[0m docker or jq is not installed; the canned fixture is not cross-checked\n'
 fi
 
+
+# ==============================================================================
+# 12. The five defects of the second review pass — FINDING-51 … FINDING-55
+# ==============================================================================
+#
+# Each block asserts that the FORBIDDEN ACTION does not occur, not merely that
+# the program printed a complaint about it. The distinction is the whole of
+# FINDING-51: the superseded program printed an accurate complaint and then
+# performed the action anyway.
+
+state_has() { # <label> <extended regex over the state file>
+  if grep -qE "$2" "$WORK/state.env" 2>/dev/null; then pass "$1"
+  else fail "$1" "state.env did not match /$2/: $(tr '\n' '|' < "$WORK/state.env" 2>/dev/null)"; fi
+}
+state_lacks() { # <label> <extended regex over the state file>
+  if grep -qE "$2" "$WORK/state.env" 2>/dev/null; then
+    fail "$1" "state.env unexpectedly matched /$2/: $(tr '\n' '|' < "$WORK/state.env" 2>/dev/null)"
+  else pass "$1"; fi
+}
+
+# --- FINDING-51: a failed pre-start assertion must PREVENT the start ----------
+echo
+echo "-- FINDING-51: no start after a failed isolation assertion --"
+
+# Step B mounts no credential. The fake is told to report one mounted anyway,
+# which is what an operator would see if the argument construction were wrong
+# or the daemon did something unexpected.
+setup_case iso-secret-mounted
+build_ok && {
+  reset_log
+  : > "$FAKE_DIR/force-secret-mount"
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B fails when the credential-free probe has a credential mounted"
+  expect_output "the mounted credential is reported"  'IS mounted'
+  expect_output "the start is refused, in those words" 'was NOT started'
+  expect_output "the refusal counts the failed assertions" 'pre-start isolation assertion'
+  # THE assertion. Before the fix the program printed the two lines above and
+  # then started the container regardless.
+  log_lacks "the container is NEVER started"          '^start'
+  log_has   "the container it refused to start is removed" '^rm -f cid'
+  state_has "step B is recorded as failed"            '^STEP_STATUS_PROBE=failed$'
+}
+
+# Step C runs with --network none. The fake is told the created container has
+# bridge networking, so the offline claim is false.
+setup_case iso-network-wrong
+build_ok && {
+  reset_log
+  printf 'bridge' > "$FAKE_DIR/force-network-mode"
+  run_step secret --work-dir "$WORK"
+  expect_rc_nonzero "step C fails when the offline probe turns out to have a network"
+  expect_output "the observed network mode is named" "network mode is 'bridge', expected 'none'"
+  expect_output "the start is refused"               'was NOT started'
+  log_lacks "the container that would have opened the credential is NEVER started" '^start'
+  log_has   "it is removed instead"                  '^rm -f cid'
+}
+
+# An assertion that cannot be EVALUATED is not permission to start either. The
+# fake's inspect fails for a container it does not consider live.
+setup_case iso-unprovable
+build_ok && {
+  reset_log
+  : > "$FAKE_DIR/force-secret-mount"
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "an isolation assertion that fails blocks the start"
+  log_lacks "nothing is started while isolation is unestablished" '^start'
+}
+
+# The version probe in step A is gated by the same rule.
+setup_case iso-version-probe
+preflight_ok && {
+  reset_log
+  : > "$FAKE_DIR/force-secret-mount"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "step A fails when its version probe has a credential mounted"
+  expect_output "the version probe's start is refused" 'was NOT started'
+  log_lacks "the version probe is never started"       '^start'
+  state_lacks "a step A that refused to start its probe records no image id" '^IMAGE_ID='
+}
+
+# --- FINDING-52: completion is persisted only after checks AND cleanup --------
+echo
+echo "-- FINDING-52: a step that did not pass publishes nothing --"
+
+setup_case persist-build-failed
+preflight_ok && {
+  printf '1' > "$FAKE_DIR/rc.build"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a failing build fails"
+  state_lacks "a failed step A records NO image id"   '^IMAGE_ID='
+  state_has   "step A is recorded as failed"          '^STEP_STATUS_BUILD=failed$'
+  # And the next step will not run off it.
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B refuses after a failed step A"
+  expect_output "the refusal names step A's recorded status" 'step build is recorded as FAILED'
+  log_lacks "nothing is created after a failed step A" '^create'
+}
+
+# A step whose checks all passed and whose CLEANUP failed is not a passed step.
+setup_case persist-cleanup-failed
+preflight_ok && {
+  printf '1' > "$FAKE_DIR/rc.rm"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a build whose cleanup failed does not pass"
+  expect_output "the reason is stated as cleanup" 'REQUIRED CLEANUP FAILED'
+  expect_output "the step status is explained"    'completion requires cleanup as well as checks'
+  state_has   "step A is recorded as failed"      '^STEP_STATUS_BUILD=failed$'
+  state_lacks "its image id is NOT published"     '^IMAGE_ID='
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B refuses after a step A whose cleanup failed"
+}
+
+# The runtime verifier failing is a check failure like any other, and it used to
+# be the clearest case: IMAGE_ID was written three lines above the verdict.
+setup_case persist-verifier-failed
+preflight_ok && {
+  printf '1' > "$FAKE_DIR/rc.verify"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a build whose runtime verification failed does not pass"
+  # The image RESOLVED — the id is known and was printed — and is then withheld
+  # because the step did not pass. The operator is told so by name.
+  expect_output "the image id is reported as resolved"   'IMAGE_ID=sha256:'
+  expect_output "the withheld identities are named"      'IMAGE_ID — NOT RECORDED'
+  expect_output "the reason is stated"                   'a later step must not run'
+  state_lacks "the unverified image id is NOT published" '^IMAGE_ID='
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B refuses to run against an image step A did not verify"
+}
+
+setup_case persist-interrupted
+build_ok && {
+  reset_log
+  : > "$FAKE_DIR/interrupt"
+  run_step probe --work-dir "$WORK"
+  expect_rc "an interrupted step exits with the signal's status" 143
+  state_has "the interrupted step is recorded as interrupted, not failed" '^STEP_STATUS_PROBE=interrupted$'
+  rm -f "$FAKE_DIR/interrupt"
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "a later step refuses after an interrupted prerequisite"
+  expect_output "the refusal says INTERRUPTED, not FAILED" 'step probe was INTERRUPTED'
+}
+
+# A refusal AFTER the step began is neither passed nor failed: what it
+# established is unknown, and it is refused in those words.
+setup_case persist-indeterminate
+build_ok && {
+  printf '%s' "$OTHER_SHA" > "$FAKE_DIR/head-sha"
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "a step that refuses after beginning exits nonzero"
+  expect_output "it is recorded as indeterminate" 'recorded as INDETERMINATE'
+  state_has "the state file says indeterminate" '^STEP_STATUS_PROBE=indeterminate$'
+  printf '%s' "$HEAD_SHA" > "$FAKE_DIR/head-sha"
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "a later step refuses an indeterminate prerequisite"
+  expect_output "the refusal distinguishes it from a failure" 'recorded as INDETERMINATE'
+}
+
+# --- A failed rebuild must not leave an earlier success usable ---------------
+echo
+echo "-- a failed rebuild invalidates what the previous one established --"
+
+setup_case rebuild-failed-invalidates
+build_ok && {
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "step B passes against the first build"
+  state_has "step B is recorded as passed" '^STEP_STATUS_PROBE=passed$'
+
+  # The rebuild fails.
+  printf '1' > "$FAKE_DIR/rc.build"
+  reset_log
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "the rebuild fails"
+  expect_output "step B's acceptance is announced as invalidated" 'step probe was recorded as passed; that acceptance is INVALIDATED'
+  state_lacks "the previous build's image id is gone"  '^IMAGE_ID='
+  state_has   "step B is back to not_started"          '^STEP_STATUS_PROBE=not_started$'
+
+  # And nothing downstream will run.
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B refuses after a failed rebuild"
+  log_lacks "no container is created from the previous build's image" '^create'
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses after a failed rebuild"
+}
+
+# --- FINDING-53: the authorisation flag is intent, never evidence -------------
+echo
+echo "-- FINDING-53: --authorise-authenticated-read is not proof of anything --"
+
+setup_case authz-no-prereqs
+build_ok && {
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses with the flag when steps B and C have not run"
+  expect_output "the refusal names the missing prerequisite" 'step probe has not been run'
+  expect_output "the flag is explicitly rejected as evidence" 'an authorisation flag is not evidence'
+  log_lacks "nothing is created"      '^create'
+  log_lacks "nothing authenticates"   '^start'
+}
+
+setup_case authz-failed-prereq
+build_ok && {
+  : > "$FAKE_DIR/force-secret-mount"
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B fails"
+  rm -f "$FAKE_DIR/force-secret-mount"
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses with the flag after a FAILED step B"
+  expect_output "the refusal names step B's status" 'step probe is recorded as FAILED'
+  log_lacks "nothing authenticates after a failed prerequisite" '^start'
+}
+
+setup_case authz-secret-missing
+probe_ok && {
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses when step C has not run"
+  expect_output "the refusal names step C" 'step secret has not been run'
+  log_lacks "nothing authenticates" '^start'
+}
+
+# A prerequisite that passed against a DIFFERENT resolved deployment
+# configuration is stale, and step D says so rather than inheriting it.
+setup_case authz-stale-config
+secret_ok && {
+  reset_log
+  # The deployment's resolved configuration changes between step C and step D.
+  # Nothing about the change matters except that it is a change.
+  sed 's/"pids_limit": 64/"pids_limit": 32/' "$FAKE_DIR/compose-config.json" > "$FAKE_DIR/c" \
+    && mv "$FAKE_DIR/c" "$FAKE_DIR/compose-config.json"
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses when the deployment configuration changed after step B and C"
+  expect_output "the staleness is named"        'its acceptance is STALE'
+  expect_output "the changed identity is named" 'different resolved deployment configuration'
+  log_lacks "nothing authenticates against a deployment the prerequisites did not cover" '^start'
+}
+
+# The happy path still works, so the gate is not simply refusing everything.
+setup_case authz-full-chain
+secret_ok && {
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_zero "step D runs when the flag AND all three prerequisites are satisfied"
+  expect_output "the prerequisites are reported individually" 'prerequisite: step secret is recorded as passed'
+  expect_output "the flag is reported as intent, not evidence" 'that flag is intent, not evidence'
+  state_has "step D is recorded as passed" '^STEP_STATUS_STATUS=passed$'
+}
+
+# --- FINDING-54: raw captures are separated from shareable evidence -----------
+echo
+echo "-- FINDING-54: what may be shared is not the file the command wrote --"
+
+setup_case evidence-separation
+preflight_ok && {
+  SECRET_TOKEN='hunter2-not-a-real-password'
+  printf '1' > "$FAKE_DIR/rc.build"
+  {
+    printf '#5 [build 1/2] RUN something\n'
+    printf 'PIHOLE_PASSWORD=%s\n' "$SECRET_TOKEN"
+    printf '#5 ERROR: process did not complete successfully\n'
+  } > "$FAKE_DIR/build-output"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "the failing build fails"
+
+  if [ -f "$WORK/raw/build.log" ]; then pass "the raw capture exists"
+  else fail "the raw capture exists" "$WORK/raw/build.log is missing"; fi
+  if [ -f "$WORK/evidence/build.log" ]; then pass "a sanitized copy exists beside it"
+  else fail "a sanitized copy exists beside it" "$WORK/evidence/build.log is missing"; fi
+
+  # The raw file is the command's own output — that is what makes it raw, and
+  # what makes it unsafe to return.
+  if grep -qF "$SECRET_TOKEN" "$WORK/raw/build.log" 2>/dev/null; then
+    pass "the RAW capture is unmodified, and holds the credential-shaped value"
+  else
+    fail "the RAW capture is unmodified, and holds the credential-shaped value" "the token is absent from the raw log"
+  fi
+  # The shareable copy does not.
+  if grep -qF "$SECRET_TOKEN" "$WORK/evidence/build.log" 2>/dev/null; then
+    fail "the SHAREABLE copy retains no credential material" "the token survived into $WORK/evidence/build.log"
+  else
+    pass "the SHAREABLE copy retains no credential material"
+  fi
+  if grep -q '<redacted' "$WORK/evidence/build.log" 2>/dev/null; then
+    pass "the shareable copy records that something was redacted"
+  else
+    fail "the shareable copy records that something was redacted" "no redaction marker in the evidence copy"
+  fi
+  # The two directories say what they are, in the directories themselves,
+  # because an operator collecting evidence reads the directory and not this
+  # program's terminal output from an hour ago.
+  if grep -q 'DO NOT SHARE' "$WORK/raw/README-DO-NOT-SHARE.txt" 2>/dev/null; then
+    pass "the raw directory carries its own DO-NOT-SHARE marker"
+  else
+    fail "the raw directory carries its own DO-NOT-SHARE marker" "marker missing or empty"
+  fi
+  if grep -q 'deny-by-pattern' "$WORK/evidence/README.txt" 2>/dev/null; then
+    pass "the evidence directory states the filter's deny-by-pattern limit"
+  else
+    fail "the evidence directory states the filter's deny-by-pattern limit" "limit not stated"
+  fi
+  # The resolved deployment configuration holds the deployment's real paths and
+  # belongs in raw/, not in the directory the operator is told to return.
+  if [ -f "$WORK/evidence/compose-config.json" ]; then
+    fail "the resolved configuration is not published as evidence" "it is in evidence/"
+  else
+    pass "the resolved configuration is not published as evidence"
+  fi
+}
+
+# --- FINDING-55: closeout examines the identities of the steps that ran -------
+echo
+echo "-- FINDING-55: step Z looks for the EARLIER steps' resources --"
+
+setup_case closeout-finds-leftovers
+build_ok && {
+  # Step B leaks a container: its removal fails, so it really is still there.
+  printf '1' > "$FAKE_DIR/rc.rm"
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B reports its own cleanup failure"
+  LEFTOVER="$(grep -m1 . "$FAKE_DIR/live" 2>/dev/null)"
+  if [ -n "$LEFTOVER" ]; then pass "a container really does remain on the fake daemon"
+  else fail "a container really does remain on the fake daemon" "the fake's live list is empty"; fi
+
+  # The register tells step Z which project to look under; the fake answers
+  # that query with the leftover.
+  rm -f "$FAKE_DIR/rc.rm"
+  printf '%s\n' "$LEFTOVER" > "$FAKE_DIR/project-containers"
+  run_step closeout --work-dir "$WORK"
+  expect_rc_nonzero "step Z FAILS when an earlier step's container remains"
+  expect_output "the leftover is attributed to the step that created it" 'containers of step probe REMAIN'
+  expect_output "the leftover identifier is printed"                     "$LEFTOVER"
+  expect_no_output "step Z does not report a clean host"                 'no container of step probe remains'
+}
+
+# The tautology in its own right: with nothing recorded, step Z must not
+# report a clean result. Before the fix this printed PASS three times.
+setup_case closeout-no-register
+preflight_ok && {
+  run_step closeout --work-dir "$WORK"
+  expect_rc_nonzero "step Z is not a pass when no step recorded an invocation"
+  expect_output "the result is stated as unproven" 'leftovers are UNPROVEN'
+  expect_no_output "no clean-host claim is made"   'no container of'
+}
+
+setup_case closeout-clean
+build_ok && {
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "step B passes"
+  : > "$FAKE_DIR/project-containers"
+  run_step closeout --work-dir "$WORK"
+  expect_output "step Z names the steps it searched for"  'searching for resources of step build'
+  expect_output "step Z searches for step B as well"      'searching for resources of step probe'
+  expect_output "a genuinely clean result names the step" 'no container of step probe remains'
+  expect_no_output "step Z does not search for itself"    'searching for resources of step closeout'
+}
+
+# An enumeration that could not run is not an empty result.
+setup_case closeout-enumeration-fails
+build_ok && {
+  printf '1' > "$FAKE_DIR/rc.project-query"
+  run_step closeout --work-dir "$WORK"
+  expect_rc_nonzero "step Z fails when it cannot enumerate"
+  expect_output "the failure is reported as unproven" 'leftovers are UNPROVEN'
+  expect_no_output "no clean-host claim is made"      'no container of step build remains'
+}
+
+# --- FINDING-56: the privileged work directory and state file ----------------
+echo
+echo "-- FINDING-56: the work directory and state file are validated --"
+
+setup_case wd-symlink
+mkdir -p "$ROOT/real-target-$$"
+# Whatever the mode is here, it must be the mode afterwards. `mkdir -p` on an
+# existing symlink succeeds, and the chmod 700 that used to follow it landed on
+# THIS directory — a privileged chmod of a path the operator never named.
+MODE_BEFORE="$(stat -c '%a' "$ROOT/real-target-$$" 2>/dev/null)"
+ln -sfn "$ROOT/real-target-$$" "$WORK"
+run_step preflight --expected-commit "$HEAD_SHA" --work-dir "$WORK"
+expect_rc_nonzero "a work directory that is a symlink is refused at creation"
+expect_output "the refusal names the symlink" 'is a symbolic link'
+MODE_AFTER="$(stat -c '%a' "$ROOT/real-target-$$" 2>/dev/null)"
+if [ "$MODE_AFTER" = "$MODE_BEFORE" ]; then
+  pass "the symlink's TARGET was not chmod-ed"
+else
+  fail "the symlink's TARGET was not chmod-ed" "mode went from $MODE_BEFORE to $MODE_AFTER"
+fi
+if [ -e "$ROOT/real-target-$$/state.env" ]; then
+  fail "nothing was written into the symlink's target" "state.env was created there"
+else
+  pass "nothing was written into the symlink's target"
+fi
+rm -f "$WORK"
+
+setup_case wd-symlink-open
+mkdir -p "$ROOT/opened-target-$$" && chmod 700 "$ROOT/opened-target-$$"
+: > "$ROOT/opened-target-$$/state.env" && chmod 600 "$ROOT/opened-target-$$/state.env"
+ln -sfn "$ROOT/opened-target-$$" "$WORK"
+run_step build --work-dir "$WORK"
+expect_rc_nonzero "a later step refuses a work directory reached through a symlink"
+expect_output "the refusal names the symlink" 'is a symbolic link'
+rm -f "$WORK"
+
+setup_case wd-state-symlink
+preflight_ok && {
+  printf 'EXPECTED_COMMIT=%s\n' "$OTHER_SHA" > "$ROOT/planted-state-$$"
+  chmod 600 "$ROOT/planted-state-$$"
+  rm -f "$WORK/state.env"
+  ln -sfn "$ROOT/planted-state-$$" "$WORK/state.env"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a state file that is a symlink is refused"
+  expect_output "the refusal names the state file" 'the state file is a symbolic link'
+  expect_no_output "the planted identity is never adopted" "$OTHER_SHA"
+}
+
+setup_case wd-state-hardlinked
+preflight_ok && {
+  ln "$WORK/state.env" "$ROOT/second-name-$$" 2>/dev/null && {
+    run_step build --work-dir "$WORK"
+    expect_rc_nonzero "a state file with a second name is refused"
+    expect_output "the refusal says why a second name matters" 'its content is not solely this run'
+  }
+  rm -f "$ROOT/second-name-$$"
+}
+
+setup_case wd-state-mode
+preflight_ok && {
+  chmod 644 "$WORK/state.env"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a state file that is not 600 is refused"
+  expect_output "the observed mode is named" 'the state file is mode 644, not 600'
+}
+
+setup_case wd-writable-ancestor
+PARENT="$ROOT/loose-parent-$$"
+mkdir -p "$PARENT" && chmod 777 "$PARENT"
+mkdir -p "$PARENT/w" && chmod 700 "$PARENT/w"
+run_step preflight --expected-commit "$HEAD_SHA" --work-dir "$PARENT/w"
+expect_rc_nonzero "a work directory inside a world-writable directory is refused"
+expect_output "the ancestor is named"        "$PARENT"
+expect_output "the reason is substitution"   'could be replaced underneath this run'
+chmod 755 "$PARENT"
+
+setup_case wd-sticky-ancestor-allowed
+# /tmp is 1777. The sticky bit is why mktemp -d is acceptable and a plain 0777
+# directory is not, so the rule must not reject the ordinary case.
+run_step preflight --expected-commit "$HEAD_SHA"
+expect_rc_zero "a work directory under a sticky world-writable directory (mktemp) is accepted"
+expect_output "the directory is reported as validated" 'no ancestor another account can write'
+
+# The ownership comparison cannot be exercised as an unprivileged account
+# against a directory owned by someone else, because such a directory cannot be
+# created here. It is exercised against a shimmed `id`, which is the other side
+# of the same comparison: the directory is ours and the running uid is not.
+setup_case wd-foreign-owner
+mkdir -p "$WORK" && chmod 700 "$WORK" && : > "$WORK/state.env" && chmod 600 "$WORK/state.env"
+cat > "$BIN/id" <<'ID_EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ]; then printf '4242\n'; exit 0; fi
+exec /usr/bin/id "$@"
+ID_EOF
+chmod +x "$BIN/id"
+run_step build --work-dir "$WORK"
+expect_rc_nonzero "a work directory not owned by the account running the step is refused"
+expect_output "both uids are named" 'not by uid 4242 which is running this step'
+rm -f "$BIN/id"
+
+setup_case wd-capture-symlink
+preflight_ok && {
+  ln -sfn "$ROOT/capture-target-$$" "$WORK/raw/build.log"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a capture file that is a symlink is refused"
+  expect_output "the refusal names the capture file" 'the capture file is a symbolic link'
+  if [ -e "$ROOT/capture-target-$$" ]; then
+    fail "the symlink's target was not created or truncated" "$ROOT/capture-target-$$ exists"
+  else
+    pass "the symlink's target was not created or truncated"
+  fi
+}
+
+setup_case wd-raw-symlink
+preflight_ok && {
+  rm -rf "$WORK/raw"
+  ln -sfn "$ROOT/raw-target-$$" "$WORK/raw"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a raw-capture directory that is a symlink is refused"
+  expect_output "the refusal names it" 'the raw-capture directory is a symbolic link'
+}
+
+# --- The state machine is visible in the state file --------------------------
+echo
+echo "-- the recorded step states --"
+
+setup_case states-recorded
+preflight_ok && {
+  state_has "preflight records itself as passed" '^STEP_STATUS_PREFLIGHT=passed$'
+  state_has "preflight records the commit it passed against" "^STEP_COMMIT_PREFLIGHT=$HEAD_SHA\$"
+  run_step build --work-dir "$WORK"
+  expect_rc_zero "step A passes"
+  state_has "step A records itself as passed"   '^STEP_STATUS_BUILD=passed$'
+  state_has "step A records the image it built" "^STEP_IMAGE_BUILD=$IMAGE_A\$"
+  state_has "step A publishes the image id"     "^IMAGE_ID=$IMAGE_A\$"
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "step B passes"
+  state_has "step B records the configuration digest it passed against" '^STEP_CONFIG_PROBE=[0-9a-f]{64}$'
+  state_has "the invocation register accumulates across steps" '^HANDOFF_INVOCATIONS=build:[0-9a-f]{32}:[^ ]+ probe:[0-9a-f]{32}:'
+}
 echo
 echo "=============================================="
 printf ' %d tests, %d failed\n' "$TESTS" "$FAILURES"

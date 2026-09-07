@@ -39,8 +39,27 @@
 # The steps map onto section 6.5 as: preflight = step 0, build = A, probe = B,
 # secret = C, status = D, closeout = Z.
 #
+# STEPS ARE ORDERED, AND THE ORDER IS ENFORCED FROM RECORDED STATE
+#
+# Each step records one of: not_started, running, passed, failed, interrupted,
+# indeterminate. A later step accepts only `passed`, and only when the earlier
+# step's recorded identities — source commit, image id, resolved-configuration
+# digest — match the ones this step is using. A rebuild invalidates every
+# downstream acceptance before it starts, so a failed rebuild cannot leave an
+# earlier success usable. `--authorise-authenticated-read` is the operator's
+# intent and is never accepted as evidence that a prerequisite passed.
+#
+# THE WORK DIRECTORY
+#
+#   <work>/state.env    the identities and step states. Mode 600, ours, no
+#                       symlink, one hard link.
+#   <work>/raw/         UNSANITIZED command output. DO NOT SHARE.
+#   <work>/evidence/    the same output through the gate sanitizer. Shareable,
+#                       subject to that filter being deny-by-pattern.
+#
 # Exit status: 0 only when every check of the step actually ran and passed AND
-# every required cleanup completed.
+# every required cleanup completed. That is also the only case in which the
+# step is recorded as `passed` and the identities it produced are written.
 
 set -uo pipefail
 
@@ -257,6 +276,273 @@ state_require() { # key -> prints value or refuses
   printf '%s' "$v"
 }
 
+# state_clear removes a key entirely, so that a later state_get answers "absent"
+# rather than "recorded empty". The distinction matters: an identity that was
+# INVALIDATED must not read as an identity that exists and happens to be blank.
+state_clear() { # key
+  local key="$1" tmp
+  [ -n "$STATE" ] || refuse "no state file is open"
+  [ -f "$STATE" ] || return 0
+  tmp="$(mktemp -- "${STATE}.XXXXXX")" ||
+    refuse "a temporary file for the state update could not be created next to $STATE"
+  chmod 600 -- "$tmp" 2>/dev/null || true
+  if ! awk -v k="$key" 'index($0, k "=") != 1' "$STATE" > "$tmp"; then
+    rm -f -- "$tmp"
+    refuse "the state file could not be rewritten: $STATE"
+  fi
+  if ! mv -f -- "$tmp" "$STATE"; then
+    rm -f -- "$tmp"
+    refuse "the updated state file could not be installed: $STATE"
+  fi
+}
+
+# state_append_word adds one whitespace-free word to a space-separated list,
+# once. The invocation register is the only such list, and it must ACCUMULATE
+# across steps rather than be replaced by each of them: step Z has to be able
+# to look for the leftovers of every step that ran, including the ones that
+# crashed.
+state_append_word() { # key word
+  local key="$1" word="$2" cur
+  cur="$(state_get "$key")" || cur=""
+  case " $cur " in
+    *" $word "*) return 0 ;;
+  esac
+  state_put "$key" "${cur}${cur:+ }${word}"
+}
+
+# --- Step state machine -------------------------------------------------------
+#
+# WHY THIS EXISTS
+#
+# A step is one invocation of this program, and the operator runs six of them.
+# Nothing recorded what a step DID. The only trace a step left behind was the
+# output on the operator's terminal and whatever identities it happened to
+# write on its way past, and those were written unconditionally — so:
+#
+#   * a step that FAILED and a step that was NEVER RUN were indistinguishable
+#     to every later step;
+#   * step A recorded IMAGE_ID and then went on to FAIL its own runtime
+#     verification, and steps B, C and D read that image id as though it had
+#     been verified;
+#   * step D's refusal said it runs "only after steps A, B and C have passed
+#     and been read", and checked nothing of the sort. It checked a flag.
+#
+# Five states, written to the state file and read by every later step:
+#
+#   not_started    no record exists
+#   running        the step began and has not recorded a verdict
+#   passed         every required check ran AND passed AND cleanup completed
+#   failed         a required check failed, could not run, or cleanup failed
+#   interrupted    a signal arrived while the step was running
+#   indeterminate  the step ended without recording a verdict — a refusal after
+#                  it began, or the process died. NOT a synonym for failed:
+#                  what the step established is unknown, and it is refused as a
+#                  prerequisite in those words rather than in failure's.
+#
+# `passed` is the only state a later step accepts, and it is written in exactly
+# ONE place — record_step_outcome, reached from summary_and_exit AFTER
+# run_cleanup has returned and its problems have been counted.
+STEP_NAME=""
+STEP_STARTED=0
+STAGED_RESULTS=()
+
+# Key names are derived, never typed at each site, so a later step cannot read
+# a key an earlier step wrote under a slightly different name.
+step_key() { # <prefix> <step>
+  local up
+  up="$(printf '%s' "$2" | tr '[:lower:]-' '[:upper:]_')"
+  printf '%s_%s' "$1" "$up"
+}
+
+step_status_of() { # <step> -> prints the recorded status, or not_started
+  local v
+  v="$(state_get "$(step_key STEP_STATUS "$1")")" || v="not_started"
+  [ -n "$v" ] || v="not_started"
+  printf '%s' "$v"
+}
+
+# The identities THIS step is being performed against. Each is set as it
+# becomes known, all are recorded if the step passes, and every step that
+# depends on this one compares against them.
+BIND_COMMIT=""
+BIND_IMAGE=""
+BIND_CONFIG=""
+
+# begin_step — the transition into `running`, taken before anything the step
+# does can matter. It needs an open state file, so it follows the work
+# directory being opened and validated.
+begin_step() { # <step>
+  local prior
+  STEP_NAME="$1"
+  prior="$(step_status_of "$STEP_NAME")"
+  state_put "$(step_key STEP_STATUS "$STEP_NAME")" running
+  STEP_STARTED=1
+  case "$prior" in
+    not_started) ;;
+    passed) note "step $STEP_NAME was already recorded as passed; that record is SUPERSEDED by this run" ;;
+    *)      note "step $STEP_NAME was previously recorded as $prior; that record is SUPERSEDED by this run" ;;
+  esac
+}
+
+# stage_result — an identity this step PRODUCED. Held until the step's verdict
+# is known, and written only if that verdict is `passed`.
+#
+# Step A used to write IMAGE_ID, BUILD_COMMIT and BUILD_DATE unconditionally,
+# immediately before computing a verdict that could be FAILED. A build whose
+# runtime verification failed still published the image id that steps B, C and
+# D then created their containers from.
+stage_result() { # key value
+  STAGED_RESULTS+=("$1=$2")
+}
+
+commit_staged_results() {
+  local kv
+  for kv in ${STAGED_RESULTS[@]+"${STAGED_RESULTS[@]}"}; do
+    state_put "${kv%%=*}" "${kv#*=}"
+  done
+  STAGED_RESULTS=()
+}
+
+discard_staged_results() {
+  local n kv
+  n="${#STAGED_RESULTS[@]}"
+  if [ "$n" -gt 0 ]; then
+    note "this step did not pass, so the $n identity/identities it produced are NOT recorded:"
+    for kv in ${STAGED_RESULTS[@]+"${STAGED_RESULTS[@]}"}; do
+      note "  ${kv%%=*} — NOT RECORDED"
+    done
+    note "no later step can read them, which is the point: a later step must not run"
+    note "against an identity produced by a step that did not pass."
+  fi
+  STAGED_RESULTS=()
+}
+
+# record_step_outcome — the ONLY writer of a terminal step state.
+#
+# Reached from summary_and_exit after run_cleanup, from the signal handler
+# after run_cleanup, and from the EXIT trap for a step that ended without a
+# verdict. It clears STEP_STARTED first, so whichever arrives first wins and a
+# later handler cannot overwrite a recorded verdict.
+record_step_outcome() { # <passed|failed|interrupted|indeterminate>
+  local outcome="$1"
+  [ "$STEP_STARTED" -eq 1 ] || return 0
+  STEP_STARTED=0
+  [ -n "$STATE" ] && [ -f "$STATE" ] || return 0
+  state_put "$(step_key STEP_STATUS "$STEP_NAME")" "$outcome"
+  if [ "$outcome" = "passed" ]; then
+    # The identities the step was performed against, recorded WITH the pass, so
+    # a later step can tell "step B passed" from "step B passed against the
+    # image and the configuration I am about to use".
+    [ -n "$BIND_COMMIT" ] && state_put "$(step_key STEP_COMMIT "$STEP_NAME")" "$BIND_COMMIT"
+    [ -n "$BIND_IMAGE" ]  && state_put "$(step_key STEP_IMAGE  "$STEP_NAME")" "$BIND_IMAGE"
+    [ -n "$BIND_CONFIG" ] && state_put "$(step_key STEP_CONFIG "$STEP_NAME")" "$BIND_CONFIG"
+    commit_staged_results
+  else
+    # A non-passing step leaves behind no binding that could be mistaken for one.
+    state_clear "$(step_key STEP_COMMIT "$STEP_NAME")"
+    state_clear "$(step_key STEP_IMAGE  "$STEP_NAME")"
+    state_clear "$(step_key STEP_CONFIG "$STEP_NAME")"
+    discard_staged_results
+  fi
+  return 0
+}
+
+# require_step_passed — a PREREQUISITE, checked against what the earlier step
+# recorded. Each non-passing state is refused in its own words, because
+# "interrupted" and "failed" call for different operator actions.
+require_step_passed() { # <step> <why this step needs it>
+  local step="$1" why="$2" status
+  status="$(step_status_of "$step")"
+  case "$status" in
+    passed) ;;
+    not_started)
+      refuse "step $step has not been run in this work directory, and $why. Run it first — an authorisation flag is not evidence that a prerequisite passed" ;;
+    running)
+      refuse "step $step is recorded as RUNNING: it began and never recorded a verdict, so it did not pass. Re-run it" ;;
+    indeterminate)
+      refuse "step $step is recorded as INDETERMINATE: it began and ended without recording a verdict, so what it established is unknown. Re-run it" ;;
+    interrupted)
+      refuse "step $step was INTERRUPTED and did not complete, so it did not pass. Re-run it" ;;
+    failed)
+      refuse "step $step is recorded as FAILED, and $why. Correct the failure and re-run it" ;;
+    *)
+      refuse "step $step has an unrecognised recorded status '$status'; it is not 'passed', so it is refused" ;;
+  esac
+  ok "prerequisite: step $step is recorded as passed in this work directory"
+}
+
+# assert_prereq_identities — the earlier step passed, but against WHAT?
+#
+# Called once the identities this step will use are known. Every component the
+# earlier step recorded and this step also has must agree; a component only one
+# of them has is not compared, and the report names the ones that were.
+assert_prereq_identities() { # <step>
+  local step="$1" compared="" rec
+  rec="$(state_get "$(step_key STEP_COMMIT "$step")")" || rec=""
+  if [ -n "$rec" ] && [ -n "$BIND_COMMIT" ]; then
+    if [ "$rec" != "$BIND_COMMIT" ]; then
+      bad "step $step passed against source commit $rec, but this step is using $BIND_COMMIT — its acceptance is STALE"
+      return 1
+    fi
+    compared="${compared}${compared:+, }source commit"
+  fi
+  rec="$(state_get "$(step_key STEP_IMAGE "$step")")" || rec=""
+  if [ -n "$rec" ] && [ -n "$BIND_IMAGE" ]; then
+    if [ "$rec" != "$BIND_IMAGE" ]; then
+      bad "step $step passed against image $rec, but this step is using $BIND_IMAGE — its acceptance is STALE"
+      return 1
+    fi
+    compared="${compared}${compared:+, }image id"
+  fi
+  rec="$(state_get "$(step_key STEP_CONFIG "$step")")" || rec=""
+  if [ -n "$rec" ] && [ -n "$BIND_CONFIG" ]; then
+    if [ "$rec" != "$BIND_CONFIG" ]; then
+      bad "step $step passed against a different resolved deployment configuration (was $rec, now $BIND_CONFIG) — its acceptance is STALE"
+      return 1
+    fi
+    compared="${compared}${compared:+, }configuration digest"
+  fi
+  if [ -z "$compared" ]; then
+    blocked "step $step recorded no identity this step can compare against — what it passed against is UNPROVEN"
+    return 1
+  fi
+  ok "step $step passed against exactly these identities ($compared)"
+  return 0
+}
+
+# invalidate_after_rebuild — a rebuild voids every downstream acceptance, and
+# it does so BEFORE the build runs.
+#
+# Doing it first is what makes a FAILED rebuild safe. If it ran only on
+# success, a build that failed halfway would leave the PREVIOUS build's
+# IMAGE_ID in the state file with the previous B/C/D passes standing beside it,
+# and the operator's next step would create containers from an image no step in
+# this work directory ever verified — while every step reported a pass.
+DOWNSTREAM_OF_BUILD="probe secret status"
+invalidate_after_rebuild() { # <reason>
+  local s status touched=0
+  for s in $DOWNSTREAM_OF_BUILD; do
+    status="$(step_status_of "$s")"
+    [ "$status" = "not_started" ] && continue
+    state_put "$(step_key STEP_STATUS "$s")" not_started
+    state_clear "$(step_key STEP_COMMIT "$s")"
+    state_clear "$(step_key STEP_IMAGE  "$s")"
+    state_clear "$(step_key STEP_CONFIG "$s")"
+    note "step $s was recorded as $status; that acceptance is INVALIDATED by $1, and step $s must be re-run"
+    touched=1
+  done
+  if state_get IMAGE_ID >/dev/null 2>&1; then
+    state_clear IMAGE_ID
+    state_clear BUILD_COMMIT
+    state_clear BUILD_DATE
+    note "the previously recorded IMAGE_ID is INVALIDATED by $1"
+    note "if this build does not pass, no image id is recorded and steps B, C and D refuse"
+    touched=1
+  fi
+  [ "$touched" -eq 1 ] && ok "downstream acceptance invalidated before the rebuild starts"
+  return 0
+}
+
 # --- Environment hygiene ------------------------------------------------------
 #
 # CI passes throwaway fixture paths through these variables. Compose gives the
@@ -318,6 +604,7 @@ assert_source_identity() {
     refuse "HEAD is $head but the expected checkout is $expected — check out the expected commit yourself; this program will not move the tree"
   fi
   ok "HEAD is the expected checkout $expected"
+  BIND_COMMIT="$expected"
 
   # `status --porcelain` exits 0 with output when the tree is dirty, so "git
   # failed" and "the tree is dirty" are two different facts and both are
@@ -334,38 +621,246 @@ assert_source_identity() {
 
 # --- Private working directory ------------------------------------------------
 #
-# mktemp -d, then the mode is SET and then READ BACK. chmod can fail, and a
-# world-readable directory holding a build log is exactly the kind of thing
-# that is assumed rather than checked.
+# THIS RUNS UNDER sudo. Every path below is opened by uid 0, and the directory
+# it opens is named on the command line by the operator, so the program has to
+# establish that the thing it found is the thing it was meant to find.
+#
+# What it did before: `mkdir -p -- "$requested"`, then `chmod 700` on it, then
+# `stat` the mode. Each of those is a defect when the path is not already
+# trusted:
+#
+#   * `mkdir -p` on an existing SYMLINK succeeds silently, and the `chmod 700`
+#     that follows then applies to the link's TARGET. A symlink at the named
+#     path pointed root's chmod at any directory on the host.
+#   * OWNERSHIP was never checked. A directory belonging to another account,
+#     mode 700, passed the mode check unchanged — root can enter it — and the
+#     run then wrote its evidence into a directory that account can read, and
+#     read its state back out of a file that account can write.
+#   * The state file was reached with `[ -f "$STATE" ]`, which FOLLOWS
+#     symlinks. A `state.env` symlinked at any root-readable file made this
+#     program parse that file, and the values it took out of it became
+#     EXPECTED_COMMIT, REPO_ROOT and IMAGE_ID — the identities every other
+#     check is performed against.
+#   * The ANCESTORS were never considered. A work directory inside a directory
+#     another account can write is a directory that account can replace between
+#     two of this program's own syscalls.
+#
+# So: no symlink anywhere on the path, owned by the account running the step,
+# mode 700, a state file that is a regular non-linked file of mode 600, and an
+# ancestor chain no other account can write.
+#
+# STATED LIMIT: these are checks, not locks. Between a check and the use that
+# follows it, a sufficiently privileged account could still substitute a
+# component. The ancestor rule is what closes the practical version of that —
+# an unprivileged attacker needs a writable ancestor to perform the swap — and
+# it is not claimed to be more than that.
+
+# assert_not_symlink <path> <what it is>
+assert_not_symlink() {
+  if [ -L "$1" ]; then
+    refuse "$2 is a symbolic link: $1 — refusing to operate through it as $(id -un)"
+  fi
+  return 0
+}
+
+# mode_is_writable_by_others <mode-digits> — group- or other-writable, and the
+# sticky bit is not set. /tmp is 1777 and is fine: sticky means another account
+# cannot rename or remove our directory even though it can create its own.
+mode_is_writable_by_others() { # <stat -c %a output>
+  local m="$1" perm sticky=0 g o
+  perm="${m: -3}"
+  if [ "${#m}" -ge 4 ]; then
+    case "${m:$((${#m} - 4)):1}" in 1|3|5|7) sticky=1 ;; esac
+  fi
+  g="${perm:1:1}"; o="${perm:2:1}"
+  [ "$sticky" -eq 1 ] && return 1
+  [ $(( g & 2 )) -ne 0 ] && return 0
+  [ $(( o & 2 )) -ne 0 ] && return 0
+  return 1
+}
+
+# assert_ancestors_trusted <dir> — every directory from <dir>'s parent to / is
+# owned by root or by us, and is not writable by anyone else without the sticky
+# bit.
+assert_ancestors_trusted() {
+  local dir="$1" me parent owner mode
+  me="$(id -u)"
+  parent="$dir"
+  while [ "$parent" != "/" ]; do
+    parent="$(dirname -- "$parent")"
+    owner="$(stat -c '%u' -- "$parent" 2>/dev/null)" ||
+      refuse "an ancestor of the work directory could not be examined: $parent"
+    mode="$(stat -c '%a' -- "$parent" 2>/dev/null)" ||
+      refuse "an ancestor of the work directory could not be examined: $parent"
+    if [ "$owner" != "0" ] && [ "$owner" != "$me" ]; then
+      refuse "the work directory's ancestor $parent is owned by uid $owner, which is neither root nor the uid running this step ($me) — it could be substituted underneath this run"
+    fi
+    if mode_is_writable_by_others "$mode"; then
+      refuse "the work directory's ancestor $parent is mode $mode: writable by another account without the sticky bit, so the work directory could be replaced underneath this run"
+    fi
+  done
+  return 0
+}
+
+# assert_work_dir_trusted <resolved dir>
+assert_work_dir_trusted() {
+  local dir="$1" me owner mode
+  me="$(id -u)"
+  assert_not_symlink "$dir" "the work directory"
+  [ -d "$dir" ] || refuse "the work directory is not a directory: $dir"
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" ||
+    refuse "the work directory's owner could not be read: $dir"
+  [ "$owner" = "$me" ] ||
+    refuse "the work directory is owned by uid $owner, not by uid $me which is running this step: $dir — refusing to read state from, or write evidence into, a directory this run does not own"
+  mode="$(stat -c '%a' -- "$dir" 2>/dev/null)" ||
+    refuse "the work directory's mode could not be read: $dir"
+  [ "${mode: -3}" = "700" ] ||
+    refuse "the work directory is mode $mode, not 700: $dir — refusing to write evidence into it"
+  assert_ancestors_trusted "$dir"
+  return 0
+}
+
+# assert_state_file_trusted — the state file carries the identities every other
+# check is made against, so it is validated as strictly as the directory.
+assert_state_file_trusted() {
+  local me owner mode links
+  me="$(id -u)"
+  assert_not_symlink "$STATE" "the state file"
+  [ -f "$STATE" ] || refuse "no state file in $WORK — run the preflight step first"
+  owner="$(stat -c '%u' -- "$STATE" 2>/dev/null)" ||
+    refuse "the state file's owner could not be read: $STATE"
+  [ "$owner" = "$me" ] ||
+    refuse "the state file is owned by uid $owner, not by uid $me which is running this step: $STATE — its contents are not this run's identities"
+  mode="$(stat -c '%a' -- "$STATE" 2>/dev/null)" ||
+    refuse "the state file's mode could not be read: $STATE"
+  [ "${mode: -3}" = "600" ] ||
+    refuse "the state file is mode $mode, not 600: $STATE"
+  links="$(stat -c '%h' -- "$STATE" 2>/dev/null)" || links=""
+  [ "$links" = "1" ] ||
+    refuse "the state file has $links hard links, not 1: $STATE — another name for it exists, so its content is not solely this run's"
+  return 0
+}
+
+# --- Raw captures and sanitized evidence, kept apart --------------------------
+#
+# They were the same files. `capture_run` wrote a command's UNMODIFIED output
+# into the work directory, `print_diagnostic` sanitized only what it printed to
+# the terminal, and the closing summary then told the operator:
+#
+#     "Evidence and sanitized logs remain in: <work dir>"
+#
+# The logs in that directory were not sanitized. An operator following that
+# sentence would return a build log, a doctor log and a runtime-verifier log
+# exactly as the commands emitted them.
+#
+# Two directories now, and they mean different things:
+#
+#   raw/       what the command actually wrote. Unsanitized, mode 700/600, for
+#              diagnosis on this host. NOT shareable.
+#   evidence/  the same output through scripts/gate-diagnostics.sh --sanitize.
+#              This is what leaves the host.
+#
+# STATED LIMIT, unchanged by this: the sanitizer is deny-by-pattern. It
+# establishes what its patterns catch, and a credential of an unanticipated
+# shape would pass through it. Separating the two directories does not make the
+# filter complete; it stops the UNFILTERED file from being labelled as the
+# filtered one.
+RAW=""
+EVID=""
+
+# make_work_subdir <path> <what> — created 700 by mkdir itself, so there is no
+# window in which it exists with a wider mode, then validated like any other
+# directory this program writes into.
+make_work_subdir() {
+  local dir="$1" what="$2" me owner mode
+  me="$(id -u)"
+  assert_not_symlink "$dir" "$what"
+  if [ ! -d "$dir" ]; then
+    mkdir -m 700 -- "$dir" || refuse "$what could not be created: $dir"
+  fi
+  assert_not_symlink "$dir" "$what"
+  chmod 700 -- "$dir" || refuse "$what's mode could not be set: $dir"
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" ||
+    refuse "$what's owner could not be read: $dir"
+  [ "$owner" = "$me" ] ||
+    refuse "$what is owned by uid $owner, not by uid $me: $dir"
+  mode="$(stat -c '%a' -- "$dir" 2>/dev/null)" ||
+    refuse "$what's mode could not be read back: $dir"
+  [ "${mode: -3}" = "700" ] || refuse "$what is mode $mode, not 700: $dir"
+  return 0
+}
+
+init_evidence_dirs() {
+  RAW="$WORK/raw"
+  EVID="$WORK/evidence"
+  make_work_subdir "$RAW"  "the raw-capture directory"
+  make_work_subdir "$EVID" "the sanitized-evidence directory"
+  # The marker is written every time, because the directory it labels may have
+  # been created by an earlier step and the label is what an operator reads.
+  if ! printf '%s\n' \
+      'UNSANITIZED command output. It may contain credential material.' \
+      'DO NOT SHARE THE FILES IN THIS DIRECTORY.' \
+      'The sanitized copies are in ../evidence/.' > "$RAW/README-DO-NOT-SHARE.txt"; then
+    refuse "the raw-capture directory could not be labelled: $RAW"
+  fi
+  chmod 600 -- "$RAW/README-DO-NOT-SHARE.txt" 2>/dev/null || true
+  if ! printf '%s\n' \
+      'Each file here is a raw capture from ../raw/ passed through' \
+      'scripts/gate-diagnostics.sh --sanitize. These are the files to return.' \
+      'The filter is deny-by-pattern: it establishes what its patterns catch,' \
+      'and a credential of an unanticipated shape would pass through it.' > "$EVID/README.txt"; then
+    refuse "the sanitized-evidence directory could not be labelled: $EVID"
+  fi
+  chmod 600 -- "$EVID/README.txt" 2>/dev/null || true
+  return 0
+}
+
 create_work_dir() {
-  local requested="${1:-}" mode
+  local requested="${1:-}"
   if [ -n "$requested" ]; then
-    mkdir -p -- "$requested" || refuse "the requested work directory could not be created: $requested"
+    # The symlink check comes BEFORE mkdir, because mkdir -p on an existing
+    # symlink succeeds and the chmod that used to follow it landed on the
+    # link's target.
+    assert_not_symlink "$requested" "the requested work directory"
+    if [ -e "$requested" ]; then
+      [ -d "$requested" ] ||
+        refuse "the requested work directory exists and is not a directory: $requested"
+    else
+      # The parents, then the directory itself with its mode applied BY mkdir.
+      # `mkdir -p -m 700` would apply the mode to the deepest component only
+      # and leave the intermediates at the default — and a create-then-chmod on
+      # the final component leaves a window in which it exists mode 755.
+      local parent
+      parent="$(dirname -- "$requested")"
+      [ -d "$parent" ] || mkdir -p -- "$parent" ||
+        refuse "the parent of the requested work directory could not be created: $parent"
+      mkdir -m 700 -- "$requested" ||
+        refuse "the requested work directory could not be created: $requested"
+    fi
+    assert_not_symlink "$requested" "the requested work directory"
+    chmod 700 -- "$requested" || refuse "the work directory's mode could not be set: $requested"
     WORK="$(cd -- "$requested" >/dev/null 2>&1 && pwd -P)" ||
       refuse "the requested work directory could not be resolved: $requested"
   else
     WORK="$(mktemp -d)" || refuse "a private work directory could not be created"
+    chmod 700 -- "$WORK" || refuse "the work directory's mode could not be set: $WORK"
   fi
-  chmod 700 -- "$WORK" || refuse "the work directory's mode could not be set: $WORK"
-  mode="$(stat -c '%a' -- "$WORK" 2>/dev/null)" ||
-    refuse "the work directory's mode could not be read back: $WORK"
-  [ "$mode" = "700" ] ||
-    refuse "the work directory is mode $mode, not 700: $WORK"
-  ok "private work directory created, mode 700"
+  assert_work_dir_trusted "$WORK"
+  ok "private work directory created: mode 700, owned by this run, no symlink, no ancestor another account can write"
   note "work directory: $WORK"
+  init_evidence_dirs
+  ok "raw captures and sanitized evidence have separate directories"
 }
 
 open_work_dir() { # <dir>
-  local mode
   [ -n "$1" ] || refuse "--work-dir is required for this step"
+  assert_not_symlink "$1" "the work directory"
   WORK="$(cd -- "$1" >/dev/null 2>&1 && pwd -P)" ||
     refuse "the work directory does not exist or cannot be entered: $1"
-  mode="$(stat -c '%a' -- "$WORK" 2>/dev/null)" ||
-    refuse "the work directory's mode could not be read: $WORK"
-  [ "$mode" = "700" ] ||
-    refuse "the work directory is mode $mode, not 700: $WORK — refusing to write evidence into it"
+  assert_work_dir_trusted "$WORK"
   STATE="$WORK/state.env"
-  [ -f "$STATE" ] || refuse "no state file in $WORK — run the preflight step first"
+  assert_state_file_trusted
+  init_evidence_dirs
 }
 
 # --- Log capture, kept distinct from the command's own status -----------------
@@ -375,18 +870,59 @@ open_work_dir() { # <dir>
 # succeeded and a log that was not written are two different facts; the
 # superseded procedure conflated them by reading ${PIPESTATUS[0]} out of a tee
 # pipeline and never checking that anything landed in the file.
+#
+# The capture goes to raw/ and is sanitized into evidence/ by this function
+# rather than by its callers, so that no future capture site can forget to do
+# it. `raw_log` and `evidence_log` name the two halves; every caller passes a
+# BASENAME and never a path, which is what keeps a raw capture from being
+# written into the shareable directory by mistake.
 LAST_RC=0
-capture_run() { # <logfile> <command...>
-  local log="$1"; shift
+
+raw_log()      { printf '%s/%s' "$RAW"  "$1"; }
+evidence_log() { printf '%s/%s' "$EVID" "$1"; }
+
+# publish_evidence <basename> — the raw capture through the gate sanitizer.
+# A sanitizer that is absent or that fails produces NO evidence file: an
+# unreadable evidence set costs a rerun, and a file wrongly labelled sanitized
+# cannot be taken back.
+publish_evidence() { # <basename>
+  local src dst
+  src="$(raw_log "$1")"
+  dst="$(evidence_log "$1")"
+  [ -f "$src" ] || return 0
+  rm -f -- "$dst" 2>/dev/null || true
+  if [ ! -f "$SANITIZER" ]; then
+    note "no sanitized copy of $1 was made: $SANITIZER is absent"
+    return 1
+  fi
+  assert_not_symlink "$dst" "the evidence file"
+  if ! ( umask 077; : > "$dst" ); then
+    note "no sanitized copy of $1 was made: $dst could not be created"
+    return 1
+  fi
+  chmod 600 -- "$dst" 2>/dev/null || true
+  if ! bash "$SANITIZER" --sanitize < "$src" > "$dst" 2>/dev/null; then
+    rm -f -- "$dst"
+    note "no sanitized copy of $1 was made: the sanitizer failed"
+    return 1
+  fi
+  return 0
+}
+
+capture_run() { # <basename> <command...>
+  local name="$1" log; shift
+  log="$(raw_log "$name")"
+  assert_not_symlink "$log" "the capture file"
   : > "$log" || { blocked "the capture file could not be created: $log"; LAST_RC=125; return 1; }
   chmod 600 -- "$log" 2>/dev/null || true
   "$@" > "$log" 2>&1
   LAST_RC=$?
+  publish_evidence "$name" || true
   return 0
 }
 
-assert_capture_usable() { # <label> <logfile>
-  if [ ! -s "$2" ]; then
+assert_capture_usable() { # <label> <basename>
+  if [ ! -s "$(raw_log "$2")" ]; then
     blocked "$1: nothing was captured, so the output cannot be checked (this is separate from the command's exit status)"
     return 1
   fi
@@ -395,31 +931,74 @@ assert_capture_usable() { # <label> <logfile>
 }
 
 # --- Verdict ------------------------------------------------------------------
+#
+# The order here is the whole of the second defect. run_cleanup runs FIRST, its
+# problems are counted INTO the verdict, and only then is the outcome recorded.
+# A step that passed every check and failed to remove a container it created is
+# recorded as `failed`, because the next step must not build on it.
 summary_and_exit() {
+  local outcome rc
   run_cleanup
   printf '\n%d passed, %d failed, %d blocked, %d cleanup problem(s)\n' \
     "$PASS" "$FAIL" "$BLOCK" "$CLEANUP_PROBLEMS"
-  if [ -n "$WORK" ]; then
-    printf '\nEvidence and sanitized logs remain in: %s (mode 700)\n' "$WORK"
-    printf 'Remove them with:  rm -rf -- %s\n' "$WORK"
-    printf 'Do that only after the recorded values have been copied out.\n'
+  if [ "$FAIL" -gt 0 ] || [ "$BLOCK" -gt 0 ] || [ "$CLEANUP_PROBLEMS" -gt 0 ]; then
+    outcome="failed"; rc=1
+  else
+    outcome="passed"; rc=0
   fi
+  record_step_outcome "$outcome"
+  report_work_dir
   if [ "$FAIL" -gt 0 ] || [ "$BLOCK" -gt 0 ]; then
     printf 'RESULT: step INCOMPLETE — required checks failed or could not run.\n'
-    exit 1
+    printf 'STEP STATUS: %s is recorded as %s; no later step will accept it as a prerequisite.\n' \
+      "${STEP_NAME:-this step}" "$outcome"
+    exit "$rc"
   fi
   if [ "$CLEANUP_PROBLEMS" -gt 0 ]; then
     printf 'RESULT: checks passed but REQUIRED CLEANUP FAILED — resources listed above remain.\n'
-    exit 1
+    printf 'STEP STATUS: %s is recorded as %s, because completion requires cleanup as well as checks.\n' \
+      "${STEP_NAME:-this step}" "$outcome"
+    exit "$rc"
   fi
   printf 'RESULT: every check in this step ran and passed, and cleanup completed.\n'
-  exit 0
+  printf 'STEP STATUS: %s is recorded as passed.\n' "${STEP_NAME:-this step}"
+  exit "$rc"
+}
+
+# report_work_dir — says what is in the work directory, accurately.
+#
+# The sentence it replaces was "Evidence and sanitized logs remain in: <dir>".
+# Nothing in that directory had been sanitized.
+report_work_dir() {
+  [ -n "$WORK" ] || return 0
+  printf '\nThis step'\''s files are in: %s (mode 700)\n' "$WORK"
+  if [ -n "$RAW" ] && [ -d "$RAW" ]; then
+    printf '  %s\n' "$RAW"
+    printf '      UNSANITIZED command output, exactly as the commands wrote it.\n'
+    printf '      It may contain credential material. DO NOT SHARE IT.\n'
+  fi
+  if [ -n "$EVID" ] && [ -d "$EVID" ]; then
+    printf '  %s\n' "$EVID"
+    printf '      the same output through scripts/gate-diagnostics.sh --sanitize.\n'
+    printf '      These are the files to return. The filter is deny-by-pattern:\n'
+    printf '      it establishes what its patterns catch, and nothing wider.\n'
+  fi
+  printf 'Remove the whole directory with:  rm -rf -- %s\n' "$WORK"
+  printf 'Do that only after the recorded values have been copied out.\n'
 }
 
 # shellcheck disable=SC2329  # reached indirectly via trap
 on_exit() {
   local rc=$?
   run_cleanup
+  # A step that reached here still `running` ended without recording a verdict:
+  # a refusal after it began, or a death. That is INDETERMINATE and not
+  # `failed`, because what it established is unknown — and a later step refuses
+  # it in those words rather than in failure's.
+  if [ "$STEP_STARTED" -eq 1 ]; then
+    printf '\nthis step ended without recording a verdict; it is recorded as INDETERMINATE\n'
+    record_step_outcome indeterminate
+  fi
   if [ "$CLEANUP_PROBLEMS" -gt 0 ] && [ "$rc" -eq 0 ]; then
     printf 'RESULT: REQUIRED CLEANUP FAILED — exit status forced nonzero.\n'
     exit 1
@@ -431,8 +1010,11 @@ on_exit() {
 on_signal() { # name status
   printf '\ninterrupted by %s — cleaning up before exiting\n' "$1"
   run_cleanup
-  # `exit` re-enters on_exit, where run_cleanup is a no-op: the destructive
-  # operations happen exactly once however many traps fire.
+  record_step_outcome interrupted
+  # `exit` re-enters on_exit, where run_cleanup is a no-op and STEP_STARTED is
+  # already cleared: the destructive operations and the state write each happen
+  # exactly once however many traps fire, and the recorded outcome stays
+  # `interrupted` rather than being overwritten with `indeterminate`.
   exit "$2"
 }
 
@@ -443,6 +1025,11 @@ trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 
 # --- Invocation identity ------------------------------------------------------
+#
+# RECORD_INVOCATION is 1 for every step that can create a Docker resource, and 0
+# for step Z, which creates none and must not add itself to the register it is
+# about to search.
+RECORD_INVOCATION=1
 #
 # Unpredictable, and CHECKED. A PID is small, reused and predictable; an
 # identifier that silently came out empty would make every label match
@@ -467,6 +1054,25 @@ begin_invocation() {
     refuse "resources already carry this invocation's ownership label — refusing to create or delete anything"
   fi
   ok "no pre-existing resource carries this invocation's ownership label"
+
+  # -- the invocation register -------------------------------------------------
+  #
+  # Recorded HERE, before anything can be created, and never cleared by a
+  # failure or an invalidation. This is not a completion record — it is a
+  # resource-attribution record, and step Z needs it most for the steps that
+  # did NOT finish.
+  #
+  # Step Z used to call begin_invocation itself and then enumerate resources
+  # carrying ITS OWN freshly generated project label. begin_invocation has
+  # already refused if anything carries that label, so the enumeration was
+  # guaranteed to find nothing: "no container of this handoff remains" was a
+  # tautology, printed as a pass, for every closeout that ever ran. The step
+  # even said so — "this step can only speak for its own" — which was an
+  # accurate description of a check that established nothing.
+  if [ "$RECORD_INVOCATION" -eq 1 ] && [ -n "$STATE" ] && [ -f "$STATE" ]; then
+    state_append_word HANDOFF_INVOCATIONS "${STEP_NAME:-unknown}:$INVOCATION:$VERIFY_PROJECT"
+    ok "this invocation's ownership identities are recorded for step Z to search for"
+  fi
 }
 
 require_docker() {
@@ -484,9 +1090,14 @@ CONFIG_JSON=""
 COMPOSE_ENV_ARGS=()
 
 resolve_deployment_config() {
-  local err
-  CONFIG_JSON="$WORK/compose-config.json"
-  err="$WORK/compose-config.err"
+  local err digest
+  # Both live in raw/. The resolved configuration contains the deployment's
+  # real host paths, which is exactly the kind of thing the shareable directory
+  # must not accumulate, and it is deliberately never printed either way.
+  CONFIG_JSON="$RAW/compose-config.json"
+  err="$RAW/compose-config.err"
+  assert_not_symlink "$CONFIG_JSON" "the resolved-configuration file"
+  assert_not_symlink "$err" "the resolved-configuration error file"
   COMPOSE_ENV_ARGS=()
   if [ -f "$ENV_FILE" ]; then
     # Explicit: Compose resolves a bare .env against the CURRENT directory, not
@@ -503,7 +1114,31 @@ resolve_deployment_config() {
     summary_and_exit
   fi
   ok "deployment configuration resolved and parsed"
-  note "the resolved configuration stays in the work directory and is never printed"
+  note "the resolved configuration stays in the raw directory and is never printed"
+
+  # -- the configuration's IDENTITY --------------------------------------------
+  #
+  # A digest of the RESOLVED configuration, recorded with whichever step passes
+  # against it. Steps B, C and D each verify properties of the deployment as
+  # Compose resolves it; if that resolution changes between them — an edited
+  # .env, an edited compose.yaml, a changed default — then B's acceptance is
+  # about a deployment that no longer exists, and step D must not treat it as
+  # covering the one it is authenticating against.
+  #
+  # The digest is over the resolved JSON, not over the source files, because
+  # the source files are not what the steps checked.
+  if digest="$(sha256sum -- "$CONFIG_JSON" 2>/dev/null)"; then
+    BIND_CONFIG="${digest%% *}"
+    if [ "${#BIND_CONFIG}" -eq 64 ]; then
+      ok "the resolved configuration has an identity (sha256, first 12: ${BIND_CONFIG:0:12})"
+    else
+      BIND_CONFIG=""
+      blocked "the resolved configuration's digest is malformed — configuration identity UNPROVEN"
+    fi
+  else
+    BIND_CONFIG=""
+    blocked "the resolved configuration could not be hashed — configuration identity UNPROVEN"
+  fi
 }
 
 cfg() { # <jq filter> -> prints, returns 1 if the read failed
@@ -631,12 +1266,53 @@ build_probe_args() { # <image-id> <network-mode> <with-secret: yes|no>
 # create_probe <image-id> <label> <docker create args...> — creates, records the
 # id for cleanup, and verifies the created container's image identity BEFORE it
 # is started.
+# --- Pre-start assertions, and the start they gate ----------------------------
+#
+# These assertions exist to establish that a container is isolated the way its
+# step requires BEFORE it runs: that the credential-free probe has no
+# credential to read, and that the offline probe has no network to reach.
+#
+# Their return values were DISCARDED. Every call site read like this:
+#
+#     assert_no_mount "no credential is mounted into the connectivity probe" ...
+#     assert_network_mode "the probe has network access" bridge
+#     capture_run doctor.log docker start -a "$PROBE_CID"
+#
+# so a container whose isolation assertion FAILED was started anyway. The step
+# reported the failure and then did the thing the failure said not to do: step
+# B would have started a container with the real password mounted while
+# printing that no credential was mounted, and step C would have started a
+# container with network access while printing that it had none. The report was
+# accurate and the program ignored it.
+#
+# PROBE_BLOCKED is raised by any pre-start assertion that fails OR that cannot
+# be evaluated — an unreadable mount list is not permission to start, it is the
+# absence of the evidence that starting requires — and start_probe refuses
+# while it is nonzero.
+PROBE_BLOCKED=0
+probe_precondition_failed() { PROBE_BLOCKED=$((PROBE_BLOCKED + 1)); }
+
+# start_probe <label> <capture basename> — the ONLY place a probe container is
+# started.
+start_probe() {
+  if [ "$PROBE_BLOCKED" -ne 0 ]; then
+    bad "$1: the container was NOT started — $PROBE_BLOCKED pre-start isolation assertion(s) did not pass"
+    note "a container whose isolation could not be established is not started, whatever else"
+    note "this step would have gone on to check. The container is removed by cleanup below."
+    return 1
+  fi
+  capture_run "$2" docker start -a "$PROBE_CID"
+  return 0
+}
+
 PROBE_CID=""
 create_probe() { # <expected-image-id> <label> <args...>
   local expected="$1" label="$2"; shift 2
   local err actual
   PROBE_CID=""
-  err="$WORK/create.err"
+  PROBE_BLOCKED=0
+  err="$RAW/create.err"
+  assert_not_symlink "$err" "the container-creation error file"
   RESOURCES_POSSIBLY_CREATED=1
   PROBE_CID="$(docker create "$@" 2>"$err")" || {
     bad "$label: the container could not be created"
@@ -649,22 +1325,28 @@ create_probe() { # <expected-image-id> <label> <args...>
   # trusting that the container got that image is exactly the substitution the
   # tag-movement case exists to catch.
   actual="$(docker inspect -f '{{.Image}}' "$PROBE_CID" 2>/dev/null)" || {
-    bad "$label: the created container's image could not be read — identity UNPROVEN"; return 1; }
+    bad "$label: the created container's image could not be read — identity UNPROVEN"
+    probe_precondition_failed
+    return 1; }
   if [ "$actual" != "$expected" ]; then
     bad "$label: the created container runs image $actual, not the verified $expected"
+    probe_precondition_failed
     return 1
   fi
   ok "$label: the created container runs exactly the image verified in step A"
   return 0
 }
 
-# assert_probe_mounts <label> <must-not-contain destination>
-assert_no_mount() { # <label> <destination>
+# assert_no_mount <label> <destination that must NOT be mounted>
+assert_no_mount() {
   local dests
   dests="$(docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$PROBE_CID" 2>/dev/null)" || {
-    blocked "$1 (the container's mounts could not be listed — result UNPROVEN)"; return 1; }
+    blocked "$1 (the container's mounts could not be listed — result UNPROVEN)"
+    probe_precondition_failed
+    return 1; }
   if in_list "$2" "$dests"; then
     bad "$1 — $2 IS mounted"
+    probe_precondition_failed
     return 1
   fi
   ok "$1"
@@ -674,12 +1356,14 @@ assert_no_mount() { # <label> <destination>
 assert_network_mode() { # <label> <expected>
   local mode
   mode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$PROBE_CID" 2>/dev/null)" || {
-    blocked "$1 (the container's network mode could not be read — result UNPROVEN)"; return 1; }
+    blocked "$1 (the container's network mode could not be read — result UNPROVEN)"
+    probe_precondition_failed
+    return 1; }
   if [ "$mode" = "$2" ]; then ok "$1 ($2)"; return 0; fi
   bad "$1: network mode is '$mode', expected '$2'"
+  probe_precondition_failed
   return 1
 }
-
 # ==============================================================================
 # Steps
 # ==============================================================================
@@ -697,12 +1381,19 @@ step_preflight() { # <expected-commit> <requested work dir>
   assert_source_identity "$expected"
   create_work_dir "$2"
   STATE="$WORK/state.env"
-  : > "$STATE" || refuse "the state file could not be created: $STATE"
+  # Created fresh. This is preflight: the identities and step states of any
+  # earlier run in this directory must not survive into a new one, and a
+  # state file left behind by something else must not be adopted.
+  assert_not_symlink "$STATE" "the state file"
+  rm -f -- "$STATE" || refuse "an existing state file could not be removed: $STATE"
+  ( umask 077; : > "$STATE" ) || refuse "the state file could not be created: $STATE"
   chmod 600 -- "$STATE" || refuse "the state file's mode could not be set: $STATE"
-  state_put EXPECTED_COMMIT "$expected"
-  state_put REPO_ROOT "$REPO_ROOT"
-  state_put REPO_OWNER "$REPO_OWNER"
-  ok "source and expected-checkout identity recorded for the later steps"
+  assert_state_file_trusted
+  begin_step preflight
+  stage_result EXPECTED_COMMIT "$expected"
+  stage_result REPO_ROOT "$REPO_ROOT"
+  stage_result REPO_OWNER "$REPO_OWNER"
+  ok "source and expected-checkout identity will be recorded if this step passes"
 
   # The deployment secret's BASELINE metadata, recorded HERE — before any step
   # has run — because step Z compares against "the values recorded earlier in
@@ -718,7 +1409,7 @@ step_preflight() { # <expected-commit> <requested work dir>
   # opened, here or in step Z's default path.
   local secret_meta
   if secret_meta="$(stat -c '%u:%g %a %s %Y' -- "$EXPECTED_SECRET_SOURCE" 2>/dev/null)"; then
-    state_put SECRET_META "$secret_meta"
+    stage_result SECRET_META "$secret_meta"
     ok "the deployment secret's baseline metadata is recorded (uid:gid mode size mtime; content NOT read)"
   else
     # NOT a failure of this step. Preflight deliberately requires neither Docker
@@ -728,7 +1419,7 @@ step_preflight() { # <expected-commit> <requested work dir>
     # The absence is RECORDED instead, and step Z turns it into UNPROVEN there.
     # That is where it belongs: the claim being made is step Z's, so the step
     # that cannot support it is the step that must report so.
-    state_put SECRET_META_UNAVAILABLE "1"
+    stage_result SECRET_META_UNAVAILABLE "1"
     note "the deployment secret's metadata could not be read at $EXPECTED_SECRET_SOURCE"
     note "this is recorded, not failed, because preflight does not require the deployment."
     note "Step Z will report its comparison as UNPROVEN rather than taking a baseline of its own."
@@ -740,6 +1431,13 @@ step_preflight() { # <expected-commit> <requested work dir>
 step_build() { # step A
   local expected image prior after version build_date
   printf '== step A: build the candidate and verify the deployment against it ==\n'
+  # Prerequisite first, and it is about what an earlier step RECORDED, not
+  # about which files happen to exist.
+  require_step_passed preflight "step A must know which checkout it is building and where the state for it lives"
+  begin_step build
+  # A rebuild voids every downstream acceptance, and the previous IMAGE_ID with
+  # it, BEFORE the build runs. See invalidate_after_rebuild.
+  invalidate_after_rebuild "this rebuild"
   assert_no_overrides
   resolve_repo_owner
   expected="$(state_require EXPECTED_COMMIT)"
@@ -773,7 +1471,7 @@ step_build() { # step A
   # --progress=plain is required because the step output below is parsed. The
   # default TTY progress rewrites lines in place and is not parseable.
   printf '\n-- build --\n'
-  capture_run "$WORK/build.log" \
+  capture_run "build.log" \
     docker build --no-cache --pull --progress=plain \
       --build-arg "VERSION=$version" \
       --build-arg "COMMIT=$expected" \
@@ -784,10 +1482,10 @@ step_build() { # step A
   # The two are separate results. A build that succeeded with no captured log
   # is not a failed build, and a failed build whose log was captured is not a
   # capture problem.
-  assert_capture_usable "build log" "$WORK/build.log"
+  assert_capture_usable "build log" "build.log"
   if [ "$build_rc" -ne 0 ]; then
     bad "the image build failed (exit $build_rc)"
-    print_diagnostic "$WORK/build.log"
+    print_diagnostic "$(raw_log build.log)"
     note "the tag $TAG may still point at a STALE image from an earlier build; nothing below is run against it"
     summary_and_exit
   fi
@@ -807,6 +1505,17 @@ step_build() { # step A
     *) bad "the resolved image id is not a sha256 digest: $image"; summary_and_exit ;;
   esac
   ok "the image resolved to an immutable id"
+  BIND_IMAGE="$image"
+  # STAGED, not written, and staged HERE — where the identity becomes known —
+  # rather than at the end of the step. summary_and_exit records them only if
+  # this step is recorded as passed, which requires every check below AND
+  # cleanup. Writing them at all was what let a build whose runtime
+  # verification FAILED publish the image id that steps B, C and D then created
+  # their containers from; staging them early is what makes the withholding
+  # visible to the operator in the step's own output.
+  stage_result IMAGE_ID "$image"
+  stage_result BUILD_COMMIT "$expected"
+  stage_result BUILD_DATE "$build_date"
   note "IMAGE_ID=$image"
   note "source commit $expected was built into that image; both identities are recorded together"
 
@@ -832,16 +1541,17 @@ step_build() { # step A
       --label "$OWN_LABEL=$INVOCATION" --label "$PROJECT_LABEL=$VERIFY_PROJECT" \
       "$image" version; then
     assert_no_mount "the version probe mounts no credential" "$CT_SECRET_PATH"
-    capture_run "$WORK/version.log" docker start -a "$PROBE_CID"
-    printf 'VERSION exit=%d\n' "$LAST_RC"
-    if [ "$LAST_RC" -ne 0 ]; then
-      bad "the built binary did not run"
-      print_diagnostic "$WORK/version.log"
-    elif assert_capture_usable "version output" "$WORK/version.log"; then
-      expect_in_file "the binary reports the expected commit $expected" \
-        "^commit[[:space:]]+$expected\$" "$WORK/version.log"
-      expect_in_file "the binary reports enforcement as NOT compiled in" \
-        '^enforcement compiled in[[:space:]]+false$' "$WORK/version.log"
+    if start_probe "the version probe" "version.log"; then
+      printf 'VERSION exit=%d\n' "$LAST_RC"
+      if [ "$LAST_RC" -ne 0 ]; then
+        bad "the built binary did not run"
+        print_diagnostic "$(raw_log version.log)"
+      elif assert_capture_usable "version output" "version.log"; then
+        expect_in_file "the binary reports the expected commit $expected" \
+          "^commit[[:space:]]+$expected\$" "$(raw_log version.log)"
+        expect_in_file "the binary reports enforcement as NOT compiled in" \
+          '^enforcement compiled in[[:space:]]+false$' "$(raw_log version.log)"
+      fi
     fi
   fi
 
@@ -861,7 +1571,7 @@ step_build() { # step A
   # not what this step verified, so a tag moving between the two programs is a
   # refusal rather than a silent substitution.
   printf '\n-- deployment verification, pinned to the verified image --\n'
-  capture_run "$WORK/verify.log" \
+  capture_run "verify.log" \
     env SCAMWALL_IMAGE="$image" SCAMWALL_EXPECTED_IMAGE_ID="$image" \
         bash "$VERIFIER"
   printf 'VERIFY exit=%d\n' "$LAST_RC"
@@ -869,16 +1579,13 @@ step_build() { # step A
     ok "the runtime verifier passed against the verified image"
   else
     bad "the runtime verifier did not pass (exit $LAST_RC)"
-    print_diagnostic "$WORK/verify.log"
+    print_diagnostic "$(raw_log verify.log)"
   fi
-  assert_capture_usable "runtime verifier log" "$WORK/verify.log"
+  assert_capture_usable "runtime verifier log" "verify.log"
   # The FINDING-29 line is the evidence this renewal exists to produce.
   expect_in_file "the password-readability judgement was evaluated (FINDING-29)" \
-    'the application password would be readable by the container identity' "$WORK/verify.log"
+    'the application password would be readable by the container identity' "$(raw_log verify.log)"
 
-  state_put IMAGE_ID "$image"
-  state_put BUILD_COMMIT "$expected"
-  state_put BUILD_DATE "$build_date"
   summary_and_exit
 }
 
@@ -891,13 +1598,13 @@ step_build() { # step A
 # lines belonging to that step are examined for a CACHED marker.
 assert_build_step() {
   local label="$1" needle="$2" n steps
-  n="$(sed -n "s|^#\([0-9][0-9]*\) \[[^]]*\] RUN .*${needle}.*|\1|p" "$WORK/build.log" 2>/dev/null | head -1)"
+  n="$(sed -n "s|^#\([0-9][0-9]*\) \[[^]]*\] RUN .*${needle}.*|\1|p" "$(raw_log build.log)" 2>/dev/null | head -1)"
   if [ -z "$n" ]; then
     bad "$label: no build step matched \"$needle\" — the assertion cannot be shown to have run"
-    note "read $WORK/build.log in full"
+    note "read $(raw_log build.log) in full"
     return 1
   fi
-  steps="$(grep -E "^#${n}( |\$)" "$WORK/build.log" 2>/dev/null)"
+  steps="$(grep -E "^#${n}( |\$)" "$(raw_log build.log)" 2>/dev/null)"
   case $? in
     0) ;;
     1) bad "$label: build step #$n has no output lines"; return 1 ;;
@@ -921,11 +1628,18 @@ step_probe() { # step B — credential-free connectivity and TLS
   note "this step mounts no password, opens no password, and hashes no password"
   note "it sends one GET /api/auth, which docs/PIHOLE_API_CONTRACT.md section 3.4"
   note "documents as requiring no credential. It does not authenticate."
+  require_step_passed preflight "step B must know which checkout and which work directory it belongs to"
+  require_step_passed build "step B must run the image that step A built and verified"
+  begin_step probe
   assert_no_overrides
   resolve_repo_owner
   expected="$(state_require EXPECTED_COMMIT)"
   image="$(state_require IMAGE_ID)"
+  BIND_IMAGE="$image"
   assert_source_identity "$expected"
+  # Step A passed — but against WHICH commit and WHICH image? A recorded pass
+  # is not a binding, and only the binding makes that pass transferable here.
+  assert_prereq_identities build || summary_and_exit
   require_docker
   begin_invocation
   resolve_deployment_config
@@ -941,25 +1655,25 @@ step_probe() { # step B — credential-free connectivity and TLS
   assert_no_mount "no credential is mounted into the connectivity probe" "$CT_SECRET_PATH"
   assert_network_mode "the probe has network access, as this step requires" "bridge"
 
-  capture_run "$WORK/doctor.log" docker start -a "$PROBE_CID"
+  start_probe "the connectivity probe" "doctor.log" || summary_and_exit
   printf 'DOCTOR exit=%d\n' "$LAST_RC"
-  assert_capture_usable "doctor output" "$WORK/doctor.log" || summary_and_exit
+  assert_capture_usable "doctor output" "doctor.log" || summary_and_exit
 
   # The run must show that it did NOT read the credential. This is the line the
   # superseded procedure contradicted: it claimed no password was read while
   # its own expected output reported the password as readable.
   expect_in_file "doctor reports the credential check as SKIPPED, not as passed" \
-    '^SKIP[[:space:]]+application password' "$WORK/doctor.log"
+    '^SKIP[[:space:]]+application password' "$(raw_log doctor.log)"
   expect_absent_from_file "doctor makes no claim that the credential is readable" \
-    '^ok[[:space:]]+application password' "$WORK/doctor.log"
+    '^ok[[:space:]]+application password' "$(raw_log doctor.log)"
 
   expect_in_file "the mounted CA parsed as a real certificate" \
-    '^ok[[:space:]]+certificate authority' "$WORK/doctor.log"
-  if search_file '^ok[[:space:]]+pi-hole connectivity' "$WORK/doctor.log"; then
+    '^ok[[:space:]]+certificate authority' "$(raw_log doctor.log)"
+  if search_file '^ok[[:space:]]+pi-hole connectivity' "$(raw_log doctor.log)"; then
     ok "the pinned destination answered, the chain verified against the private CA, and the certificate is valid for pi.hole"
   else
     bad "the connectivity or TLS check did not pass — do NOT proceed to step D"
-    print_diagnostic "$WORK/doctor.log"
+    print_diagnostic "$(raw_log doctor.log)"
   fi
   if [ "$LAST_RC" -ne 0 ]; then
     bad "doctor exited $LAST_RC"
@@ -976,11 +1690,18 @@ step_secret() { # step C — offline secret read
   note "this step mounts the real password and OPENS it. It never prints its content,"
   note "and it does not report its length. The network is disabled at the container"
   note "level, so nothing read here can leave the host."
+  require_step_passed preflight "step C must know which checkout and which work directory it belongs to"
+  require_step_passed build "step C must open the credential inside the image that step A verified"
+  begin_step secret
   assert_no_overrides
   resolve_repo_owner
   expected="$(state_require EXPECTED_COMMIT)"
   image="$(state_require IMAGE_ID)"
+  BIND_IMAGE="$image"
   assert_source_identity "$expected"
+  # Step A passed — but against WHICH commit and WHICH image? A recorded pass
+  # is not a binding, and only the binding makes that pass transferable here.
+  assert_prereq_identities build || summary_and_exit
   require_docker
   begin_invocation
   resolve_deployment_config
@@ -995,24 +1716,24 @@ step_secret() { # step C — offline secret read
   # asserted on the created container before it starts.
   assert_network_mode "the secret probe has no network at all" "none"
 
-  capture_run "$WORK/secret.log" docker start -a "$PROBE_CID"
+  start_probe "the secret probe" "secret.log" || summary_and_exit
   printf 'DOCTOR-OFFLINE exit=%d\n' "$LAST_RC"
-  assert_capture_usable "doctor --offline output" "$WORK/secret.log" || summary_and_exit
+  assert_capture_usable "doctor --offline output" "secret.log" || summary_and_exit
 
-  if search_file '^ok[[:space:]]+application password[[:space:]]+readable' "$WORK/secret.log"; then
+  if search_file '^ok[[:space:]]+application password[[:space:]]+readable' "$(raw_log secret.log)"; then
     ok "the container identity opened the mounted secret (uid 65532 with the configured supplementary group)"
-  elif search_file '^FAIL[[:space:]]+application password' "$WORK/secret.log"; then
+  elif search_file '^FAIL[[:space:]]+application password' "$(raw_log secret.log)"; then
     bad "the container identity could NOT open the mounted secret"
     note "if step A's readability judgement passed and this failed, the two disagree,"
     note "and that disagreement outranks either result. The likely causes are the ones"
     note "step A names as assumptions: an ACL, a user-namespace remap, or a rootless daemon."
-    print_diagnostic "$WORK/secret.log"
+    print_diagnostic "$(raw_log secret.log)"
   else
     blocked "the credential check did not appear in the output at all"
-    print_diagnostic "$WORK/secret.log"
+    print_diagnostic "$(raw_log secret.log)"
   fi
   expect_absent_from_file "no credential length is disclosed" \
-    'application password.*bytes' "$WORK/secret.log"
+    'application password.*bytes' "$(raw_log secret.log)"
   if [ "$LAST_RC" -ne 0 ]; then
     bad "doctor --offline exited $LAST_RC"
   fi
@@ -1022,18 +1743,47 @@ step_secret() { # step C — offline secret read
 step_status() { # step D — the one authenticated operation
   local expected image
   printf '== step D: ONE reviewed authenticated read-only operation ==\n'
+  # TWO independent gates, and neither substitutes for the other.
+  #
+  # The flag is the operator's INTENT: it says a human decided this run may
+  # authenticate. The prerequisites are the EVIDENCE: they say steps A, B and C
+  # actually passed, in this work directory, against these identities.
+  #
+  # This refusal already claimed both — "only after steps A, B and C have
+  # passed and been read" — while checking only the flag. An operator who ran
+  # step B, watched it fail, and then passed the flag got an authenticated
+  # request to the live appliance and a program that had told them it would not
+  # do that.
   if [ "${AUTHORISED_D:-0}" -ne 1 ]; then
     refuse "step D authenticates to the live Pi-hole. It runs only with --authorise-authenticated-read, and only after steps A, B and C have passed and been read."
   fi
+  ok "the operator authorised one authenticated read-only operation on this invocation"
+  note "that flag is intent, not evidence. The prerequisites below are the evidence,"
+  note "and they are checked before anything is sent."
+  require_step_passed preflight "step D must know which checkout and which work directory it belongs to"
+  require_step_passed build  "step D must authenticate from the image that step A built and verified"
+  require_step_passed probe  "step D must not authenticate before connectivity and TLS have been shown to work WITHOUT a credential"
+  require_step_passed secret "step D must not authenticate before the container identity has been shown to open the credential OFFLINE"
+  begin_step status
   assert_no_overrides
   resolve_repo_owner
   expected="$(state_require EXPECTED_COMMIT)"
   image="$(state_require IMAGE_ID)"
+  BIND_IMAGE="$image"
   assert_source_identity "$expected"
+  # Step A passed — but against WHICH commit and WHICH image? A recorded pass
+  # is not a binding, and only the binding makes that pass transferable here.
+  assert_prereq_identities build || summary_and_exit
   require_docker
   begin_invocation
   resolve_deployment_config
   assert_deployment_sources || summary_and_exit
+
+  # Steps B and C passed — but against this image and THIS resolved deployment
+  # configuration? An edited .env or compose.yaml between step B and step D
+  # means B established something about a deployment that no longer exists.
+  assert_prereq_identities probe  || summary_and_exit
+  assert_prereq_identities secret || summary_and_exit
 
   # What this can send, stated as it actually is.
   #
@@ -1054,25 +1804,25 @@ step_status() { # step D — the one authenticated operation
   create_probe "$image" "status probe" "${PROBE_ARGS[@]}" status || summary_and_exit
   assert_network_mode "the status probe uses the deployment's network mapping" "bridge"
 
-  capture_run "$WORK/status.log" docker start -a "$PROBE_CID"
+  start_probe "the status probe" "status.log" || summary_and_exit
   printf 'STATUS exit=%d\n' "$LAST_RC"
-  assert_capture_usable "status output" "$WORK/status.log" || summary_and_exit
+  assert_capture_usable "status output" "status.log" || summary_and_exit
 
   # Three different claims, kept apart.
-  if search_file 'session logout ACCEPTED by Pi-hole' "$WORK/status.log"; then
+  if search_file 'session logout ACCEPTED by Pi-hole' "$(raw_log status.log)"; then
     ok "the session teardown request was ACCEPTED by Pi-hole"
     note "that is a fact about a REQUEST. It is not independent confirmation that the"
     note "appliance's session table no longer holds the session — see below."
-  elif search_file 'session ALREADY ABSENT' "$WORK/status.log"; then
+  elif search_file 'session ALREADY ABSENT' "$(raw_log status.log)"; then
     ok "Pi-hole reported no such session to destroy, which is the desired end state"
-  elif search_file 'session logout FAILED' "$WORK/status.log"; then
+  elif search_file 'session logout FAILED' "$(raw_log status.log)"; then
     bad "the session teardown FAILED — a session may remain valid on the appliance until it expires"
   else
     blocked "the output makes no statement about the session teardown — result UNPROVEN"
   fi
   if [ "$LAST_RC" -ne 0 ]; then
     bad "status exited $LAST_RC"
-    print_diagnostic "$WORK/status.log"
+    print_diagnostic "$(raw_log status.log)"
   fi
 
   printf '\n-- independent confirmation is NOT available from here --\n'
@@ -1090,6 +1840,11 @@ step_status() { # step D — the one authenticated operation
 step_closeout() { # step Z
   local before after digest_before digest_after
   printf '== step Z: close out ==\n'
+  begin_step closeout
+  # Step Z creates nothing, so it must not enter the register it is about to
+  # search: a closeout looking for its own leftovers is the tautology this step
+  # used to be.
+  RECORD_INVOCATION=0
   require_docker
   begin_invocation
 
@@ -1145,7 +1900,7 @@ step_closeout() { # step Z
       else
         digest_before="$(state_get SECRET_DIGEST)" || digest_before=""
         if [ -z "$digest_before" ]; then
-          state_put SECRET_DIGEST "$digest_after"
+          stage_result SECRET_DIGEST "$digest_after"
           note "no earlier digest was recorded; this run records it as the baseline"
           ok "secret digest recorded (never printed)"
         elif [ "$digest_before" = "$digest_after" ]; then
@@ -1157,27 +1912,78 @@ step_closeout() { # step Z
     fi
   fi
 
-  # -- nothing of these invocations is left behind ----------------------------
+  # -- nothing of THE EARLIER STEPS is left behind ----------------------------
   #
-  # Enumeration failure and an empty result are different answers. A `docker ps`
-  # that could not run prints nothing, and reading that as "nothing remains" is
-  # the false clean this whole suite exists to prevent.
-  printf '\n-- leftovers --\n'
-  local kind found
-  for kind in container network volume; do
-    if ! found="$(label_query "$kind" "$PROJECT_LABEL=$VERIFY_PROJECT")"; then
-      blocked "${kind}s of this handoff could not be enumerated — leftovers are UNPROVEN"
-      continue
+  # This is the check that was a tautology.
+  #
+  # Step Z called begin_invocation, which generates a NEW unpredictable
+  # identifier and then REFUSES if anything already carries it. It then
+  # enumerated resources carrying that same brand-new label — so the query was
+  # guaranteed by construction to return nothing, and printed:
+  #
+  #     PASS    no container of this handoff remains
+  #
+  # for every closeout that has ever run, whatever steps A to D had left on the
+  # host. The trailing note even described the defect accurately: "this step
+  # can only speak for its own". It was speaking for an invocation that created
+  # nothing.
+  #
+  # What it must examine is the identities of the invocations that ACTUALLY
+  # created resources. Each of those recorded itself in the state file at
+  # begin_invocation, before it could create anything, and that register is not
+  # cleared by a failure, an interruption or an invalidation — a step that died
+  # halfway is exactly the one whose leftovers matter.
+  printf '\n-- leftovers from the steps that actually ran --\n'
+  local kind found entry step inv proj rest searched=0
+  local register
+  register="$(state_get HANDOFF_INVOCATIONS)" || register=""
+  if [ -z "$register" ]; then
+    # NOT a pass. No step in this work directory recorded an invocation, so
+    # either none ran or they ran somewhere else; either way this step has
+    # nothing to search for and must not report a clean host.
+    blocked "no step recorded an invocation identity in this work directory — leftovers are UNPROVEN"
+    note "steps A to D record their ownership identities as they begin. If they were run,"
+    note "they were run against a different work directory, and THAT directory's state file"
+    note "is the one that can close them out."
+  else
+    for entry in $register; do
+      step="${entry%%:*}"; rest="${entry#*:}"
+      inv="${rest%%:*}"; proj="${rest##*:}"
+      [ -n "$inv" ] && [ -n "$proj" ] || {
+        blocked "a malformed invocation record was found in the state file — leftovers are UNPROVEN"
+        continue; }
+      note "searching for resources of step $step (invocation ${inv:0:8}…, project $proj)"
+      for kind in container network volume; do
+        # Both labels, because a resource may carry either: the ownership label
+        # is applied directly, the project label through Compose.
+        if ! found="$(label_query "$kind" "$PROJECT_LABEL=$proj")"; then
+          blocked "${kind}s of step $step could not be enumerated by project label — leftovers are UNPROVEN"
+          continue
+        fi
+        local found_own
+        if ! found_own="$(label_query "$kind" "$OWN_LABEL=$inv")"; then
+          blocked "${kind}s of step $step could not be enumerated by ownership label — leftovers are UNPROVEN"
+          continue
+        fi
+        if ! found="$(combine_ids "$found" "$found_own")"; then
+          blocked "the ${kind} lists for step $step could not be combined — leftovers are UNPROVEN"
+          continue
+        fi
+        searched=$((searched + 1))
+        if [ -z "$found" ]; then
+          ok "no ${kind} of step $step remains"
+        else
+          bad "${kind}s of step $step REMAIN:"
+          printf '%s\n' "$found" | sed 's/^/          /'
+          note "remove them yourself after recording their identities; this step does not delete"
+          note "resources it did not create."
+        fi
+      done
+    done
+    if [ "$searched" -eq 0 ]; then
+      blocked "the invocation register was present but nothing could be enumerated — leftovers are UNPROVEN"
     fi
-    if [ -z "$found" ]; then
-      ok "no ${kind} of this handoff remains"
-    else
-      bad "${kind}s remain:"
-      printf '%s\n' "$found" | sed 's/^/          /'
-    fi
-  done
-  note "resources from EARLIER steps carried their own per-invocation labels and were"
-  note "removed by those steps. This step can only speak for its own."
+  fi
   summary_and_exit
 }
 
