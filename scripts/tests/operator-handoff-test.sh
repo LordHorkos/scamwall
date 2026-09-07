@@ -819,6 +819,215 @@ build_ok && {
   expect_output "the remaining identifier is printed" 'cid999999999'
 }
 
+# --- 8b. FINDING-49: a re-run of step A must not leave a stale image pin -------
+#
+# The state file carries identities from one step to the next. state_put
+# APPENDED and state_get returned the FIRST match, so a second `build` into the
+# same work directory recorded a new IMAGE_ID that nothing ever read: steps B, C
+# and D went on creating their containers from the PREVIOUS build's image while
+# step A's report named the new one. Each still passed its own `.Image`
+# comparison — because it compared against the same stale value it had been
+# created from. That is FINDING-44 arriving by a different route.
+echo
+echo "-- state file identity --"
+
+setup_case rebuild-repins
+preflight_ok && {
+  run_step build --work-dir "$WORK"
+  expect_rc_zero "the first build passes"
+
+  # A second build, of a DIFFERENT image, into the same work directory.
+  printf '%s' "$IMAGE_B" > "$FAKE_DIR/image-id"
+  run_step build --work-dir "$WORK"
+  expect_rc_zero "a second build into the same work directory passes"
+  expect_output "the replacement of the recorded image id is announced" \
+    'IMAGE_ID was already recorded with a different value'
+
+  N_IDS="$(grep -c '^IMAGE_ID=' "$WORK/state.env" 2>/dev/null)" || N_IDS="?"
+  if [ "$N_IDS" = "1" ]; then
+    pass "the state file holds exactly one IMAGE_ID record"
+  else
+    fail "the state file holds exactly one IMAGE_ID record" "found $N_IDS"
+  fi
+
+  RECORDED="$(grep '^IMAGE_ID=' "$WORK/state.env" 2>/dev/null | head -1)"
+  if [ "$RECORDED" = "IMAGE_ID=$IMAGE_B" ]; then
+    pass "the recorded image id is the second build's"
+  else
+    fail "the recorded image id is the second build's" "state holds '$RECORDED', expected 'IMAGE_ID=$IMAGE_B'"
+  fi
+
+  # The pin is only worth anything if the NEXT step uses it. The fake records
+  # every `create` argument list, so this is read from what the container was
+  # actually created from rather than from what the program said.
+  #
+  # The recorded argument lists are cleared as well as the log. The FIRST build
+  # legitimately created a version probe from IMAGE_A — that is step A asking
+  # the artifact its own commit — so without this the stale-image assertion
+  # below would match that container and fail for the wrong reason.
+  reset_log
+  rm -f "$FAKE_DIR"/container-*.args
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "the probe passes after the rebuild"
+  if grep -qF -- "$IMAGE_B" "$FAKE_DIR"/container-*.args 2>/dev/null; then
+    pass "the probe container is created from the SECOND build's image"
+  else
+    fail "the probe container is created from the SECOND build's image" \
+         "no create carried $IMAGE_B"
+  fi
+  if grep -qF -- "$IMAGE_A" "$FAKE_DIR"/container-*.args 2>/dev/null; then
+    fail "the probe container is not created from the stale image" \
+         "a create carried the first build's $IMAGE_A"
+  else
+    pass "the probe container is not created from the stale image"
+  fi
+}
+
+# PRE-FIX CONTROL. The superseded pair — append, and read the first match — is
+# reproduced here over the same two writes and asserted to return the STALE
+# value. Without it the cases above prove only that the new implementation
+# agrees with itself.
+CTL_STATE="$ROOT/ctl-state.env"
+: > "$CTL_STATE"
+printf 'IMAGE_ID=%s\n' "$IMAGE_A" >> "$CTL_STATE"
+printf 'IMAGE_ID=%s\n' "$IMAGE_B" >> "$CTL_STATE"
+CTL_FIRST="$(grep -m1 -E '^IMAGE_ID=' "$CTL_STATE" 2>/dev/null)"
+CTL_FIRST="${CTL_FIRST#*=}"
+if [ "$CTL_FIRST" = "$IMAGE_A" ]; then
+  pass "PRE-FIX CONTROL: append-and-read-first returns the stale image id, the replacement does not"
+else
+  fail "PRE-FIX CONTROL: append-and-read-first returns the stale image id" \
+       "the superseded shape returned '$CTL_FIRST'; this fixture does not reproduce FINDING-49"
+fi
+
+# The current reader must take the LAST record, so a state file written by an
+# older revision of this program — which really can hold duplicates — resolves
+# to the current value rather than the stale one.
+CTL_LAST="$(awk -v key=IMAGE_ID '
+  index($0, key "=") == 1 { v = substr($0, length(key) + 2) }
+  END { print v }' "$CTL_STATE")"
+if [ "$CTL_LAST" = "$IMAGE_B" ]; then
+  pass "a duplicated state file from an older revision resolves to the current value"
+else
+  fail "a duplicated state file from an older revision resolves to the current value" "got '$CTL_LAST'"
+fi
+
+# --- 8c. FINDING-50: the secret baseline is taken before the handoff, not after
+#
+# step Z compared the deployment secret's metadata against "the values recorded
+# earlier in the same work directory". Nothing recorded them earlier: step Z
+# took its own baseline when it found none, printed "no earlier metadata was
+# recorded", and reported `ok`. On a single pass — 0, A, B, C, D, Z, which is
+# the whole procedure — that was EVERY run. The comparison never happened and
+# the step reported a pass for it anyway.
+#
+# The baseline is now taken by the preflight step. Where preflight could not
+# read it, that is recorded, and step Z reports UNPROVEN instead of inventing a
+# baseline at the moment it is supposed to be checking one.
+echo
+echo "-- secret metadata baseline --"
+
+setup_case secret-baseline
+run_step preflight --expected-commit "$HEAD_SHA" --work-dir "$WORK"
+expect_rc_zero "preflight passes on a host with no deployment secret"
+expect_output "the unreadable baseline is stated, not hidden" \
+  'metadata could not be read at /etc/scamwall/secrets/pihole_app_password'
+expect_output "preflight says it is recording rather than failing" 'recorded, not failed'
+expect_output "preflight says step Z will report UNPROVEN" 'UNPROVEN'
+if grep -q '^SECRET_META_UNAVAILABLE=1$' "$WORK/state.env" 2>/dev/null; then
+  pass "the unavailability is recorded in the state file"
+else
+  fail "the unavailability is recorded in the state file" "$(tr '\n' '|' < "$WORK/state.env" 2>/dev/null)"
+fi
+if grep -q '^SECRET_META=' "$WORK/state.env" 2>/dev/null; then
+  fail "no baseline is fabricated when the secret cannot be read" "SECRET_META was recorded anyway"
+else
+  pass "no baseline is fabricated when the secret cannot be read"
+fi
+
+# The case that actually discriminates.
+#
+# On a host with no deployment, step Z's metadata read fails and it reports that
+# — which the superseded code did too, so a test run only in that condition
+# would pass against the defect. The branch the defect lived in is the one where
+# the read SUCCEEDS and no baseline exists, and reaching it needs a readable
+# secret path.
+#
+# `stat` is therefore shimmed for these two cases only: it answers for the
+# deployment's secret path and delegates everything else — the work directory's
+# mode, the repository's owner — to the real one. The shim is removed
+# immediately afterwards so no later case inherits it.
+STAT_MTIME_FILE="$ROOT/stat-mtime"
+stat_shim() { # <mtime> — answer for the secret path, delegate everything else
+  printf '%s' "$1" > "$STAT_MTIME_FILE"
+  cat > "$BIN/stat" <<STAT_EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "/etc/scamwall/secrets/pihole_app_password" ]; then
+    printf '0:989 640 64 %s\n' "\$(cat '$STAT_MTIME_FILE')"
+    exit 0
+  fi
+done
+exec /usr/bin/stat "\$@"
+STAT_EOF
+  chmod +x "$BIN/stat"
+}
+
+setup_case closeout-no-baseline
+# Preflight and build run with NO shim, so no baseline is recorded — the exact
+# state the superseded code invented one in. The shim is installed only for the
+# closeout, so its metadata read SUCCEEDS and the branch under test is reached.
+build_ok && {
+  stat_shim 1750000000
+  run_step closeout --work-dir "$WORK"
+  expect_rc_nonzero "a readable secret with no recorded baseline is not a clean result"
+  expect_output "the missing baseline is reported as not comparable" \
+    'no baseline was recorded by the preflight step'
+  expect_no_output "step Z never takes its own baseline and calls it a pass" \
+    'this run records it as the baseline'
+  expect_no_output "step Z never reports the metadata check as passed" \
+    'secret metadata recorded'
+  if grep -q '^SECRET_META=' "$WORK/state.env" 2>/dev/null; then
+    fail "step Z does not write a baseline at the moment it should be checking one" \
+         "closeout recorded SECRET_META itself"
+  else
+    pass "step Z does not write a baseline at the moment it should be checking one"
+  fi
+}
+
+# And the positive: with a baseline recorded by preflight, the comparison is
+# real and it passes.
+setup_case closeout-baseline-matches
+stat_shim 1750000000
+preflight_ok && {
+  if grep -q "^SECRET_META=0:989 640 64 1750000000$" "$WORK/state.env" 2>/dev/null; then
+    pass "preflight records the deployment secret's baseline when it can read it"
+  else
+    fail "preflight records the deployment secret's baseline when it can read it" \
+         "$(tr '\n' '|' < "$WORK/state.env" 2>/dev/null)"
+  fi
+  run_step build --work-dir "$WORK"
+  run_step closeout --work-dir "$WORK"
+  expect_output "an unchanged secret compares equal against the preflight baseline" \
+    "the secret's metadata is unchanged"
+  expect_output "the comparison states what it does NOT prove" \
+    'does NOT prove the content is unchanged'
+}
+
+# And the negative: a secret that changed during the handoff is caught.
+setup_case closeout-baseline-changed
+stat_shim 1750000000
+preflight_ok && {
+  run_step build --work-dir "$WORK"
+  # The secret's mtime moves between the baseline and the closeout.
+  stat_shim 1799999999
+  run_step closeout --work-dir "$WORK"
+  expect_rc_nonzero "a secret that changed during the handoff fails the closeout"
+  expect_output "the change is stated" 'metadata CHANGED during this handoff'
+}
+
+rm -f "$BIN/stat"
+
 # --- 9. Diagnostics never carry a credential ----------------------------------
 echo
 echo "-- diagnostics --"

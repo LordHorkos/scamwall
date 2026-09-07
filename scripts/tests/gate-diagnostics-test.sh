@@ -289,6 +289,7 @@ printf 'api_key = %s%s\n' '${AKIA_PREFIX}' 'IOSFODNN7DECOY1'
 printf 'token: ${GH_PREFIX}_0123456789abcdefghijklmnopqrstuvwx\n'
 printf -- '${PEM_BEGIN} RSA PRIVATE KEY-----\n'
 printf 'MIIEowIBAAKCAQEA0decoydecoydecoydecoydecoydecoydecoydecoydecoydec\n'
+printf 'ZZZZshortTailDecoy07==\n'
 printf -- '${PEM_END} RSA PRIVATE KEY-----\n'
 printf 'https://admin:hunter2decoyurl@pi.hole/api/auth\n'
 printf 'FAIL    the check that actually failed\n'
@@ -312,15 +313,82 @@ expect_lacks "a forge token is not printed"                  "$OUT" "${GH_PREFIX
 expect_lacks "private key material is not printed"           "$OUT" 'MIIEowIBAAKCAQEA0decoy'
 expect_lacks "URL userinfo is not printed"                   "$OUT" 'hunter2decoyurl'
 
+# FINDING-48. The line above is 64 characters and was caught by the
+# long-opaque-value rule, which needs 40 — so it passed while saying nothing
+# about a PEM's LAST body line, which is the remainder of the wrap and is
+# routinely shorter than 40. That line was printed in full. The fixture now
+# carries one, and the PRE-FIX CONTROL below proves the fixture reproduces the
+# defect rather than merely agreeing with the current code.
+expect_lacks "a SHORT final PEM body line is not printed"    "$OUT" 'ZZZZshortTailDecoy07'
+
 # The retained artifact is the same sanitized text, not the raw capture: it is
 # uploaded from CI, so an unsanitized copy there would defeat the whole point.
 if [ -f "$DIAG_DIR/decoy-gate.log" ]; then
   ART="$(cat "$DIAG_DIR/decoy-gate.log")"
   expect_lacks "the retained artifact is sanitized too"      "$ART" 'hunter2-decoy-value|AbCdEf0123456789decoytoken|MIIEowIBAAKCAQEA0decoy'
+  expect_lacks "the artifact carries no short PEM tail"      "$ART" 'ZZZZshortTailDecoy07'
   expect_eq    "the retained artifact is mode 600"           "$(stat -c '%a' "$DIAG_DIR/decoy-gate.log" 2>/dev/null)" "600"
 else
   fail "the retained artifact is sanitized too" "no file at $DIAG_DIR/decoy-gate.log"
 fi
+
+# --- 5b. FINDING-48: the PEM body, at any line length -------------------------
+#
+# Three properties, each checked against the REAL --report path rather than
+# against sanitize_stream in isolation, because the reporter is what CI prints
+# and what the runtime verifier calls.
+PEM_FIXTURE="$ROOT/pem.log"
+{
+  printf 'PASS    an ordinary line before the block\n'
+  printf -- '%s TESTING PRIVATE KEY-----\n' "$PEM_BEGIN"
+  printf 'AAAAsyntheticAAAAsyntheticAAAAsyntheticAAAAsyntheticAAAAsynthet01\n'
+  printf 'ZZZZshortTailSynthetic03==\n'
+  printf -- '%s TESTING PRIVATE KEY-----\n' "$PEM_END"
+  printf 'FAIL    the check that actually failed\n'
+  printf 'RESULT: INCOMPLETE\n'
+} > "$PEM_FIXTURE"
+
+OUT="$("$GATE_DIAG" --report 'pem gate' 1 "$PEM_FIXTURE" 2>&1)"
+expect_lacks "the long PEM body line is redacted"            "$OUT" 'AAAAsyntheticAAAA'
+expect_lacks "the short PEM body line is redacted"           "$OUT" 'ZZZZshortTailSynthetic03'
+expect_has   "the failure is still reported"                 "$OUT" 'the check that actually failed'
+expect_has   "the verdict is still reported"                 "$OUT" 'RESULT: INCOMPLETE'
+
+# PRE-FIX CONTROL. The superseded rule set — the two marker rules plus the
+# 40-character long-opaque-value rule, with no range — is applied to the same
+# fixture and asserted to LEAK. Without this the case above proves only that the
+# new filter agrees with itself.
+PREFIX_OUT="$(LC_ALL=C sed -E \
+  -e 's/-----BEGIN[[:space:]]+[A-Z0-9 ]*-----.*/<redacted: PEM block>/' \
+  -e 's/-----END[[:space:]]+[A-Z0-9 ]*-----//' \
+  -e 's/^[[:space:]]*[A-Za-z0-9+/]{40,}={0,2}[[:space:]]*$/<redacted: long opaque value>/' \
+  < "$PEM_FIXTURE")"
+if grep -q 'ZZZZshortTailSynthetic03' <<<"$PREFIX_OUT"; then
+  pass "PRE-FIX CONTROL: the superseded rules leak the short body line, the replacement does not"
+else
+  fail "PRE-FIX CONTROL: the superseded rules leak the short body line" \
+       "the old rule set redacted it too, so this fixture does not reproduce FINDING-48"
+fi
+
+# An unterminated block must not swallow the diagnosis. The range runs to end of
+# input, which is the fail-closed direction, and the digest lines survive it
+# because none of them is a pure-base64 line.
+UNTERM="$ROOT/pem-unterminated.log"
+{
+  printf 'PASS    an ordinary line before the block\n'
+  printf -- '%s TESTING PRIVATE KEY-----\n' "$PEM_BEGIN"
+  printf 'CCCCsyntheticCCCCsyntheticCCCCsyntheticCCCCsyntheticCCCCsynthet04\n'
+  printf 'DDDDshortTailSynthetic05==\n'
+  printf 'FAIL    compose create failed — container assertions UNPROVEN\n'
+  printf 'RESULT: runtime verification INCOMPLETE\n'
+  printf '41 passed, 2 failed, 0 blocked\n'
+} > "$UNTERM"
+
+OUT="$("$GATE_DIAG" --report 'unterminated pem gate' 1 "$UNTERM" 2>&1)"
+expect_lacks "an unterminated block still redacts its body"  "$OUT" 'DDDDshortTailSynthetic05'
+expect_has   "an unterminated block keeps the failure line"  "$OUT" 'compose create failed'
+expect_has   "an unterminated block keeps the verdict"       "$OUT" 'RESULT: runtime verification INCOMPLETE'
+expect_has   "an unterminated block keeps the counts"        "$OUT" '41 passed, 2 failed'
 
 # --- 6. Reporting cannot turn a failed gate into a successful one -------------
 #

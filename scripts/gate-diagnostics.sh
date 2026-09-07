@@ -54,8 +54,31 @@ MIN_MAX_LINES=60
 
 # --- Sanitization -------------------------------------------------------------
 #
-# Line-oriented, deny-by-pattern, and deliberately blunt: it would rather redact
-# an image digest that happens to sit alone on a line than emit a token.
+# Deny-by-pattern and deliberately blunt: it would rather redact an image digest
+# that happens to sit alone on a line than emit a token.
+#
+# Mostly line-oriented, with ONE stateful rule. Every other rule decides about a
+# line by looking only at that line, which is what made the PEM handling wrong:
+# the BEGIN and END markers each had their own rule, and the body in between was
+# left to the long-opaque-value rule, which requires 40 characters. A PEM body
+# wraps at 64 characters, so every line but the last is caught — and the LAST
+# line is the remainder, which is routinely shorter than 40. That line survived
+# and was printed. It is real key material, so this was a leak and not merely a
+# limit (docs/VERIFICATION.md, FINDING-48).
+#
+# The fix is a range: between a BEGIN marker and its END marker, any line that
+# is nothing but base64 is redacted whatever its length. The markers themselves
+# contain `-`, so they never match the body pattern and their own rules still
+# apply. Two consequences are deliberate:
+#
+#   * An unterminated block — a capture cut off mid-key — leaves the range open
+#     to end of input, so base64-shaped lines after it are redacted too. That is
+#     the fail-closed direction, and it costs nothing that matters: the digest
+#     lines this program must always show (FAIL, BLOCKED, RESULT:, counts) all
+#     contain spaces or punctuation and cannot match a pure-base64 line.
+#   * A bare single-word line inside an open block is redacted. Inside a
+#     well-formed PEM there are no such lines, and outside one the rule is not
+#     active at all.
 #
 # ANSI escapes are removed as well. They are not a security problem, but a
 # digest line that begins with an escape sequence does not match an anchored
@@ -69,6 +92,7 @@ sanitize_stream() { # stdin -> stdout; returns nonzero if sed itself failed
   LC_ALL=C sed -E \
     -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
     -e 's/\r$//' \
+    -e '/-----BEGIN[[:space:]]*[A-Z0-9 ]*-----/,/-----END[[:space:]]*[A-Z0-9 ]*-----/ s/^[[:space:]]*[A-Za-z0-9+/]+={0,2}[[:space:]]*$/<redacted: PEM body line>/' \
     -e 's/-----BEGIN[[:space:]]+[A-Z0-9 ]*-----.*/<redacted: PEM block>/' \
     -e 's/-----END[[:space:]]+[A-Z0-9 ]*-----//' \
     -e 's#(://)[^[:space:]/@]+:[^[:space:]/@]+@#\1<redacted>@#g' \
@@ -293,6 +317,7 @@ self_test() {
     printf '%s_0123456789abcdefghijklmnopqrstuvwx\n' "$gh_prefix"
     printf -- '%s RSA PRIVATE KEY-----\n' "$pem_begin"
     printf 'MIIEowIBAAKCAQEA0decoydecoydecoydecoydecoydecoydecoydecoydecoydec\n'
+    printf 'ZZZZshortTailDecoy09==\n'
     printf -- '%s RSA PRIVATE KEY-----\n' "$pem_end"
     printf 'https://admin:hunter2decoy@pi.hole/api\n'
     printf 'FAIL    something went wrong\n'
@@ -307,6 +332,10 @@ self_test() {
   st_lacks "an access key is not printed"           "${akia_prefix}IOSFODNN7DECOY1" "$out"
   st_lacks "a GitHub token is not printed"          "${gh_prefix}_0123456789abcdefghijklmnopqrstuvwx" "$out"
   st_lacks "private key material is not printed"    'MIIEowIBAAKCAQEA0decoy' "$out"
+  # FINDING-48: the line above is 64 characters and was caught by the
+  # long-opaque-value rule. A PEM's LAST body line is the remainder of the wrap
+  # and is routinely shorter than that rule's 40-character threshold.
+  st_lacks "a short final PEM body line is not printed" 'ZZZZshortTailDecoy09' "$out"
   st_lacks "URL userinfo is not printed"            'hunter2decoy' "$out"
   st_has   "the failure itself is still reported"   'something went wrong' "$out"
 

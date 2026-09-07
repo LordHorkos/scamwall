@@ -265,6 +265,14 @@ require "runtime-verify regression tests" bash ./scripts/tests/runtime-verify-te
 # a scripted fake Docker and a scripted fake git — no daemon, no network, no
 # appliance — so every refusal it must make is reproduced deliberately here.
 require "operator-handoff regression tests" bash ./scripts/tests/operator-handoff-test.sh
+# FINDING-47. Every gate above invokes its subject as an argument to `bash`,
+# which ignores the execute bit — so when 9c413d2 dropped the verifier's tracked
+# mode to 100644, a green suite said nothing about it and the documented
+# `./scripts/container-runtime-verify.sh` had been broken for three commits.
+# This asserts the tracked modes, that the working tree agrees with the index,
+# that sourced libraries stay non-executable, and that every documented direct
+# invocation actually execs. No daemon and no application execution.
+require "entry-point file modes" bash ./scripts/tests/entrypoint-mode-test.sh
 
 echo
 echo "-- container runtime (operator-executed, needs daemon) --"

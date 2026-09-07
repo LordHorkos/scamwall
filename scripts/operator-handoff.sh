@@ -193,16 +193,60 @@ expect_absent_from_file() {
 WORK=""
 STATE=""
 
+# state_put REPLACES any existing record of the key rather than appending one.
+#
+# It appended, and state_get returned the FIRST match. A step may legitimately
+# be re-run into the same work directory — a second `build` after a failed or
+# corrected first attempt is the case that matters — and the second run appended
+# a new IMAGE_ID while every later step kept reading the first. Steps B, C and D
+# would then have created their containers from the PREVIOUS build's image while
+# step A's report named the new one, and each would still have passed its own
+# `.Image` comparison, because it compared against the same stale value it was
+# created from.
+#
+# That is FINDING-44 arriving by a different route: a result bound to one
+# identity while the operation was performed on another. The image id is pinned
+# so that cannot happen, so the pin itself must not be able to go stale.
 state_put() { # key value
-  printf '%s=%s\n' "$1" "$2" >> "$STATE" ||
+  local key="$1" value="$2" old tmp
+  [ -n "$STATE" ] || refuse "no state file is open"
+  old="$(state_get "$key")" || old=""
+  tmp="$(mktemp -- "${STATE}.XXXXXX")" ||
+    refuse "a temporary file for the state update could not be created next to $STATE"
+  chmod 600 -- "$tmp" 2>/dev/null || true
+  if [ -f "$STATE" ]; then
+    # A literal prefix match at position 1 — not a regex — so a key is never
+    # matched loosely and no metacharacter in a key can widen it.
+    if ! awk -v k="$key" 'index($0, k "=") != 1' "$STATE" > "$tmp"; then
+      rm -f -- "$tmp"
+      refuse "the state file could not be rewritten: $STATE"
+    fi
+  fi
+  if ! printf '%s=%s\n' "$key" "$value" >> "$tmp"; then
+    rm -f -- "$tmp"
     refuse "the state file could not be written: $STATE"
+  fi
+  if ! mv -f -- "$tmp" "$STATE"; then
+    rm -f -- "$tmp"
+    refuse "the updated state file could not be installed: $STATE"
+  fi
+  if [ -n "$old" ] && [ "$old" != "$value" ]; then
+    note "$key was already recorded with a different value; it is REPLACED, and every later step will use the new one"
+  fi
 }
 
-state_get() { # key -> prints value, returns 1 if absent
-  local line
-  line="$(grep -m1 -E "^$1=" "$STATE" 2>/dev/null)" || return 1
-  [ -n "$line" ] || return 1
-  printf '%s' "${line#*=}"
+# state_get reads the LAST record of the key. state_put keeps at most one, so
+# this differs only for a state file written by an older revision of this
+# program — where the last record is the current one, and the first is the stale
+# one the defect above returned.
+state_get() { # key -> prints value, returns 1 if absent or empty
+  local value
+  [ -n "$STATE" ] && [ -f "$STATE" ] || return 1
+  value="$(awk -v key="$1" '
+    index($0, key "=") == 1 { v = substr($0, length(key) + 2) }
+    END { print v }' "$STATE" 2>/dev/null)" || return 1
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
 }
 
 state_require() { # key -> prints value or refuses
@@ -659,6 +703,36 @@ step_preflight() { # <expected-commit> <requested work dir>
   state_put REPO_ROOT "$REPO_ROOT"
   state_put REPO_OWNER "$REPO_OWNER"
   ok "source and expected-checkout identity recorded for the later steps"
+
+  # The deployment secret's BASELINE metadata, recorded HERE — before any step
+  # has run — because step Z compares against "the values recorded earlier in
+  # the same work directory" and nothing was recording them.
+  #
+  # step_closeout used to take its own baseline when it found none, print "no
+  # earlier metadata was recorded", and report `ok`. On a single pass — 0, A, B,
+  # C, D, Z, which is the whole procedure — that was every run: the comparison
+  # never happened and the step reported a pass for it anyway. A check that
+  # cannot have run must not read as one that passed.
+  #
+  # This is metadata only: owner, group, mode, size, mtime. No credential is
+  # opened, here or in step Z's default path.
+  local secret_meta
+  if secret_meta="$(stat -c '%u:%g %a %s %Y' -- "$EXPECTED_SECRET_SOURCE" 2>/dev/null)"; then
+    state_put SECRET_META "$secret_meta"
+    ok "the deployment secret's baseline metadata is recorded (uid:gid mode size mtime; content NOT read)"
+  else
+    # NOT a failure of this step. Preflight deliberately requires neither Docker
+    # nor the deployment — it checks identity and environment — and failing here
+    # would make it unusable on any host where the deployment is absent.
+    #
+    # The absence is RECORDED instead, and step Z turns it into UNPROVEN there.
+    # That is where it belongs: the claim being made is step Z's, so the step
+    # that cannot support it is the step that must report so.
+    state_put SECRET_META_UNAVAILABLE "1"
+    note "the deployment secret's metadata could not be read at $EXPECTED_SECRET_SOURCE"
+    note "this is recorded, not failed, because preflight does not require the deployment."
+    note "Step Z will report its comparison as UNPROVEN rather than taking a baseline of its own."
+  fi
   note "pass --work-dir $WORK to every following step"
   summary_and_exit
 }
@@ -1038,9 +1112,16 @@ step_closeout() { # step Z
   if [ -z "$after" ]; then
     : # already reported above; nothing to compare
   elif [ -z "$before" ]; then
-    state_put SECRET_META "$after"
-    note "no earlier metadata was recorded; this run records it as the baseline"
-    ok "secret metadata recorded (uid:gid mode size mtime)"
+    # No baseline. This step must NOT take one and call that a pass: a baseline
+    # recorded at the end of the handoff is compared against nothing and
+    # establishes nothing about what happened during it. The preflight step is
+    # what records it, and if it could not, this is UNPROVEN.
+    blocked "the secret's metadata cannot be compared: no baseline was recorded by the preflight step"
+    if state_get SECRET_META_UNAVAILABLE >/dev/null 2>&1; then
+      note "the preflight step recorded that it could not read $EXPECTED_SECRET_SOURCE"
+    else
+      note "run the preflight step for this work directory before closing out"
+    fi
   elif [ "$before" = "$after" ]; then
     ok "the secret's metadata is unchanged (uid:gid, mode, size, mtime)"
     note "this does NOT prove the content is unchanged; it proves those five properties are"
