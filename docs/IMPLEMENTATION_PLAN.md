@@ -71,6 +71,41 @@ Work therefore proceeds on independent tasks while a gate is blocked. What does
 gate is not complete, and dependent phases do not open. Blocked items carry the
 exact operator command needed to unblock them, in `docs/VERIFICATION.md` §6.
 
+### 2.2 Crosswalk to the consolidated phase orders (ORDERS 1–10)
+
+The consolidated phase orders restate the programme as ten orders. They
+**extend** this plan; they do not replace it. Requirement IDs are unchanged and
+remain `SW-P<phase>-<nn>`, historical evidence keeps its scope, and no
+acceptance criterion below is silently altered by the renumbering. Where an
+order asks for something this plan did not, that is new work and is marked as
+such.
+
+| Order | Subject | Maps onto | Relationship |
+| --- | --- | --- | --- |
+| **1** | Finish the operator safety foundation | Phase 1, §3 — specifically SW-P1-05, SW-P1-07, SW-P1-16, SW-P1-17 | **Narrows and adds.** It directs the correction of six defects in `scripts/operator-handoff.sh` and the introduction of an explicit step lifecycle. The Phase 1 acceptance criteria are unchanged; the handoff is the procedure that renews SW-P1-05, so this hardens the renewal rather than the requirement |
+| **2** | Validate the source catalog and architecture | **New.** Nearest existing text is Phase 3, §5 ("trusted feeds") | **Adds a gate before Phase 3.** Source qualification — rights, access, provenance, independence — was not previously a separate step; feeds were treated as an input to Phase 3 rather than as something requiring its own disposition per source. Phase 3 does not open for a source that has no disposition. Its **structure** is prepared in `docs/SOURCE_REGISTRY.md`; **no source has been imported or researched**, and the supplied 85-entry catalog is confirmed present in the order text and does not need re-supplying |
+| **3** | Typed evidence model and storage | Phase 3, §5 | **Widens.** The plan's "durable state" is one indicator type and a policy decision. The order requires observations, indicators and decisions to be distinct entities, with provenance, lineage, retraction and usage rights preserved per type |
+| **4** | Bounded acquisition and quarantine | Phase 3, §5 | **Adds.** Acquisition infrastructure — endpoint allow-listing, size and decompression limits, schema-drift detection, quarantine, atomic batch acceptance — is required *before* adapters multiply, rather than per adapter |
+| **5** | Implement the first qualified sources | Phase 3, §5 | **Narrows.** Deliberately a small set, chosen on verified rights and independence, not the whole first wave |
+| **6** | Fusion, relationships, and policy | Phase 3, §5 and Phase 4, §6 | **Widens.** Adds explicit policy for contradiction, correlation, retraction, shared infrastructure and human review, and forbids broadening a URL decision to its hostname without a documented host-level policy |
+| **7** | Signed distribution and recovery | Phase 3, §5 (feed trust) | **Widens.** The existing feed-signature work becomes one part of a full update lifecycle: trust bootstrap, rotation, revocation, rollback and replay protection, last-known-good, signed withdrawals |
+| **8** | Private identity and message analysis | **New.** Touches Phase 4, §6 | **Adds.** Non-domain indicator types and message corpora, with their own product surfaces. Explicitly *not* reachable through Pi-hole |
+| **9** | Independent effectiveness evaluation | Phase 4, §6 | **Direct match, widened.** Adds per-type and per-source measurement, lineage-aware deduplication, temporal holdouts, and predeclared thresholds |
+| **10** | Read-only pilot and controlled enforcement | Phase 5, §7 **and** Phase 6, §8 | **Merges two phases into one order, and does not merge their gates.** The order preserves the separation: the pilot must be accepted before enforcement is implemented, enforcement is implemented only in disposable environments, and live household enforcement still needs its own approval of a concrete deployment and rollback plan |
+
+**What the crosswalk does not do.** It does not renumber a requirement, reopen
+a closed row, or move an item's evidence. `SW-P1-20` is `VERIFIED` at `72bc84c`
+and stays so; `SW-P1-05` is `IMPLEMENTED-UNVERIFIED` and stays so until an
+operator runs §6.5 step A. An order that widens a phase widens what that phase
+must eventually prove — it does not retroactively invalidate what an earlier
+commit's evidence established about a narrower claim.
+
+**Phase 2 is untouched by the renumbering.** Order 1 finishes Phase 1's
+operator foundation and Order 10 returns to the pilot; the verified read-only
+integration in §4 remains the gate between them, and the orders' rule that
+"every phase must revalidate the applicable requirements of all previous
+phases" is the same rule as §1's *Evidence expires*.
+
 ---
 
 ## 3. Phase 1 — Trustworthy verification
@@ -164,7 +199,20 @@ verifier itself, found in two review rounds and none by execution (§4.7, §4.8)
 | 15 | Test the CLI read-only guarantee | SW-P1-15 |
 
 Items 1–7 and 13 were completed in commits `36ed21b` … `2edb95a`. Items 8–12
-and 14–15 are this session's work.
+and 14–15 were completed in later sessions.
+
+**Item 5 is the one that is still open, and ORDER 1 is about its procedure.**
+SW-P1-05 is renewed by `docs/VERIFICATION.md` §6.5 step A, which the operator
+runs. That procedure has now been reviewed three times and has carried defects
+each time: nine at `6a737f3` (§4.13), two at `5af270d` (§4.14), and six at
+`76f3bfd` (§4.15). ORDER 1 covers the third set and adds an explicit step
+lifecycle so that a step's result is bound to the identities it was produced
+against, and so that a rebuild or a configuration change invalidates downstream
+acceptance rather than being inherited by it.
+
+**None of that closes item 5.** Correcting the renewal procedure is not
+performing the renewal. SW-P1-05 closes when an operator runs step A against
+this deployment and returns its result, and that has not happened.
 
 ### 3.2 Approach for the outstanding items
 

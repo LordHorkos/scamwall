@@ -1574,6 +1574,124 @@ contacted, and no production secret, certificate, `.env` or deployment resource
 was read or changed. Steps A, B, C and D of `§6.5` remain unexecuted.
 
 ---
+### 3.17 Order-1 session — the operator safety foundation
+
+Work performed under **ORDER 1** of the consolidated phase orders, which
+directs that five defects found by a review *of* `5af270d` be addressed, that
+the step lifecycle be made explicit, and that step results be bound to the
+identities they were produced against.
+
+The five items map onto six findings, because the order also states separately
+that an authorisation flag must not be relied on as proof that prerequisite
+tests passed, and that is a distinct defect with a distinct fix:
+
+| Order 1 item | Finding | Subject |
+| --- | --- | --- |
+| 1. Failed pre-start mount or network assertions must prevent `docker start` | **FINDING-51** | `scripts/operator-handoff.sh` |
+| 2. Step completion persisted only after required checks and cleanup succeed | **FINDING-52** | `scripts/operator-handoff.sh` |
+| (body) Do not rely on an authorisation flag as proof that prerequisites passed | **FINDING-53** | `scripts/operator-handoff.sh` |
+| 3. Raw captures separated from sanitized shareable evidence | **FINDING-54** | `scripts/operator-handoff.sh` |
+| 4. Closeout must examine the resource identities from the actual previous steps | **FINDING-55** | `scripts/operator-handoff.sh` |
+| 5. Privileged work-directory and state handling | **FINDING-56** | `scripts/operator-handoff.sh` |
+
+All six were found by reading the program, all six were reproduced **without a
+Docker daemon**, and none of them needed one. §4.15 describes each.
+
+#### Commit identity
+
+| | |
+| --- | --- |
+| **Candidate** | `76f3bfd3ebc647ba21dd281fc2b5a3c48435b8d7` — *fix(operator): six defects the handoff was carrying, and an explicit step lifecycle* |
+| Parent | `0cdec6c9d582337fe07867a7540fbc20a8007f5a` |
+| Previous candidate | `5af270d8ae36b1f60832f4edf26b71df2eee4945` — superseded |
+| Branch | `feat/phase-1-core`, ahead of `origin/feat/phase-1-core`; **not pushed** |
+| Published commit | `72bc84c` — unchanged |
+| Files changed | `scripts/operator-handoff.sh`, `scripts/tests/operator-handoff-test.sh` |
+
+The candidate is the only commit of this session that changes a gate input. The
+documentation commit that follows it changes none, so it does not invalidate the
+gate results below — and it is what names `76f3bfd`, because a SHA cannot be
+recorded by the commit that creates it (FINDING-38).
+
+**No Go source, no Dockerfile, no Compose definition and no workflow changed.**
+The Go-path rows established at `9ebb98c` and `7e11419` stand; §5 of the
+requirements matrix demotes the script-bound rows again, and the suite was
+re-run on the clean committed tree to renew them.
+
+#### Suites at the end of this session
+
+| Suite | Result | Change |
+| --- | --- | --- |
+| `go test -race -count=1 ./...` | all 8 packages ok | no Go source changed this session |
+| `staticcheck ./...` | clean | — |
+| `gofmt -l .` | clean | — |
+| `shellcheck --severity=style` over the tracked scripts | clean | — |
+| `scripts/tests/runtime-verify-test.sh` | **358**, 0 failed | unchanged |
+| `scripts/tests/operator-handoff-test.sh` | **308**, 0 failed | was 167; **+141** |
+| `scripts/tests/gate-diagnostics-test.sh` | **73**, 0 failed | unchanged |
+| `scripts/tests/entrypoint-mode-test.sh` | **58**, 0 failed | unchanged |
+| `scripts/gate-diagnostics.sh --self-test` | all passed | unchanged |
+
+#### Determinism, repeated for a suite that nearly doubled
+
+Five rounds of all four shell suites — 20 executions:
+
+```
+round=1..5  runtime-verify    rc=0  358 tests, 0 failed
+round=1..5  operator-handoff  rc=0  308 tests, 0 failed
+round=1..5  gate-diagnostics  rc=0   73 test(s), 0 failure(s)
+round=1..5  entrypoint-mode   rc=0   58 test(s), 0 failure(s)
+20 runs, 20 rc=0, 0 nonzero, counts identical across every round
+```
+
+**Five is not thirty, and the row stays open.** At five runs a one-in-fifty
+defect is missed about nine times in ten. What this establishes is narrower:
+the counts did not drift, nothing flaked, and the suite that grew from 167 to
+308 cases is as stable as the three that did not change.
+
+The gate suite on the working tree: **25 passed, 1 failed, 2 BLOCKED**, where
+the one failure is the uncommitted-tree gate — it is the gate that fails until
+the work is committed — and the two BLOCKED are the daemon boundary, unchanged.
+The suite is re-run on the committed tree and that result, not this one, is the
+operative figure.
+
+#### Every fix was shown to discriminate
+
+Each fix was reverted in the working tree, on its own, and the suite re-run.
+The counts are what the reverted program actually produced:
+
+| Fix reverted | Failures |
+| --- | --- |
+| FINDING-51 — the start gate removed from `start_probe` | **8** |
+| FINDING-52 — identities written immediately instead of staged | **5** |
+| FINDING-52 — cleanup problems excluded from the verdict | **2** |
+| FINDING-53 — step D's B and C prerequisites removed | **7** |
+| FINDING-54 — evidence published unsanitized (`cat` for the filter) | **2** |
+| FINDING-55 — closeout searching its own fresh project label again | **7** |
+| FINDING-56 — the symlink checks neutered | **10** |
+| FINDING-56 — the work directory's ownership check removed | **1** |
+| FINDING-56 — the ancestor-writability check removed | **2** |
+| FINDING-56 — the state file's symlink check removed | **1** |
+
+**What a reversion count is and is not.** It establishes that the suite
+distinguishes the fixed program from the unfixed one on that specific change.
+It does not establish that the fix is complete, and a count of 1 is not weaker
+evidence than a count of 10 — it means one case is written against that branch,
+which for `assert_state_file_trusted`'s symlink rule is the number of cases the
+branch needs.
+
+#### What this session did NOT do
+
+Nothing was pushed. No pull request was opened. `main` was not modified. No
+Docker command reached a daemon — the account has no socket, and the suites
+drive a scripted fake. No `sudo` was used, no image was built, no container was
+created, the live Pi-hole was not contacted, and no production secret,
+certificate, `.env` or deployment resource was read or changed. **Steps A, B, C
+and D of §6.5 remain unexecuted**, and the fixes below change what those steps
+will do when an operator runs them.
+
+---
+
 
 ## 4. Findings raised by this session
 
@@ -2919,6 +3037,256 @@ defects:
 
 ---
 
+### 4.15 FINDING-51 … FINDING-56 — the operator handoff at `0cdec6c`, fixed at `76f3bfd`
+
+Six defects in `scripts/operator-handoff.sh`, found by reading the program
+under ORDER 1. Every one was reproduced against the scripted fake Docker, with
+no daemon. Four of them cause the program to **do the thing it has just
+reported must not be done**; two cause it to report a pass for a check that did
+not happen.
+
+#### FINDING-51 — a failed isolation assertion did not prevent the start
+
+Steps B and C establish their isolation on the **created** container, before it
+runs: step B asserts that the credential-free probe has no credential mounted,
+step C asserts that the offline probe has no network. Both assertions were
+written correctly and both returned a status. **Every call site discarded it:**
+
+```bash
+assert_no_mount "no credential is mounted into the connectivity probe" "$CT_SECRET_PATH"
+assert_network_mode "the probe has network access, as this step requires" "bridge"
+capture_run "$WORK/doctor.log" docker start -a "$PROBE_CID"
+```
+
+So a container whose isolation assertion FAILED was started anyway. The step
+printed an accurate failure and then performed the action the failure said not
+to perform:
+
+* step B would have started a container with the real application password
+  mounted, while its own output said no credential was mounted, in the one step
+  whose entire purpose is to be credential-free;
+* step C would have started a container with network access, while its own
+  output said it had none, in the step that opens the credential and relies on
+  `--network none` to guarantee that what it reads cannot leave the host.
+
+The verdict was still nonzero, which is why this survived: the *step* failed,
+so nothing looked wrong in the summary. What failed was the thing that happened
+before the summary.
+
+**Fixed.** `PROBE_BLOCKED` is raised by any pre-start assertion that fails **or
+that cannot be evaluated** — an unreadable mount list is not permission to
+start, it is the absence of the evidence starting requires — and `start_probe`
+is now the only place a probe is started. It refuses while `PROBE_BLOCKED` is
+nonzero, and the container is removed by cleanup rather than run.
+
+**Regression.** Four cases assert the forbidden action does not occur, reading
+the **fake daemon's own command log** rather than the program's output:
+`log_lacks "the container is NEVER started" '^start'`. Reverting the gate
+produces 8 failures.
+
+#### FINDING-52 — a step published its results before it had a verdict
+
+Step A ended:
+
+```bash
+state_put IMAGE_ID "$image"
+state_put BUILD_COMMIT "$expected"
+state_put BUILD_DATE "$build_date"
+summary_and_exit
+```
+
+Those writes were unconditional. `summary_and_exit` then computed a verdict
+that could be FAILED, and ran cleanup that could fail — after the identities
+were already in the state file. A step A whose runtime verification failed, or
+whose in-build assertion was reported CACHED, or whose cleanup could not remove
+the container it created, still published the image id that steps B, C and D
+went on to create their containers from.
+
+There was no step state at all. A step that FAILED and a step that was NEVER
+RUN were indistinguishable to every later step, which could only ask whether
+`IMAGE_ID` happened to be present.
+
+**Fixed.** Two changes, and both are needed:
+
+* Results are **staged** where they become known and written by
+  `record_step_outcome` only when the outcome is `passed`. A step that does not
+  pass names the identities it is withholding and says why.
+* A **step state machine** — `not_started`, `running`, `passed`, `failed`,
+  `interrupted`, `indeterminate` — recorded in the state file. `passed` is
+  written in exactly one place, after `run_cleanup` has returned **and** its
+  problems have been counted into the verdict, so a step whose checks passed
+  and whose cleanup failed is recorded as `failed`.
+
+`indeterminate` is deliberately not a synonym for `failed`. A step that began
+and ended without recording a verdict — a refusal after it started, or a death —
+established something unknown, and a later step refuses it in those words.
+
+**Regression.** Five cases: a failed build, a failed verifier, a failed
+cleanup, an interruption and a post-start refusal, each asserting both the
+recorded state and that the next step will not run off it. Reverting the
+staging produces 5 failures; reverting the cleanup term produces 2.
+
+#### FINDING-53 — the authorisation flag was accepted as proof of the prerequisites
+
+Step D authenticates to the live appliance. Its refusal read:
+
+> step D authenticates to the live Pi-hole. It runs only with
+> `--authorise-authenticated-read`, **and only after steps A, B and C have
+> passed and been read.**
+
+It checked the flag. Nothing else. An operator who ran step B, watched it fail,
+and then passed the flag got an authenticated request to the household Pi-hole
+and a program that had told them in writing it would not do that.
+
+**Fixed.** Two independent gates, and neither substitutes for the other. The
+flag is the operator's **intent**; `require_step_passed` on preflight, build,
+probe and secret is the **evidence**. The program now says which is which in
+its own output.
+
+**Regression.** Five cases, each asserting that the fake daemon's log contains
+no `start` — no authentication is attempted — when a prerequisite is missing,
+failed, or stale. Reverting the two prerequisite lines produces 7 failures.
+
+#### FINDING-54 — the work directory's "sanitized logs" were the raw captures
+
+`capture_run` wrote each command's **unmodified** output into the work
+directory. `print_diagnostic` sanitized only what it printed to the terminal.
+The closing summary then told the operator:
+
+```
+Evidence and sanitized logs remain in: <work dir> (mode 700)
+```
+
+Nothing in that directory had been sanitized. An operator following that
+sentence — and it is the sentence the procedure gives them — would return a
+build log, a doctor log and a runtime-verifier log exactly as the commands
+emitted them. The mode-700 directory was the only thing standing between a
+credential-shaped value in a build log and an evidence package.
+
+**Fixed.** Two directories with different meanings:
+
+| | |
+| --- | --- |
+| `<work>/raw/` | what the command actually wrote. Unsanitized. Carries its own `README-DO-NOT-SHARE.txt` |
+| `<work>/evidence/` | the same output through `scripts/gate-diagnostics.sh --sanitize`. This is what leaves the host |
+
+Sanitizing happens inside `capture_run`, not at its call sites, so a future
+capture cannot forget it, and callers pass a **basename** rather than a path so
+a raw capture cannot be written into the shareable directory by mistake. A
+sanitizer that is absent or that fails produces **no** evidence file: an
+unreadable evidence set costs a rerun, a file wrongly labelled sanitized cannot
+be taken back. The resolved deployment configuration stays in `raw/` — it holds
+the deployment's real host paths and is never published.
+
+**Residual limitation, unchanged and stated in the evidence directory itself:**
+the filter is deny-by-pattern. It establishes what its patterns catch. This
+change does not make the filter complete; it stops the **unfiltered** file from
+being labelled as the filtered one.
+
+**Regression.** A build is made to emit a credential-shaped value; the raw
+capture is asserted to **contain** it — that is what makes it raw — and the
+evidence copy to not. Reverting the sanitize call produces 2 failures.
+
+#### FINDING-55 — step Z's leftover check was a tautology, and passed every time
+
+Step Z called `begin_invocation`, which generates a **new** unpredictable
+identifier and then **refuses if anything already carries it**. It then
+enumerated resources carrying that same brand-new label:
+
+```bash
+found="$(label_query "$kind" "$PROJECT_LABEL=$VERIFY_PROJECT")"
+```
+
+The query was guaranteed by construction to return nothing. Step Z printed
+
+```
+PASS    no container of this handoff remains
+PASS    no network of this handoff remains
+PASS    no volume of this handoff remains
+```
+
+for **every closeout that has ever run**, whatever steps A to D had left on the
+host. The trailing note described the defect accurately without recognising it:
+*"this step can only speak for its own"* — it was speaking for an invocation
+that had created nothing.
+
+This is the false-clean case the rest of the suite exists to prevent, in the
+step whose only job is to establish that nothing remains.
+
+**Fixed.** Every step that can create a resource records its invocation and
+project identities into the state file **at `begin_invocation`, before it can
+create anything**, in an accumulating register. That register is never cleared
+by a failure, an interruption or an invalidation — a step that died halfway is
+exactly the one whose leftovers matter. Step Z enumerates by **those**
+identities, by both the ownership and the project label, per step and by name.
+It does not enter itself into the register it is about to search.
+
+An **empty register is not a pass.** No step in this work directory recorded an
+invocation, so either none ran or they ran elsewhere; either way step Z has
+nothing to search for and reports `leftovers are UNPROVEN`.
+
+**Regression.** Four cases: a real leftover (a container whose removal was made
+to fail) must produce a FAILING closeout that names the step that created it;
+an empty register must be UNPROVEN and must make no clean-host claim; a genuine
+clean result must name the steps searched; an enumeration that could not run
+must be UNPROVEN. Reverting to the self-label query produces 7 failures.
+
+#### FINDING-56 — the privileged work directory and state file were not validated
+
+This program runs under `sudo`. Every path below is opened by uid 0, and the
+work directory is named by the operator on the command line.
+
+| What it did | Why that is a defect |
+| --- | --- |
+| `mkdir -p -- "$requested"` then `chmod 700` on it | `mkdir -p` on an existing **symlink** succeeds silently, and the `chmod` that follows applies to the link's **target**. A symlink at the named path pointed root's `chmod` at any directory on the host |
+| Checked the mode, never the **owner** | A directory belonging to another account, mode 700, passed unchanged — root can enter it. The run then wrote its evidence where that account could read it, and read its identities back out of a file that account could write |
+| Reached the state file with `[ -f "$STATE" ]` | `-f` follows symlinks. A `state.env` symlinked at any root-readable file made this program parse that file, and the values taken out of it became `EXPECTED_COMMIT`, `REPO_ROOT` and `IMAGE_ID` — the identities every other check is performed against |
+| Never considered the **ancestors** | A work directory inside a directory another account can write is a directory that account can replace between two of this program's own syscalls |
+| `: > "$log"` for each capture | Follows a symlink. In a work directory an attacker could prepare, that is a root-owned truncate-and-overwrite of a file of their choosing |
+
+**Fixed.** The symlink check happens **before** `mkdir`, not after. The
+directory must be owned by the account running the step, be mode 700, and have
+no ancestor that another account can write without the sticky bit — `/tmp` at
+`1777` is fine, which is what keeps `mktemp -d` acceptable, and a plain `0777`
+parent is not. The state file must be a regular non-symlinked file, mode 600,
+owned by us, **with exactly one hard link** — a second name for it means its
+content is not solely this run's. `raw/` and `evidence/` are created by `mkdir`
+**with** their mode, so there is no window in which they exist wider, and every
+capture path is symlink-checked before it is written.
+
+**STATED LIMIT.** These are checks, not locks. Between a check and the use that
+follows it a sufficiently privileged account could still substitute a
+component. The ancestor rule is what closes the practical version — an
+unprivileged attacker needs a writable ancestor to perform the swap — and it is
+not claimed to be more than that.
+
+**A limit of the regression, stated rather than hidden.** The **ownership**
+comparison cannot be exercised by an unprivileged account against a directory
+owned by someone else, because such a directory cannot be created here. It is
+exercised against a shimmed `id` reporting a different uid, which drives the
+other side of the same comparison. That is weaker than the real condition and
+the case says so.
+
+**Regression.** Nine cases: a symlinked work directory at creation and at open,
+a symlinked state file, a hard-linked state file, a state file of the wrong
+mode, a world-writable ancestor, a sticky ancestor that must still be accepted,
+a foreign owner, a symlinked capture file, and a symlinked `raw/`. The symlink
+case also asserts that the link's **target** was neither chmod-ed nor written
+into. Reverting the symlink checks produces 10 failures.
+
+#### What these six do not establish
+
+They are defects in a program that has **still never met a real Docker
+daemon**. `scripts/tests/operator-handoff-test.sh` is now 308 cases against a
+scripted fake, which establishes control flow, refusals, attribution, cleanup,
+state handling, evidence separation and the order in which steps may run. It
+does not establish that a real daemon accepts the arguments the program builds,
+that `docker create` produces the container those arguments describe, or that
+the deployment's paths exist and are mountable. Only steps A to D can establish
+those, and they remain pending operator execution.
+
+---
+
 ## 5. Critical Go path review (SW-P1-10)
 
 Review of the areas SW-P1-10 names. Each entry states what was checked and what
@@ -3725,11 +4093,53 @@ found by reading it (§4.13), and they were not subtle.
 
 It is now `scripts/operator-handoff.sh`, driven by
 `scripts/tests/operator-handoff-test.sh` against a scripted fake Docker and a
-scripted fake git: **167 cases, 0 failed**, no daemon, no network, no
+scripted fake git: **308 cases, 0 failed**, no daemon, no network, no
 appliance. Every refusal the procedure must make is reproduced there
-deliberately. This section describes what each step does and how to read its
-result; it does not restate the commands, because a second copy is a second
+deliberately, and where the defect is that the program *performs an action* the
+case asserts against the fake daemon's own command log rather than against the
+program's output. This section describes what each step does and how to read
+its result; it does not restate the commands, because a second copy is a second
 thing to get wrong.
+
+#### Steps are ordered, and the order is enforced from recorded state
+
+Each step records exactly one of six states in the work directory:
+
+| State | Meaning |
+| --- | --- |
+| `not_started` | no record exists |
+| `running` | the step began and has not recorded a verdict |
+| `passed` | every required check ran **and** passed **and** cleanup completed |
+| `failed` | a required check failed, could not run, or cleanup failed |
+| `interrupted` | a signal arrived while the step was running |
+| `indeterminate` | the step began and ended without recording a verdict — a refusal after it started, or a death. What it established is unknown, which is not the same as failed, and it is refused in those words |
+
+A later step accepts **only** `passed`, and only when the identities the
+earlier step recorded — source commit, image id, resolved-configuration
+digest — match the ones this step is using. A prerequisite that passed against
+a different image or a different resolved deployment configuration is reported
+as **STALE** and refused.
+
+A **rebuild invalidates every downstream acceptance before it runs**, together
+with the previously recorded image id. That ordering is what makes a *failed*
+rebuild safe: were it done on success only, a build that failed halfway would
+leave the previous build's image id in place with the previous B/C/D passes
+standing beside it, and the next step would create containers from an image no
+step in this work directory had verified.
+
+`--authorise-authenticated-read` is checked **in addition to** these
+prerequisites and never instead of them. See FINDING-53.
+
+#### The work directory
+
+| Path | What it is |
+| --- | --- |
+| `<work>/state.env` | identities and step states. Mode 600, owned by the running account, not a symlink, exactly one hard link |
+| `<work>/raw/` | **unsanitized** command output, exactly as the commands wrote it. It may contain credential material. **Do not share it.** Carries its own `README-DO-NOT-SHARE.txt` |
+| `<work>/evidence/` | the same output through `scripts/gate-diagnostics.sh --sanitize`. **This is what to return.** The filter is deny-by-pattern: it establishes what its patterns catch, and nothing wider |
+
+The directory itself is validated on every step, not merely created: see the
+work-directory row of the table below, and FINDING-56.
 
 The resource attribution and cleanup implementation is not a second one either.
 It was extracted from `scripts/container-runtime-verify.sh` into
@@ -3776,6 +4186,11 @@ a commit that moved would name the wrong source in its own evidence.
 | Direct exit statuses are captured | A status read through `tee`, a pipeline or a monitor is the wrapper's, not the command's. FINDING-23 began as exactly this substitution, and the superseded procedure had reintroduced it |
 | Log capture is a **separate** result from the command's status | "The build succeeded" and "the build log was written" are two facts. Conflating them lets an unusable capture read as a clean run |
 | Temporary storage is `mktemp -d`, mode 0700 **set and read back** | A predictable path under `/tmp` created by root is a symlink target for any local account. `chmod` can fail, and an unchecked `chmod` is an assumption |
+| The work directory is **validated**, not merely created | This runs under `sudo`. It must not be a symlink, must be owned by the account running the step, must be mode 700, and must have no ancestor another account can write without the sticky bit. The state file must additionally be a regular file, mode 600, with exactly one hard link. FINDING-56 |
+| Raw captures and shareable evidence are **different directories** | The sanitizer's output is what may leave the host; the command's own output is not. Labelling the second as the first is FINDING-54 |
+| A failed pre-start isolation assertion **prevents the start** | An assertion whose result is discarded is a report, not a control. FINDING-51 |
+| A step's results are written **only if the step passed** | Which includes cleanup. An identity published by a step that failed is an identity no step verified. FINDING-52 |
+| Prerequisites are read from **recorded step state**, never from a flag | `--authorise-authenticated-read` is the operator's intent. It is not evidence that steps A, B and C passed. FINDING-53 |
 | Logs are **kept**, not erased | The work directory holds the evidence the operator has to return. The path and the removal command are printed instead |
 | Existing deployment resources and secrets are preserved | Nothing here removes, rewrites, or reads the content of the real CA or the real password |
 | Results are bound to exact source **and** image identities | An unbound result is a claim about no particular artifact |
@@ -4128,14 +4543,27 @@ sudo scripts/operator-handoff.sh closeout --work-dir <work>
   two empty strings passes), the digest length is validated, the digest is
   compared and **never printed**, and any read or comparison failure is
   nonzero.
-* **Leftovers**, enumerated by label. An enumeration that could not run is
+* **Leftovers of the steps that actually ran**, enumerated by the invocation
+  and project identities **those steps recorded** — by both labels, per step,
+  and named per step in the output. An enumeration that could not run is
   reported as `UNPROVEN` and fails the step; it is never answered "nothing
-  remains". Resources from earlier steps carried their own per-invocation
-  labels and were removed by those steps, and this step says so rather than
-  speaking for them.
-* **The logs are not deleted.** The work directory's path and the exact
-  `rm -rf` command are printed. Erasing a failing run's diagnosis before the
-  operator has read it is a defect, not tidiness.
+  remains". An **empty register is not a pass** either: if no step recorded an
+  invocation in this work directory, step Z has nothing to search for and says
+  so.
+
+  Until this session this check was a **tautology that passed every time**.
+  Step Z generated a new invocation identifier — refusing if anything already
+  carried it — and then enumerated resources carrying that same brand-new
+  label, so the query could not return anything. It printed `PASS  no container
+  of this handoff remains` for every closeout that has ever run, whatever steps
+  A to D had left behind, and the note beside it described the defect without
+  recognising it: *"this step can only speak for its own"*. That is FINDING-55.
+* **The logs are not deleted, and raw output is not labelled as evidence.** The
+  work directory's path and the exact `rm -rf` command are printed. Erasing a
+  failing run's diagnosis before the operator has read it is a defect, not
+  tidiness — and so is telling the operator that unsanitized command output is
+  a sanitized log, which is what the closing summary did until this session
+  (FINDING-54). See *The work directory* above.
 
 ---
 
@@ -4321,7 +4749,13 @@ beyond loopback. §3.15.
 | No command reports the credential's length | `TestDoctorNeverReportsTheCredentialLength`, which also asserts the literal length value is absent |
 | A failed session teardown is never reported as success | `Client` records a `Teardown` outcome and `status`/`sync` report which they observed. `TestAFailedLogoutIsNotReportedAsSuccess` asserts a nonzero exit, the absence of any "accepted" claim, that the successfully-read version data is still reported, and that the DELETE was in fact attempted. `TestALogoutAnswered404IsTheDesiredEndState` covers the third outcome |
 | `status` is not bounded to three requests | `TestStatusIsNotLimitedToThreeRequests`: the fake answers 503 twice and the observed sequence is five requests, all within the permitted set |
-| The operator procedure refuses an unexpected HEAD, a dirty tree, an unreadable tree, and a fixture redirection arriving by either route | `scripts/tests/operator-handoff-test.sh`, 141 cases against a scripted fake `docker` and a scripted fake `git`. §3.15 lists the covered failure modes. **Superseded at `5af270d`:** the suite is now 167 cases, and two of the additions cover defects this row did not — FINDING-49 and FINDING-50, §4.14 |
+| The operator procedure refuses an unexpected HEAD, a dirty tree, an unreadable tree, and a fixture redirection arriving by either route | `scripts/tests/operator-handoff-test.sh`, 141 cases against a scripted fake `docker` and a scripted fake `git`. §3.15 lists the covered failure modes. **Superseded at `5af270d`:** the suite is now 167 cases, and two of the additions cover defects this row did not — FINDING-49 and FINDING-50, §4.14. **Superseded again by the Order-1 session:** the suite is 308 cases, and this row covers only the refusals it names. The six defects of §4.15 were outside it |
+| A step whose isolation assertion failed does not start its container | Four cases in §4.15, asserting `^start` is absent from the **fake daemon's own command log** rather than that the program complained. Reverting the gate produces 8 failures. FINDING-51 |
+| A step that did not pass publishes no identity, and no later step runs off one | Five cases covering a failed build, a failed verifier, a failed cleanup, an interruption and a post-start refusal — each asserting both the recorded step state and the next step's refusal. FINDING-52 |
+| Step D does not authenticate on the strength of its authorisation flag | Five cases: a missing, failed, interrupted, indeterminate and stale prerequisite, each asserting no `start` reaches the fake daemon. FINDING-53 |
+| The shareable evidence directory retains no credential-shaped value the sanitizer catches | The raw capture is asserted to **contain** the synthetic value and the evidence copy to not. This is bounded by the filter being deny-by-pattern, which the evidence directory's own README states. FINDING-54 |
+| Step Z reports leftovers of the steps that actually ran | Four cases, including a container whose removal was made to fail and which step Z must then find and attribute by step name. Before this the check could not return anything and passed every time. FINDING-55 |
+| The privileged work directory and state file are validated | Nine cases: symlinked work directory at creation and at open, symlinked state file, hard-linked state file, wrong state-file mode, world-writable ancestor, sticky ancestor still accepted, foreign owner, symlinked capture file, symlinked `raw/`. **The ownership case uses a shimmed `id`**, because an unprivileged account cannot create a directory owned by someone else; that is weaker than the real condition and the case says so. FINDING-56 |
 | Cleanup is installed before creation, is idempotent, preserves what it cannot attribute, distinguishes a failed enumeration from an empty one, and counts toward the verdict | The reviewed implementation, now shared as `scripts/lib/docker-resources.sh`. Its behaviour is unchanged over the extraction: the verifier's suite re-ran at **358** cases, 0 failed, including a new case asserting the verifier REFUSES to start if the library is absent |
 | A `SIGTERM` mid-run removes what was created and exits 143 | An interruption case in the handoff suite, delivered at the one moment a container exists |
 | A failing step's diagnostics carry no password-, session-id- or PEM-shaped value, and the logs survive for the operator to return | Four assertions in the redaction case, plus retention assertions on the work directory (mode 700) and the captured log (mode 600) |
@@ -4352,7 +4786,7 @@ host, as `scamwall`, no daemon, no network beyond loopback. §3.16.
 | The gate suite passes on a hosted runner at `5af270d` | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has **26** gates, changed Go source, a changed Dockerfile comment, a shared script library, and three new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15, §3.16 |
 | An image built from `9ebb98c` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
 | The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C, which is written, tested against a fake daemon, and **unexecuted** |
-| The operator handoff behaves correctly against a REAL Docker daemon | **Not established — and this row was carrying two defects that had nothing to do with a daemon.** FINDING-49 (a re-run of step A left every later step pinned to the previous build's image) and FINDING-50 (step Z compared the secret against a baseline it had just written itself, and reported `ok`) were both found by reading the program, both reproduced without a daemon, and both fixed at `5af270d`. §4.14. The **residual** is genuine runtime evidence: `scripts/operator-handoff.sh` is covered by 167 cases against a scripted fake Docker and a scripted fake git, which establishes its control flow, refusals, attribution, cleanup and state handling. It does not establish that the arguments it constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
+| The operator handoff behaves correctly against a REAL Docker daemon | **Not established — and this row has now carried EIGHT defects that had nothing to do with a daemon.** FINDING-49 and FINDING-50 were fixed at `5af270d` (§4.14). FINDING-51 to FINDING-56 were found and fixed in the Order-1 session (§4.15): a failed isolation assertion did not prevent the start, a step published its identities before it had a verdict, the authorisation flag was accepted as proof of the prerequisites, the "sanitized logs" were the raw captures, step Z's leftover check was a tautology that passed every time, and the privileged work directory and state file were not validated. All eight were found by reading the program and reproduced without a daemon. **The pattern is the finding:** "pending operator testing against a real daemon" was standing in for defects that never needed one, and it should not be read as a queue of things only a daemon can settle. The **residual** is genuine runtime evidence: 308 cases against a scripted fake establish control flow, refusals, attribution, cleanup, state handling, evidence separation and step ordering. They do not establish that the arguments the program constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
 | `docker --add-host` accepts what the resolved configuration yields | **Established for the shape, not for the daemon.** The installed Compose renders `extra_hosts` as `["pi.hole=host-gateway"]`; the program normalises the `=` to the `:` form and a case cross-checks the filter against the real Compose CLI. Whether the daemon then maps the name as intended is observable only in step B |
 | A session created by ScamWall is confirmed absent from the appliance afterwards | **Not established, and no method for it is claimed.** ScamWall cannot ask: the endpoint that lists sessions is outside the permitted set. The superseded procedure named a Pi-hole UI path and a user-agent attribution that **this repository has never verified for any version**. §6.5 step D now states the limitation and proposes consulting the appliance version's own documentation, recording *"request accepted, not independently confirmed"* where no supported method exists |
 | The diagnostics filter catches every credential shape | **Not established, and the previous wording of this row was wrong.** It described a PEM's short final body line surviving the 40-character threshold as a *limitation*. It was a **leak**, reachable through the real `--report` path, and it is FINDING-48 — fixed at `5af270d` by a stateful rule that redacts a PEM's body between its markers whatever the line length, with a PRE-FIX CONTROL asserting the superseded rules leaked it. §4.14. What remains is the true limitation: the filter is deny-by-pattern, so it establishes what its patterns catch, and a credential of an unanticipated shape would pass through it. That is no longer standing in for a known leak |
@@ -4363,7 +4797,7 @@ host, as `scamwall`, no daemon, no network beyond loopback. §3.16.
 | The container identity can read the mounted secret | **Not established, and `aa49797` does not change it.** The verifier now checks that the password file is not readable by every account on the HOST (FINDING-26) — the opposite question. A read-only mount at `/run/secrets/pihole_app_password` is a mount, not a successful read, and no container has been started |
 | ScamWall can authenticate to a real Pi-hole | **Not established.** Only a fake HTTPS server has been exercised |
 | The destination behind the `pi.hole` pin is reachable, is a Pi-hole, and passes TLS verification | **Not established.** §3.7 proves the pin is configured and applied exactly; nothing was sent through it. Phase 2 — §6.2 |
-| The shell suites are deterministic to the standard set at `0b083cb` | **Partly established, and the row stays open.** §3.3 recorded 30 consecutive runs of the 319-case suite, 0 failures, against 500 runs for the 237-case suite. At `5af270d` the four shell suites were run five rounds each — 20 executions, 20 `rc=0`, case counts identical across every round (§3.16). **Five is not thirty:** at five runs a one-in-fifty defect is missed about nine times in ten. What it establishes is that the counts did not drift and that the two suites which gained cases this session are as stable as the two that did not. The gap remains one of duration, not of method. A first attempt at this measurement was **discarded rather than reported** — two copies of the campaign were truncating one log — and the larger number it would have supported is not used |
+| The shell suites are deterministic to the standard set at `0b083cb` | **Partly established, and the row stays open.** §3.3 recorded 30 consecutive runs of the 319-case suite, 0 failures, against 500 runs for the 237-case suite. At `5af270d` the four shell suites were run five rounds each — 20 executions, 20 `rc=0`, counts identical (§3.16). **Repeated at the Order-1 session, for a handoff suite that grew from 167 to 308 cases:** five rounds again — 20 executions, 20 `rc=0`, `358 / 308 / 73 / 58` identical in every round. **Five is not thirty:** at five runs a one-in-fifty defect is missed about nine times in ten. What it establishes is that the counts did not drift and that the suite which nearly doubled this session is as stable as the three that did not change. The gap remains one of duration, not of method. A first attempt at the `5af270d` measurement was **discarded rather than reported** — two copies of the campaign were truncating one log — and the larger number it would have supported is not used |
 | ScamWall detects scam domains accurately | **Not established, and not claimed.** `testdata/feed.json` is a synthetic fixture. It is evidence about signature verification and parsing, and about nothing else. Detection accuracy is Phase 4 and has not begun |
 
 The last row is the one most easily misread, so it is stated twice: a signed

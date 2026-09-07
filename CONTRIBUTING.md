@@ -165,8 +165,22 @@ The evidence-collection procedure that wraps it is `scripts/operator-handoff.sh`
 (`docs/VERIFICATION.md` §6.5). Do not transcribe its steps into a shell by
 hand: it exists as a program precisely because a documentation code block that
 nothing executes accumulates defects nobody sees until it is run against the
-live appliance — `docs/VERIFICATION.md` §4.13 lists nine of them. Its step D
-authenticates and refuses to run without an explicit flag.
+live appliance — §4.13 lists nine of them, §4.14 two more, and §4.15 six more.
+
+Its steps are **ordered, and the order is enforced from recorded state**, not
+from what happens to be in the work directory. Each step records
+`not_started` / `running` / `passed` / `failed` / `interrupted` /
+`indeterminate`, a later step accepts only `passed`, and it also compares the
+identities the earlier step passed against — source commit, image id, resolved
+configuration digest — so a stale acceptance is refused rather than inherited.
+Step D authenticates and needs `--authorise-authenticated-read`; **that flag is
+the operator's intent and is never accepted as evidence that steps A, B and C
+passed** (FINDING-53).
+
+The work directory separates `raw/` (unsanitized command output, do not share)
+from `evidence/` (the same output through the gate sanitizer, which is what to
+return). If you add a capture, add it through `capture_run` — sanitizing
+happens there so no call site can forget it.
 
 Both programs share `scripts/lib/docker-resources.sh`, which is the reviewed
 implementation of resource attribution and cleanup: unpredictable invocation

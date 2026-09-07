@@ -65,7 +65,8 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Superseded candidate image | source `b469c592ca756b82bc2eb18ee4cdcb42b9458a0c`, image `sha256:d3c4ed2c91250448044e1f1eb4e8d0d04591ba10237b3c56e5effc55f7e2251f`, build exit 0. **No verifier was ever run against this image**, and it predates all seventeen findings in `docs/VERIFICATION.md` §4.7 and §4.8. Retained as an identity on record for ID stability; it is not evidence and must not be deployed |
 | Previous working candidate | `7e1141997cc1f7484144f07c1fb05cde5d39e280`. Implementation and local verification only: not pushed, not built, not deployed. It changes Go source, `scripts/*.sh` and `.github/workflows/gates.yml`, so §5 demotes the rows named in §3 below. `docs/VERIFICATION.md` §3.14 |
 | Previous working candidate | `9ebb98c590fe96628c486d83b66a3b9c87608b85`. Correction and local verification only: not pushed, not built, not deployed. It changes Go source (`cmd/scamwall/main.go`, `internal/adapters/pihole/client.go`), `scripts/check.sh`, `scripts/container-runtime-verify.sh`, a new `scripts/lib/docker-resources.sh`, a new `scripts/operator-handoff.sh` and a comment in `container/Dockerfile`. `docs/VERIFICATION.md` §3.15 |
-| **Working candidate** | `5af270d8ae36b1f60832f4edf26b71df2eee4945`. Defect correction and local verification only: not pushed, not built, not deployed. It changes `scripts/check.sh`, `scripts/gate-diagnostics.sh`, `scripts/operator-handoff.sh`, the **tracked file mode** of `scripts/container-runtime-verify.sh`, two test files, and adds `scripts/tests/entrypoint-mode-test.sh`, so §5 demotes the script-bound rows again. It changes **no Go source**, so the Go-path rows established at `9ebb98c` and `7e11419` stand. It does **not** change `.github/workflows/gates.yml`. `docs/VERIFICATION.md` §3.16, §4.14 |
+| Previous working candidate | `5af270d8ae36b1f60832f4edf26b71df2eee4945`. Defect correction and local verification only: not pushed, not built, not deployed. It changes `scripts/check.sh`, `scripts/gate-diagnostics.sh`, `scripts/operator-handoff.sh`, the **tracked file mode** of `scripts/container-runtime-verify.sh`, two test files, and adds `scripts/tests/entrypoint-mode-test.sh`, so §5 demotes the script-bound rows again. It changes **no Go source**, so the Go-path rows established at `9ebb98c` and `7e11419` stand. It does **not** change `.github/workflows/gates.yml`. `docs/VERIFICATION.md` §3.16, §4.14 |
+| **Working candidate** | `76f3bfd3ebc647ba21dd281fc2b5a3c48435b8d7`. ORDER 1: defect correction and local verification only — not pushed, not built, not deployed. It changes `scripts/operator-handoff.sh` and `scripts/tests/operator-handoff-test.sh` and nothing else, so §5 demotes the script-bound rows again; the suite was re-run on the clean committed tree to renew them. It changes **no Go source**, no Dockerfile, no Compose definition and no workflow, so the Go-path rows established at `9ebb98c` and `7e11419` stand. `docs/VERIFICATION.md` §3.17, §4.15 |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -201,6 +202,9 @@ carried on assumption:
 | The API contract, enforced rather than described | **New at `0d620de`, locally evidenced.** A permitted-operation table is checked before any network activity and again on every redirect; the total deadline, `Retry-After` handling, session nesting and credential scrubbing are covered by tests against a local fake. `docs/PIHOLE_API_CONTRACT.md` §7 states the permitted set and, in its own subsection, that none of this is evidence about a real Pi-hole |
 | Runtime password access, live authentication, destination connectivity and TLS verification through the `pi.hole` pin | **Not established, and out of Phase 1 scope.** Phase 2 — SW-P2-02 and SW-P2-04. `docs/VERIFICATION.md` §6.2 |
 | The operator procedure that renews SW-P1-05 | **Rewritten and tested; still unexecuted.** It was a documentation code block that nothing ran, and it carried nine defects — including a hardcoded HEAD that refused its own documented checkout, a build passing no source metadata, a step claiming to read no password beside output showing it reading one, and steps B–D executing whatever the mutable tag pointed at. It is now `scripts/operator-handoff.sh` with 141 regression cases against a scripted fake Docker and git. `docs/VERIFICATION.md` §4.13 and §6.5. **Testing the procedure is not performing it**: SW-P1-05 closes when the operator runs step A and returns its result |
+| Evidence renewal at `76f3bfd` (ORDER 1) | **Local half done; hosted and image halves outstanding, as before.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 and SW-P1-19 on the `scripts/*.sh` change. No Go source changed, so no Go-path row is demoted. The whole local suite was re-run on the final clean committed tree and those rows rest on that transcript (`docs/VERIFICATION.md` §3.17). SW-P1-12, SW-P1-20 and SW-P1-05 cannot be renewed from this account and are demoted rather than carried |
+| The operator procedure's own defects, second pass | **Six found and fixed at `76f3bfd`; the procedure is still unexecuted.** FINDING-51 to FINDING-56: a failed isolation assertion did not prevent `docker start`, a step published its identities before it had a verdict, `--authorise-authenticated-read` was accepted as proof that steps A, B and C had passed, the work directory's advertised "sanitized logs" were the raw captures, step Z's leftover check could not return anything and therefore passed every time, and the privileged work directory and state file were not validated for symlinks, ownership, mode or ancestor writability. `docs/VERIFICATION.md` §4.15. The suite is 308 cases. **Testing the procedure is still not performing it**: SW-P1-05 closes when the operator runs step A and returns its result |
+| The "pending operator testing" row, examined as a category | **Reclassified.** Across two review passes that row has now been found to contain **eight** defects that needed no Docker daemon — FINDING-49 and FINDING-50 at `5af270d`, FINDING-51 … FINDING-56 at `76f3bfd`. It must not be read as a queue of questions only a daemon can settle. What genuinely remains behind it is narrow, and `docs/VERIFICATION.md` §7 states it as such |
 | Evidence renewal at `9ebb98c` | **Local half done; hosted and image halves outstanding, as before.** §5 demotes SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14 and SW-P1-19 on the `scripts/*.sh` change, and every Go-source row plus SW-P1-13 and SW-P1-15 on the Go change. The whole local suite was re-run on the final clean committed tree and those rows rest on that transcript (`docs/VERIFICATION.md` §3.15). SW-P1-12, SW-P1-20 and SW-P1-05 cannot be renewed from this account and are demoted rather than carried |
 
 ### SW-P1-01 — Runtime verification is built from checked operations
@@ -436,6 +440,35 @@ every gate run as the service account; the pre-fix comparison is recorded.
 `b469c59` comparison (112 failures once its own baseline is unmasked) and the
 `0b083cb` one (50 of 319 cases). Six classes were added at `b6b1769` for
 FINDING-17 … FINDING-22; they are listed at the end of §3.2.
+
+**Classes added at `76f3bfd` for the operator handoff (ORDER 1).** These belong
+to `scripts/tests/operator-handoff-test.sh` rather than to the verifier's suite,
+and each is a false-pass or a forbidden-action class the earlier list did not
+name:
+
+* an isolation assertion that failed, or that could not be evaluated, must
+  prevent the container from being started at all — asserted against the fake
+  daemon's own command log, not against the program's output;
+* a step that did not pass must publish no identity, and a later step must
+  refuse rather than run off one;
+* a cleanup failure must make the step's recorded state `failed`, not `passed`;
+* an authorisation flag must not stand in for a prerequisite's recorded result;
+* a prerequisite that passed against a different image or a different resolved
+  configuration must be refused as STALE;
+* a rebuild must invalidate downstream acceptance **before** it runs, so a
+  failed rebuild leaves nothing usable;
+* the shareable evidence copy must retain no credential-shaped value the
+  sanitizer catches, while the raw capture must retain it;
+* a close-out check that cannot return anything is not a pass, and an empty
+  invocation register is UNPROVEN;
+* a privileged program must not follow a symlink, adopt a state file it does
+  not own, or write into a directory an unprivileged account could substitute.
+
+The discrimination mechanism for these is the **reversion experiment** recorded
+in `docs/VERIFICATION.md` §3.17: each fix was reverted on its own and the suite
+re-run. In-suite pre-fix controls were not used here because five of the six
+defects are the *absence* of a control-flow gate rather than a changed
+expression, and a reverted gate is the faithful reproduction of that.
 
 ### SW-P1-08 — ShellCheck as a required gate
 
