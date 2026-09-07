@@ -3088,11 +3088,30 @@ echo "BUILD exit=$BUILD_RC"
 [ "$BUILD_RC" -eq 0 ] || exit 1
 
 # ---- The two in-build assertions, from the build's own output ---------------
-grep -q 'enforcement compiled in.*false' "$WORK/build.log" || {
-  echo "REFUSING: the enforcement-absent assertion did not run"; exit 1; }
-grep -qi 'ELF' "$WORK/build.log" || {
-  echo "REFUSING: the ELF linkage assertion did not run"; exit 1; }
+# Presence of the step is not enough: a CACHED step did not execute for this
+# build, so its assertion proves nothing about this source. --no-cache above
+# should prevent that; it is asserted anyway, because "should" is what §5
+# exists to distrust.
+show_step() { # <substring of the RUN command>
+  local n
+  n="$(sed -n "s|^#\([0-9][0-9]*\) \[[^]]*\] RUN .*$1.*|\1|p" "$WORK/build.log" | head -1)"
+  [ -n "$n" ] || { echo "  (no build step matched \"$1\" — read $WORK/build.log in full)"; return 1; }
+  grep -E "^#${n}( |$)" "$WORK/build.log"
+}
 
+echo "---- ELF linkage assertion (SW-P1-20) ----"
+ELF_STEP="$(show_step 'elfcheck')" || exit 1
+printf '%s\n' "$ELF_STEP"
+case "$ELF_STEP" in
+  *CACHED*) echo "REFUSING: the ELF assertion step was CACHED and did not execute"; exit 1 ;;
+esac
+
+echo "---- enforcement-absent assertion ----"
+ENF_STEP="$(show_step '/out/scamwall version')" || exit 1
+printf '%s\n' "$ENF_STEP"
+case "$ENF_STEP" in
+  *CACHED*) echo "REFUSING: the enforcement assertion step was CACHED and did not execute"; exit 1 ;;
+esac
 # ---- Image identity ---------------------------------------------------------
 IMAGE_ID="$(sudo docker image inspect -f '{{.Id}}' scamwall:local)" || exit 1
 echo "IMAGE_ID=$IMAGE_ID"
