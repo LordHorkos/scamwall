@@ -1232,7 +1232,8 @@ reached it is named rather than worked around.
 | Item | Value |
 | --- | --- |
 | Starting HEAD | `f94214aba8d56c8b133b9049a168b11ce64f3156` |
-| Ending HEAD | `7e1141997cc1f7484144f07c1fb05cde5d39e280` |
+| **Candidate** | `7e1141997cc1f7484144f07c1fb05cde5d39e280` — the last commit that changes a gate input. Every gate result below is evidence about this tree |
+| Ending HEAD | `80ab1866ddb3043403ea3d679afccd049f1e3e98`. The commits after the candidate are documentation only and change no gate input, so under `docs/REQUIREMENTS_MATRIX.md` §5 the transcript carries forward rather than needing a re-run — which is why the candidate is named separately rather than every reference being rewritten to the latest HEAD |
 | Published commit at the start | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` — unchanged; **nothing was pushed** |
 | Branch | `feat/phase-1-core` — unchanged |
 | Diff | 30 files, +3857 / −223 |
