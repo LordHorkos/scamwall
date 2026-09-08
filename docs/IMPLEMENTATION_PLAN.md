@@ -201,6 +201,14 @@ verifier itself, found in two review rounds and none by execution (§4.7, §4.8)
 Items 1–7 and 13 were completed in commits `36ed21b` … `2edb95a`. Items 8–12
 and 14–15 were completed in later sessions.
 
+**ORDER 1: implementation complete, acceptance pending.** The code is written,
+tested and committed and the local suite passes on the clean committed tree.
+The order's acceptance also requires *applicable real-runtime evidence*, which
+needs an operator build (§6.5 step A) and a hosted run, neither of which this
+account can perform. Until both, ORDER 1 is not accepted and ORDER 2's
+dependent acceptance does not open — though ORDER 2's independent work may
+proceed, per the orders' own rule on working around an external blocker.
+
 **Item 5 is the one that is still open, and ORDER 1 is about its procedure.**
 SW-P1-05 is renewed by `docs/VERIFICATION.md` §6.5 step A, which the operator
 runs. That procedure has now been reviewed three times and has carried defects

@@ -1576,6 +1576,27 @@ was read or changed. Steps A, B, C and D of `§6.5` remain unexecuted.
 ---
 ### 3.17 Order-1 session — the operator safety foundation
 
+> **STATUS: IMPLEMENTATION COMPLETE; ACCEPTANCE PENDING.**
+>
+> Every code change ORDER 1 asks for is written, tested and committed, and the
+> local gate suite passes on the clean committed tree. That is **not** the
+> order's acceptance criterion. ORDER 1 accepts when *"the existing Phase 1
+> matrix is reconciled, and the handoff's security boundaries have supporting
+> code, negative tests, **and applicable real-runtime evidence**"*.
+>
+> The first two are done. The third is outstanding and cannot be produced from
+> this account:
+>
+> * **Operator evidence** — `§6.5` step A has not been run. No image has been
+>   built from this source on any host, so SW-P1-05 and SW-P1-20 stay
+>   IMPLEMENTED-UNVERIFIED.
+> * **Hosted evidence** — this tree has never had a hosted run. The published
+>   commit is `72bc84c` and its run executed 24 gates; this tree has 26.
+>   SW-P1-12 stays IMPLEMENTED-UNVERIFIED.
+>
+> Do not read "the suite passes" as "the order is accepted". The suite passing
+> is what makes the order's evidence *worth collecting*; it is not the evidence.
+
 Work performed under **ORDER 1** of the consolidated phase orders, which
 directs that five defects found by a review *of* `5af270d` be addressed, that
 the step lifecycle be made explicit, and that step results be bound to the
@@ -1613,10 +1634,22 @@ documentation commit that follows it changes none, so it does not invalidate the
 gate results below — and it is what names `76f3bfd`, because a SHA cannot be
 recorded by the commit that creates it (FINDING-38).
 
-**No Go source, no Dockerfile, no Compose definition and no workflow changed.**
-The Go-path rows established at `9ebb98c` and `7e11419` stand; §5 of the
-requirements matrix demotes the script-bound rows again, and the suite was
-re-run on the clean committed tree to renew them.
+**No Go source, no Dockerfile, no Compose definition and no workflow changed by
+this candidate.** §5 of the requirements matrix demotes the script-bound rows
+again, and the suite was re-run on the clean committed tree to renew them.
+
+**That says nothing about the Go-bound rows, and must not be read as if it
+did.** "This patch changed no Go source" is a statement about
+`0cdec6c…76f3bfd`. It is not a statement about the distance between this tree
+and the tree any earlier evidence was produced against. Since `72bc84c` — the
+commit whose hosted run closed SW-P1-20 — five commits have changed Go source
+and `container/Dockerfile` changed with them, cumulatively **+3440 / −229
+across 22 files**. SW-P1-20 and SW-P1-12 have been IMPLEMENTED-UNVERIFIED
+continuously since `7e11419`, they remain so, and this candidate neither
+renews nor further demotes them. The full reconciliation, including what the
+old evidence still covers and what the current renewal requires, is in
+`docs/REQUIREMENTS_MATRIX.md` §3 under *SW-P1-20 reconciled across the complete
+history since `72bc84c`*.
 
 #### Suites at the end of this session
 
