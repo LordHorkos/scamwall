@@ -212,6 +212,106 @@ expect_absent_from_file() {
 WORK=""
 STATE=""
 
+# state_apply — ONE atomic replacement carrying an ARBITRARY NUMBER of changes.
+#
+# Every write to the state file goes through here, and every write installs a
+# COMPLETE new version of the file with a single rename(2). Whatever moment a
+# reader looks — this program's next step, or an operator's `grep` — it sees
+# either the whole set of changes or none of it.
+#
+# WHY IT HAS TO BE ONE RENAME
+#
+# record_step_outcome used to write the terminal status first and the identity
+# bindings afterwards, each through its own rewrite-and-rename. Between those
+# renames the state file said
+#
+#     STEP_STATUS_PROBE=passed
+#
+# and said nothing whatever about the image or the configuration that step had
+# passed against. A step interrupted in that window left exactly that record
+# behind: a pass carrying no bindings, which every later step then read as an
+# acceptance it could build on — and assert_prereq_identities, which was
+# supposed to catch it, skipped every component the record did not happen to
+# contain. The status and the bindings are ONE fact, so they are one write.
+#
+# Each argument is either "+KEY=VALUE" (record, replacing any existing record
+# of KEY) or "-KEY" (remove every record of KEY). Keys are matched as literal
+# prefixes at position 1, never as patterns, so no metacharacter in a key can
+# widen the match.
+#
+# STATED LIMIT: rename(2) is atomic against concurrent readers and against
+# this process dying at any point. It is not a durability barrier — a host
+# that loses power between the rename and the filesystem's own flush can come
+# back holding the older version. That is tolerable here, because the older
+# version never claims more than the newer one does, and it is not claimed to
+# be more than that.
+state_apply() { # +KEY=VALUE | -KEY ...
+  local tmp keyfile arg key rest old
+  [ -n "$STATE" ] || refuse "no state file is open"
+  [ "$#" -gt 0 ] || return 0
+
+  tmp="$(mktemp -- "${STATE}.XXXXXX")" ||
+    refuse "a temporary file for the state update could not be created next to $STATE"
+  chmod 600 -- "$tmp" 2>/dev/null || true
+  keyfile="$(mktemp -- "${STATE}.keys.XXXXXX")" || {
+    rm -f -- "$tmp"
+    refuse "a temporary file for the state update could not be created next to $STATE"
+  }
+
+  # Validate the whole change set BEFORE touching anything. A malformed change
+  # must not be able to produce a half-applied write.
+  for arg in "$@"; do
+    case "$arg" in
+      +*) rest="${arg#+}"; key="${rest%%=*}" ;;
+      -*) key="${arg#-}" ;;
+      *)  rm -f -- "$tmp" "$keyfile"
+          refuse "a state change was requested in a form this program does not write: $arg" ;;
+    esac
+    if [ -z "$key" ] || [ "$key" != "${key//[!A-Za-z0-9_]/}" ]; then
+      rm -f -- "$tmp" "$keyfile"
+      refuse "a state change was requested for an unusable key: '$key'"
+    fi
+    if ! printf '%s\n' "$key" >> "$keyfile"; then
+      rm -f -- "$tmp" "$keyfile"
+      refuse "the state update could not be prepared: $STATE"
+    fi
+  done
+
+  # Every key being written or removed is dropped from the carried-over content
+  # in ONE pass, so the new version is derived from the old one exactly once.
+  if [ -f "$STATE" ]; then
+    if ! awk -v kf="$keyfile" '
+        BEGIN { while ((getline k < kf) > 0) if (k != "") keys[k] = 1 }
+        { for (k in keys) if (index($0, k "=") == 1) next
+          print }' "$STATE" > "$tmp"; then
+      rm -f -- "$tmp" "$keyfile"
+      refuse "the state file could not be rewritten: $STATE"
+    fi
+  fi
+  rm -f -- "$keyfile"
+
+  for arg in "$@"; do
+    case "$arg" in
+      +*) rest="${arg#+}"
+          old="$(state_get "${rest%%=*}")" || old=""
+          if [ -n "$old" ] && [ "$old" != "${rest#*=}" ]; then
+            note "${rest%%=*} was already recorded with a different value; it is REPLACED, and every later step will use the new one"
+          fi
+          if ! printf '%s=%s\n' "${rest%%=*}" "${rest#*=}" >> "$tmp"; then
+            rm -f -- "$tmp"
+            refuse "the state file could not be written: $STATE"
+          fi ;;
+    esac
+  done
+
+  # The one moment at which the recorded state changes.
+  if ! mv -f -- "$tmp" "$STATE"; then
+    rm -f -- "$tmp"
+    refuse "the updated state file could not be installed: $STATE"
+  fi
+  return 0
+}
+
 # state_put REPLACES any existing record of the key rather than appending one.
 #
 # It appended, and state_get returned the FIRST match. A step may legitimately
@@ -226,32 +326,12 @@ STATE=""
 # That is FINDING-44 arriving by a different route: a result bound to one
 # identity while the operation was performed on another. The image id is pinned
 # so that cannot happen, so the pin itself must not be able to go stale.
+#
+# It is now the one-change spelling of state_apply. Routing it through the same
+# primitive is what stops a future site from inventing a second, non-atomic way
+# to write this file.
 state_put() { # key value
-  local key="$1" value="$2" old tmp
-  [ -n "$STATE" ] || refuse "no state file is open"
-  old="$(state_get "$key")" || old=""
-  tmp="$(mktemp -- "${STATE}.XXXXXX")" ||
-    refuse "a temporary file for the state update could not be created next to $STATE"
-  chmod 600 -- "$tmp" 2>/dev/null || true
-  if [ -f "$STATE" ]; then
-    # A literal prefix match at position 1 — not a regex — so a key is never
-    # matched loosely and no metacharacter in a key can widen it.
-    if ! awk -v k="$key" 'index($0, k "=") != 1' "$STATE" > "$tmp"; then
-      rm -f -- "$tmp"
-      refuse "the state file could not be rewritten: $STATE"
-    fi
-  fi
-  if ! printf '%s=%s\n' "$key" "$value" >> "$tmp"; then
-    rm -f -- "$tmp"
-    refuse "the state file could not be written: $STATE"
-  fi
-  if ! mv -f -- "$tmp" "$STATE"; then
-    rm -f -- "$tmp"
-    refuse "the updated state file could not be installed: $STATE"
-  fi
-  if [ -n "$old" ] && [ "$old" != "$value" ]; then
-    note "$key was already recorded with a different value; it is REPLACED, and every later step will use the new one"
-  fi
+  state_apply "+$1=$2"
 }
 
 # state_get reads the LAST record of the key. state_put keeps at most one, so
@@ -276,25 +356,13 @@ state_require() { # key -> prints value or refuses
   printf '%s' "$v"
 }
 
-# state_clear removes a key entirely, so that a later state_get answers "absent"
-# rather than "recorded empty". The distinction matters: an identity that was
-# INVALIDATED must not read as an identity that exists and happens to be blank.
-state_clear() { # key
-  local key="$1" tmp
-  [ -n "$STATE" ] || refuse "no state file is open"
-  [ -f "$STATE" ] || return 0
-  tmp="$(mktemp -- "${STATE}.XXXXXX")" ||
-    refuse "a temporary file for the state update could not be created next to $STATE"
-  chmod 600 -- "$tmp" 2>/dev/null || true
-  if ! awk -v k="$key" 'index($0, k "=") != 1' "$STATE" > "$tmp"; then
-    rm -f -- "$tmp"
-    refuse "the state file could not be rewritten: $STATE"
-  fi
-  if ! mv -f -- "$tmp" "$STATE"; then
-    rm -f -- "$tmp"
-    refuse "the updated state file could not be installed: $STATE"
-  fi
-}
+# A "-KEY" change to state_apply REMOVES the key entirely, so that a later
+# state_get answers "absent" rather than "recorded empty". The distinction
+# matters: an identity that was INVALIDATED must not read as an identity that
+# exists and happens to be blank. Every site that voids a record — a rebuild's
+# invalidation, a step that did not pass, the start of a step that is about to
+# re-establish its own bindings — expresses it that way, inside the same
+# replacement that carries the rest of that site's changes.
 
 # state_append_word adds one whitespace-free word to a space-separated list,
 # once. The invocation register is the only such list, and it must ACCUMULATE
@@ -372,10 +440,21 @@ BIND_CONFIG=""
 # does can matter. It needs an open state file, so it follows the work
 # directory being opened and validated.
 begin_step() { # <step>
-  local prior
+  local prior kind
+  local -a changes=()
   STEP_NAME="$1"
   prior="$(step_status_of "$STEP_NAME")"
-  state_put "$(step_key STEP_STATUS "$STEP_NAME")" running
+  # `running` and the REMOVAL of this step's previous bindings, in one
+  # replacement. A step that has begun has not yet passed against anything, so
+  # the identities a previous run of the same step recorded must not outlive
+  # the moment this one starts: leaving them there is a binding sitting beside
+  # a status that does not entitle anything to read it, which is the shape of
+  # the defect this whole section exists to remove.
+  changes=("+$(step_key STEP_STATUS "$STEP_NAME")=running")
+  for kind in commit image config; do
+    changes+=("-$(step_key "$(binding_key_prefix "$kind")" "$STEP_NAME")")
+  done
+  state_apply "${changes[@]}"
   STEP_STARTED=1
   case "$prior" in
     not_started) ;;
@@ -395,13 +474,13 @@ stage_result() { # key value
   STAGED_RESULTS+=("$1=$2")
 }
 
-commit_staged_results() {
-  local kv
-  for kv in ${STAGED_RESULTS[@]+"${STAGED_RESULTS[@]}"}; do
-    state_put "${kv%%=*}" "${kv#*=}"
-  done
-  STAGED_RESULTS=()
-}
+# Staged results are published by record_step_outcome, inside the SAME atomic
+# replacement that publishes the terminal status and the identity bindings.
+#
+# There is deliberately no function that writes them on their own any more. A
+# staged result installed by a rename of its own is a moment at which the file
+# holds some of a step's results and not the rest, and that moment is the whole
+# of the defect this section exists to remove.
 
 discard_staged_results() {
   local n kv
@@ -423,27 +502,206 @@ discard_staged_results() {
 # after run_cleanup, and from the EXIT trap for a step that ended without a
 # verdict. It clears STEP_STARTED first, so whichever arrives first wins and a
 # later handler cannot overwrite a recorded verdict.
+# --- What each step is REQUIRED to be bound to --------------------------------
+#
+# The bindings are not "whichever identities the step happened to establish".
+# Each step has a stated, required set, and both halves of the state machine
+# are checked against it:
+#
+#   * record_step_outcome will not publish `passed` unless every required
+#     binding for that step is established and well-formed; and
+#   * require_step_passed and assert_prereq_identities will not ACCEPT a
+#     `passed` record unless every required binding for that step is present,
+#     well-formed and equal to the identity this step is using.
+#
+# The old rule compared only the components both sides happened to have, and
+# reported "step build passed against exactly these identities (source commit)"
+# when the image binding was absent entirely. A commit that matched was enough
+# to carry an acceptance forward to a container built from an image nothing had
+# compared. Absence is now refused, not skipped.
+#
+#   preflight  the checkout it validated
+#   build      the checkout it built, and the image it produced
+#   probe      the checkout, the image it ran, and the resolved deployment
+#   secret     as probe
+#   status     as probe
+#   closeout   none — it creates nothing and no step depends on it
+step_required_bindings() { # <step> -> prints the required kinds, space separated
+  case "$1" in
+    preflight)           printf 'commit' ;;
+    build)               printf 'commit image' ;;
+    probe|secret|status) printf 'commit image config' ;;
+    closeout)            printf '' ;;
+    *) return 1 ;;
+  esac
+}
+
+binding_key_prefix() { # <kind>
+  case "$1" in
+    commit) printf 'STEP_COMMIT' ;;
+    image)  printf 'STEP_IMAGE' ;;
+    config) printf 'STEP_CONFIG' ;;
+    *) return 1 ;;
+  esac
+}
+
+binding_name() { # <kind> — how the operator is told about it
+  case "$1" in
+    commit) printf 'source commit' ;;
+    image)  printf 'image id' ;;
+    config) printf 'configuration digest' ;;
+    *) return 1 ;;
+  esac
+}
+
+binding_current() { # <kind> -> the value THIS step has established, if any
+  case "$1" in
+    commit) printf '%s' "$BIND_COMMIT" ;;
+    image)  printf '%s' "$BIND_IMAGE" ;;
+    config) printf '%s' "$BIND_CONFIG" ;;
+    *) return 1 ;;
+  esac
+}
+
+# binding_wellformed — an identity that is present but not of the right SHAPE
+# is not an identity. A truncated image id or a 7-character commit compares
+# unequal against the real thing and would be reported as staleness; worse, a
+# value that is merely non-empty would satisfy a presence check while
+# establishing nothing. Shape is checked wherever presence is.
+binding_wellformed() { # <kind> <value>
+  local hex
+  case "$1" in
+    commit)
+      case "$2" in *[!0-9a-f]* | '') return 1 ;; esac
+      [ "${#2}" -eq 40 ] ;;
+    config)
+      case "$2" in *[!0-9a-f]* | '') return 1 ;; esac
+      [ "${#2}" -eq 64 ] ;;
+    image)
+      case "$2" in sha256:*) ;; *) return 1 ;; esac
+      hex="${2#sha256:}"
+      case "$hex" in *[!0-9a-f]* | '') return 1 ;; esac
+      [ "${#hex}" -eq 64 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# assert_recorded_bindings_complete — a `passed` record is usable only WITH the
+# identities that step was required to pass against.
+#
+# This is the historical-record case as much as the interruption case. A state
+# file written by an earlier revision of this program, or one interrupted
+# between the status write and the binding writes, can hold
+# STEP_STATUS_BUILD=passed and nothing else. That record is refused here rather
+# than being carried into a comparison that silently skips what is missing.
+#
+# state_get returns nonzero for absent, empty AND unreadable alike, and all
+# three are refused in the same words: what that step passed against cannot be
+# read, so it is UNPROVEN either way.
+assert_recorded_bindings_complete() { # <step>
+  local step="$1" kinds kind key val
+  kinds="$(step_required_bindings "$step")" || kinds=""
+  for kind in $kinds; do
+    key="$(step_key "$(binding_key_prefix "$kind")" "$step")"
+    if ! val="$(state_get "$key")"; then
+      refuse "step $step is recorded as passed, but the $(binding_name "$kind") it passed against ($key) is missing, empty or unreadable in $STATE. That is an INCOMPLETE pass record — what step $step established cannot be attributed to anything — and it is refused rather than skipped. Re-run step $step"
+    fi
+    if ! binding_wellformed "$kind" "$val"; then
+      refuse "step $step is recorded as passed, but its recorded $(binding_name "$kind") ($key) is malformed. That is a CORRUPT pass record and it is refused. Re-run step $step"
+    fi
+  done
+  return 0
+}
+
+# assert_bindings_publishable — called by summary_and_exit BEFORE it computes
+# the verdict, so that a step which cannot say what it passed against fails in
+# the ordinary way: counted, printed, and exited nonzero.
+#
+# Checking it only inside record_step_outcome would record `failed` while the
+# program still exited 0 and told the operator every check had passed. The
+# recorded state and the reported result have to be the same statement.
+assert_bindings_publishable() {
+  local kinds kind val
+  kinds="$(step_required_bindings "$STEP_NAME")" || kinds=""
+  for kind in $kinds; do
+    val="$(binding_current "$kind")"
+    if [ -z "$val" ]; then
+      bad "this step established no $(binding_name "$kind"), which it is required to be bound to — a pass that cannot say what it passed against is not publishable"
+    elif ! binding_wellformed "$kind" "$val"; then
+      bad "this step's $(binding_name "$kind") is malformed — a pass cannot be bound to it"
+    fi
+  done
+  return 0
+}
+
+# record_step_outcome — the ONLY writer of a terminal step state, and it writes
+# the whole terminal record in ONE atomic replacement.
+#
+# Reached from summary_and_exit after run_cleanup, from the signal handler
+# after run_cleanup, and from the EXIT trap for a step that ended without a
+# verdict. It clears STEP_STARTED first, so whichever arrives first wins and a
+# later handler cannot overwrite a recorded verdict.
+#
+# Two things happen here that did not before:
+#
+#   1. A `passed` outcome is CHECKED against the step's required bindings
+#      before it is published. A step whose checks all passed but which cannot
+#      say what it passed against is recorded as `failed`, not as `passed`.
+#   2. The status, the bindings and the staged results are installed by a
+#      single state_apply. There is no window in which the file says `passed`
+#      and does not yet say what against.
 record_step_outcome() { # <passed|failed|interrupted|indeterminate>
-  local outcome="$1"
+  local outcome="$1" kinds kind key val missing="" kv
+  local -a changes=()
   [ "$STEP_STARTED" -eq 1 ] || return 0
   STEP_STARTED=0
   [ -n "$STATE" ] && [ -f "$STATE" ] || return 0
-  state_put "$(step_key STEP_STATUS "$STEP_NAME")" "$outcome"
+  kinds="$(step_required_bindings "$STEP_NAME")" || kinds=""
+
+  if [ "$outcome" = "passed" ]; then
+    for kind in $kinds; do
+      val="$(binding_current "$kind")"
+      if [ -z "$val" ]; then
+        missing="${missing}${missing:+, }$(binding_name "$kind") (never established)"
+      elif ! binding_wellformed "$kind" "$val"; then
+        missing="${missing}${missing:+, }$(binding_name "$kind") (malformed)"
+      fi
+    done
+    if [ -n "$missing" ]; then
+      # summary_and_exit checks this BEFORE it computes the verdict, so the
+      # exit status and the printed result agree with what gets recorded. This
+      # is the last line of defence for any path that does not go through it.
+      printf 'RESULT: this step cannot be recorded as passed: %s\n' "$missing"
+      printf 'STEP STATUS: recorded as failed instead — a pass is publishable only\n'
+      printf 'together with every identity it was performed against.\n'
+      outcome="failed"
+    fi
+  fi
+
+  changes=("+$(step_key STEP_STATUS "$STEP_NAME")=$outcome")
   if [ "$outcome" = "passed" ]; then
     # The identities the step was performed against, recorded WITH the pass, so
     # a later step can tell "step B passed" from "step B passed against the
-    # image and the configuration I am about to use".
-    [ -n "$BIND_COMMIT" ] && state_put "$(step_key STEP_COMMIT "$STEP_NAME")" "$BIND_COMMIT"
-    [ -n "$BIND_IMAGE" ]  && state_put "$(step_key STEP_IMAGE  "$STEP_NAME")" "$BIND_IMAGE"
-    [ -n "$BIND_CONFIG" ] && state_put "$(step_key STEP_CONFIG "$STEP_NAME")" "$BIND_CONFIG"
-    commit_staged_results
+    # image and the configuration I am about to use". A component this step
+    # never established is REMOVED rather than left at whatever an earlier run
+    # of the same step recorded under the same key.
+    for kind in commit image config; do
+      key="$(step_key "$(binding_key_prefix "$kind")" "$STEP_NAME")"
+      val="$(binding_current "$kind")"
+      if [ -n "$val" ]; then changes+=("+$key=$val"); else changes+=("-$key"); fi
+    done
+    for kv in ${STAGED_RESULTS[@]+"${STAGED_RESULTS[@]}"}; do
+      changes+=("+$kv")
+    done
+    STAGED_RESULTS=()
   else
     # A non-passing step leaves behind no binding that could be mistaken for one.
-    state_clear "$(step_key STEP_COMMIT "$STEP_NAME")"
-    state_clear "$(step_key STEP_IMAGE  "$STEP_NAME")"
-    state_clear "$(step_key STEP_CONFIG "$STEP_NAME")"
+    for kind in commit image config; do
+      changes+=("-$(step_key "$(binding_key_prefix "$kind")" "$STEP_NAME")")
+    done
     discard_staged_results
   fi
+  state_apply "${changes[@]}"
   return 0
 }
 
@@ -468,7 +726,12 @@ require_step_passed() { # <step> <why this step needs it>
     *)
       refuse "step $step has an unrecognised recorded status '$status'; it is not 'passed', so it is refused" ;;
   esac
-  ok "prerequisite: step $step is recorded as passed in this work directory"
+  # `passed` is a claim; the bindings are what the claim is ABOUT. A record
+  # carrying the first and not the second is refused here, before this step
+  # does anything — including before it requires Docker, creates a container,
+  # or offers a credential to one.
+  assert_recorded_bindings_complete "$step"
+  ok "prerequisite: step $step is recorded as passed in this work directory, with every identity it was required to pass against"
 }
 
 # assert_prereq_identities — the earlier step passed, but against WHAT?
@@ -477,31 +740,52 @@ require_step_passed() { # <step> <why this step needs it>
 # earlier step recorded and this step also has must agree; a component only one
 # of them has is not compared, and the report names the ones that were.
 assert_prereq_identities() { # <step>
-  local step="$1" compared="" rec
-  rec="$(state_get "$(step_key STEP_COMMIT "$step")")" || rec=""
-  if [ -n "$rec" ] && [ -n "$BIND_COMMIT" ]; then
-    if [ "$rec" != "$BIND_COMMIT" ]; then
-      bad "step $step passed against source commit $rec, but this step is using $BIND_COMMIT — its acceptance is STALE"
+  local step="$1" compared="" kinds kind key rec cur required
+  kinds="$(step_required_bindings "$step")" || kinds=""
+  for kind in commit image config; do
+    key="$(step_key "$(binding_key_prefix "$kind")" "$step")"
+    rec="$(state_get "$key")" || rec=""
+    cur="$(binding_current "$kind")"
+    required=0
+    case " $kinds " in *" $kind "*) required=1 ;; esac
+
+    if [ "$required" -eq 1 ]; then
+      # A component the earlier step was REQUIRED to bind is compared, or this
+      # step refuses. It is not skipped because one side is absent: skipping
+      # is what let a matching commit alone carry an acceptance forward to an
+      # image and a deployment configuration that nothing had compared.
+      if [ -z "$rec" ]; then
+        bad "step $step recorded no $(binding_name "$kind"), which it is required to have passed against — its acceptance is UNUSABLE, not merely unverified"
+        return 1
+      fi
+      if ! binding_wellformed "$kind" "$rec"; then
+        bad "step $step recorded a malformed $(binding_name "$kind") — its acceptance is UNUSABLE"
+        return 1
+      fi
+      if [ -z "$cur" ]; then
+        bad "this step has established no $(binding_name "$kind") to compare against step $step's — refusing to carry that acceptance forward UNCHECKED"
+        return 1
+      fi
+      if ! binding_wellformed "$kind" "$cur"; then
+        bad "this step's $(binding_name "$kind") is malformed, so the comparison against step $step cannot be made — its acceptance is UNPROVEN here"
+        return 1
+      fi
+    else
+      # Not required of that step. Compared anyway when both sides have it,
+      # which costs nothing and catches a drift the table does not model.
+      { [ -n "$rec" ] && [ -n "$cur" ]; } || continue
+    fi
+
+    if [ "$rec" != "$cur" ]; then
+      case "$kind" in
+        config) bad "step $step passed against a different resolved deployment configuration (was $rec, now $cur) — its acceptance is STALE" ;;
+        *)      bad "step $step passed against $(binding_name "$kind") $rec, but this step is using $cur — its acceptance is STALE" ;;
+      esac
       return 1
     fi
-    compared="${compared}${compared:+, }source commit"
-  fi
-  rec="$(state_get "$(step_key STEP_IMAGE "$step")")" || rec=""
-  if [ -n "$rec" ] && [ -n "$BIND_IMAGE" ]; then
-    if [ "$rec" != "$BIND_IMAGE" ]; then
-      bad "step $step passed against image $rec, but this step is using $BIND_IMAGE — its acceptance is STALE"
-      return 1
-    fi
-    compared="${compared}${compared:+, }image id"
-  fi
-  rec="$(state_get "$(step_key STEP_CONFIG "$step")")" || rec=""
-  if [ -n "$rec" ] && [ -n "$BIND_CONFIG" ]; then
-    if [ "$rec" != "$BIND_CONFIG" ]; then
-      bad "step $step passed against a different resolved deployment configuration (was $rec, now $BIND_CONFIG) — its acceptance is STALE"
-      return 1
-    fi
-    compared="${compared}${compared:+, }configuration digest"
-  fi
+    compared="${compared}${compared:+, }$(binding_name "$kind")"
+  done
+
   if [ -z "$compared" ]; then
     blocked "step $step recorded no identity this step can compare against — what it passed against is UNPROVEN"
     return 1
@@ -520,26 +804,33 @@ assert_prereq_identities() { # <step>
 # this work directory ever verified — while every step reported a pass.
 DOWNSTREAM_OF_BUILD="probe secret status"
 invalidate_after_rebuild() { # <reason>
-  local s status touched=0
+  local s status kind touched=0
+  local -a changes=()
   for s in $DOWNSTREAM_OF_BUILD; do
     status="$(step_status_of "$s")"
     [ "$status" = "not_started" ] && continue
-    state_put "$(step_key STEP_STATUS "$s")" not_started
-    state_clear "$(step_key STEP_COMMIT "$s")"
-    state_clear "$(step_key STEP_IMAGE  "$s")"
-    state_clear "$(step_key STEP_CONFIG "$s")"
+    changes+=("+$(step_key STEP_STATUS "$s")=not_started")
+    for kind in commit image config; do
+      changes+=("-$(step_key "$(binding_key_prefix "$kind")" "$s")")
+    done
     note "step $s was recorded as $status; that acceptance is INVALIDATED by $1, and step $s must be re-run"
     touched=1
   done
   if state_get IMAGE_ID >/dev/null 2>&1; then
-    state_clear IMAGE_ID
-    state_clear BUILD_COMMIT
-    state_clear BUILD_DATE
+    changes+=("-IMAGE_ID" "-BUILD_COMMIT" "-BUILD_DATE")
     note "the previously recorded IMAGE_ID is INVALIDATED by $1"
     note "if this build does not pass, no image id is recorded and steps B, C and D refuse"
     touched=1
   fi
-  [ "$touched" -eq 1 ] && ok "downstream acceptance invalidated before the rebuild starts"
+  # ONE replacement, like every other write to this file. A rebuild interrupted
+  # partway through the invalidation must not be able to leave some downstream
+  # acceptances voided and others standing beside a stale image pin — which is
+  # precisely the arrangement that would let the next step create a container
+  # from an image no step in this work directory ever verified.
+  if [ "$touched" -eq 1 ]; then
+    state_apply "${changes[@]}"
+    ok "downstream acceptance invalidated before the rebuild starts"
+  fi
   return 0
 }
 
@@ -815,6 +1106,100 @@ init_evidence_dirs() {
   return 0
 }
 
+# --- One invocation at a time, per work directory ------------------------------
+#
+# Two invocations sharing a work directory raced. Every read of the state file
+# and every write to it was unsynchronised, so:
+#
+#   * step B could read STEP_STATUS_BUILD=passed and its bindings while a
+#     concurrent `build` was midway through invalidating exactly those records;
+#   * two steps could each read-modify-write the invocation register and one of
+#     the two registrations would be lost — leaving containers behind that step
+#     Z would never know to look for;
+#   * `preflight` removes and recreates the state file, which another step
+#     could be reading through at that moment.
+#
+# rename(2) makes each individual write atomic. It does not make a
+# read-decide-write SEQUENCE atomic, and a prerequisite check is exactly that:
+# read the earlier step's record, decide it is usable, act on it. The lock is
+# what makes the decision and the action refer to the same state.
+#
+# It is taken BEFORE the first read of the state file and held for the whole
+# step, and it is released when the process exits — including when it is
+# killed, because the kernel drops an flock with the descriptor that holds it.
+#
+# STATED LIMIT: the descriptor is inherited by the commands this program runs.
+# Every one of them is short-lived and waited for, so none outlives the step
+# and none can hold the lock past this program's exit; a future call site that
+# spawned something detached would have to close it.
+WORK_LOCK_HELD=0
+LOCK_WAIT_SECONDS=0
+
+acquire_work_lock() {
+  local lock opened present otype
+  [ -n "$WORK" ] || refuse "no work directory is open"
+  command -v flock >/dev/null 2>&1 ||
+    refuse "flock is not available, so two invocations sharing this work directory could not be excluded — refusing rather than racing the state file"
+  lock="$WORK/.handoff.lock"
+
+  # The directory is already established as mode 700, owned by this uid, not a
+  # symlink, and with no ancestor another account can write, so only this
+  # account can place anything at this path. The checks below are the rest of
+  # the answer: the path is not a symlink before it is opened, and the
+  # descriptor that was actually opened is the same regular file that path
+  # names. A component substituted between the check and the open is caught
+  # here rather than followed — which is the lock-file symlink defect that a
+  # naive `: > "$WORK/lock"` would have introduced.
+  assert_not_symlink "$lock" "the work-directory lock file"
+  if ! ( umask 077; : >> "$lock" ); then
+    refuse "the work-directory lock file could not be created: $lock"
+  fi
+  chmod 600 -- "$lock" 2>/dev/null || true
+  assert_not_symlink "$lock" "the work-directory lock file"
+
+  exec 9>>"$lock" ||
+    refuse "the work-directory lock file could not be opened: $lock"
+  opened="$(stat -Lc '%d:%i:%u:%a' -- /proc/self/fd/9 2>/dev/null)" ||
+    refuse "the opened work-directory lock could not be examined — refusing to serialise against a descriptor whose identity is unknown"
+  present="$(stat -c '%d:%i:%u:%a' -- "$lock" 2>/dev/null)" ||
+    refuse "the work-directory lock file could not be examined: $lock"
+  [ "$opened" = "$present" ] ||
+    refuse "the work-directory lock file was substituted while it was being opened: $lock — refusing to serialise against something other than the file that path names"
+  # The TYPE is read separately, and both of `stat %F`'s spellings for a
+  # regular file are accepted, because it says "regular empty file" for a
+  # zero-length one. It is deliberately not part of the identity comparison
+  # above: a file's length can change between the two calls without the file
+  # having been substituted, and that must not read as a substitution.
+  otype="$(stat -Lc '%F' -- /proc/self/fd/9 2>/dev/null)" ||
+    refuse "the type of the opened work-directory lock could not be read: $lock"
+  case "$otype" in
+    "regular file" | "regular empty file") ;;
+    *) refuse "the work-directory lock is not a regular file (it is a $otype): $lock" ;;
+  esac
+
+  # Nonblocking. Two steps in one work directory at once is an operator error,
+  # not a queue: reporting it is more useful than silently serialising two runs
+  # the operator believes are independent.
+  if ! flock -w "$LOCK_WAIT_SECONDS" 9; then
+    refuse "another invocation of this program is running in $WORK and holds its lock. Two steps sharing one work directory would read and write the same state file with no ordering between them; wait for that step to finish, or give this one its own work directory"
+  fi
+  WORK_LOCK_HELD=1
+  ok "this invocation holds the work directory's lock; no other invocation can read or write its state while this step runs"
+}
+
+# shellcheck disable=SC2329  # reached from the EXIT trap
+# release_work_lock — the descriptor is closed on exit in any case and the
+# kernel releases the lock with it. Doing it explicitly, AFTER the terminal
+# state has been recorded, is what makes the ordering visible: the next
+# invocation cannot begin reading until this one's verdict is on disk.
+release_work_lock() {
+  [ "$WORK_LOCK_HELD" -eq 1 ] || return 0
+  WORK_LOCK_HELD=0
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+  return 0
+}
+
 create_work_dir() {
   local requested="${1:-}"
   if [ -n "$requested" ]; then
@@ -846,6 +1231,7 @@ create_work_dir() {
     chmod 700 -- "$WORK" || refuse "the work directory's mode could not be set: $WORK"
   fi
   assert_work_dir_trusted "$WORK"
+  acquire_work_lock
   ok "private work directory created: mode 700, owned by this run, no symlink, no ancestor another account can write"
   note "work directory: $WORK"
   init_evidence_dirs
@@ -858,6 +1244,10 @@ open_work_dir() { # <dir>
   WORK="$(cd -- "$1" >/dev/null 2>&1 && pwd -P)" ||
     refuse "the work directory does not exist or cannot be entered: $1"
   assert_work_dir_trusted "$WORK"
+  # Before the state file is opened, let alone read. Every prerequisite this
+  # step is about to check, and every record it is about to write, happens
+  # under this lock.
+  acquire_work_lock
   STATE="$WORK/state.env"
   assert_state_file_trusted
   init_evidence_dirs
@@ -939,6 +1329,13 @@ assert_capture_usable() { # <label> <basename>
 summary_and_exit() {
   local outcome rc
   run_cleanup
+  # A pass must be publishable together with the identities this step was
+  # required to be bound to. Checked HERE, before the verdict is computed, so
+  # that a step which cannot say what it passed against is counted, printed
+  # and exited nonzero like any other failure.
+  if [ "$FAIL" -eq 0 ] && [ "$BLOCK" -eq 0 ] && [ "$CLEANUP_PROBLEMS" -eq 0 ]; then
+    assert_bindings_publishable
+  fi
   printf '\n%d passed, %d failed, %d blocked, %d cleanup problem(s)\n' \
     "$PASS" "$FAIL" "$BLOCK" "$CLEANUP_PROBLEMS"
   if [ "$FAIL" -gt 0 ] || [ "$BLOCK" -gt 0 ] || [ "$CLEANUP_PROBLEMS" -gt 0 ]; then
@@ -999,6 +1396,7 @@ on_exit() {
     printf '\nthis step ended without recording a verdict; it is recorded as INDETERMINATE\n'
     record_step_outcome indeterminate
   fi
+  release_work_lock
   if [ "$CLEANUP_PROBLEMS" -gt 0 ] && [ "$rc" -eq 0 ]; then
     printf 'RESULT: REQUIRED CLEANUP FAILED — exit status forced nonzero.\n'
     exit 1

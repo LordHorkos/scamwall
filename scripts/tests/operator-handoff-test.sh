@@ -123,6 +123,21 @@ case "${1:-}" in
   info) exit "$(rc_of info)" ;;
 
   build)
+    # A case can hold the build OPEN, or interrupt it. The first proves the
+    # work-directory lock is held for the duration of a step rather than only
+    # taken at its start; the second proves a rebuild that dies partway leaves
+    # nothing downstream usable.
+    if [ -f "$D/build-blocks" ]; then
+      : > "$D/build-entered"
+      i=0
+      while [ ! -f "$D/build-release" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+    fi
+    if [ -f "$D/build-interrupt" ]; then
+      : > "$D/build-entered"
+      kill -TERM "$PPID" 2>/dev/null
+      sleep 5
+      exit 0
+    fi
     cat "$D/build-output" 2>/dev/null
     # A build that "succeeds" may still have replaced the tag.
     [ -f "$D/image-id-after-build" ] && cp "$D/image-id-after-build" "$D/image-id"
@@ -269,6 +284,91 @@ esac
 exit 0
 DOCKER_EOF
 chmod +x "$BIN/docker"
+
+# --- Fake mv, standing at the one moment the state file changes ---------------
+#
+# The handoff builds every state update in a temporary file beside state.env
+# and installs it with ONE rename. That is the property under test, and from
+# outside the program the rename is the only place it can be observed or
+# interrupted — so `mv` is shadowed here.
+#
+# It acts ONLY on renames whose destination is a state.env, and only when the
+# case has asked it to; everything else is delegated to the real mv unchanged,
+# including the fake daemon's own bookkeeping.
+#
+#   record            copy each version that is about to be installed into
+#                     $FAKE_DIR/state-versions/, then install it. This is what
+#                     makes "no version of this file ever said `passed` without
+#                     saying what against" a checkable statement rather than a
+#                     claim about the source.
+#   fail-on-pass      refuse the rename that would publish the pass.
+#   kill-before-pass  SIGKILL the handoff instead of performing that rename.
+#   kill-after-pass   perform it, then SIGKILL the handoff immediately.
+#
+# SIGKILL rather than SIGTERM deliberately: a signal the program can handle
+# would let it tidy up, and what is being established here is what survives
+# when it CANNOT.
+cat > "$BIN/mv" <<'MV_EOF'
+#!/usr/bin/env bash
+REAL=""
+for c in /bin/mv /usr/bin/mv; do [ -x "$c" ] && REAL="$c" && break; done
+[ -n "$REAL" ] || { printf 'no real mv found\n' >&2; exit 127; }
+
+D="${FAKE_DIR:-}"
+mode=""
+[ -n "$D" ] && [ -f "$D/mv-mode" ] && mode="$(cat "$D/mv-mode" 2>/dev/null)"
+[ -n "$mode" ] || exec "$REAL" "$@"
+
+dst="${*: -1}"
+case "$dst" in
+  */state.env) ;;
+  *) exec "$REAL" "$@" ;;
+esac
+
+src=""
+[ "$#" -ge 2 ] && src="${@:$(($# - 1)):1}"
+key="STEP_STATUS_BUILD=passed"
+[ -f "$D/mv-key" ] && key="$(cat "$D/mv-key" 2>/dev/null)"
+publishes_pass=0
+grep -qxF "$key" "$src" 2>/dev/null && publishes_pass=1
+
+case "$mode" in
+  record)
+    n="$(cat "$D/mv-count" 2>/dev/null || echo 0)"
+    n=$((n + 1)); printf '%s' "$n" > "$D/mv-count"
+    mkdir -p "$D/state-versions"
+    cp -- "$src" "$D/state-versions/$(printf '%03d' "$n")" 2>/dev/null
+    exec "$REAL" "$@"
+    ;;
+  fail-on-pass)
+    if [ "$publishes_pass" -eq 1 ]; then
+      printf 'simulated: the state file could not be installed\n' >&2
+      exit 1
+    fi
+    exec "$REAL" "$@"
+    ;;
+  kill-before-pass)
+    if [ "$publishes_pass" -eq 1 ]; then
+      : > "$D/killed-before-publication"
+      kill -KILL "$PPID" 2>/dev/null
+      sleep 5
+      exit 1
+    fi
+    exec "$REAL" "$@"
+    ;;
+  kill-after-pass)
+    "$REAL" "$@" || exit 1
+    if [ "$publishes_pass" -eq 1 ]; then
+      : > "$D/killed-after-publication"
+      kill -KILL "$PPID" 2>/dev/null
+      sleep 5
+    fi
+    exit 0
+    ;;
+  *) exec "$REAL" "$@" ;;
+esac
+MV_EOF
+chmod +x "$BIN/mv"
 
 # --- The resolved deployment configuration ------------------------------------
 #
@@ -1682,6 +1782,386 @@ preflight_ok && {
   expect_rc_zero "step B passes"
   state_has "step B records the configuration digest it passed against" '^STEP_CONFIG_PROBE=[0-9a-f]{64}$'
   state_has "the invocation register accumulates across steps" '^HANDOFF_INVOCATIONS=build:[0-9a-f]{32}:[^ ]+ probe:[0-9a-f]{32}:'
+}
+
+# =============================================================================
+# FINDING-57 … FINDING-59 — the terminal record, its bindings, and concurrency
+# =============================================================================
+#
+# The reviewer exercised the functions themselves rather than the program, and
+# found three things:
+#
+#   * record_step_outcome wrote STEP_STATUS=passed BEFORE the identity bindings
+#     and the staged results, each through its own rename. An interruption in
+#     that window persisted a pass carrying nothing.
+#   * assert_prereq_identities returned 0 when the commit matched and the image
+#     and configuration bindings were absent, because it compared only the
+#     components both sides happened to have.
+#   * nothing serialised two invocations sharing one work directory.
+#
+# The cases below reproduce all three from OUTSIDE the program — no daemon, no
+# sourcing of its internals — and assert the consequences, not the wording: no
+# dependent container is created, none is started, and nothing authenticates.
+
+# --- helpers for these cases --------------------------------------------------
+
+# state_drop / state_set — edit a recorded state file the way an interruption
+# or an older revision of the program would have left it. Mode and link count
+# are preserved, because the handoff checks both.
+state_drop() { # <key>
+  grep -v "^$1=" "$WORK/state.env" > "$WORK/state.env.edit" 2>/dev/null
+  cat "$WORK/state.env.edit" > "$WORK/state.env"
+  rm -f "$WORK/state.env.edit"
+  chmod 600 "$WORK/state.env"
+}
+state_set() { # <key> <value>
+  state_drop "$1"
+  printf '%s=%s\n' "$1" "$2" >> "$WORK/state.env"
+  chmod 600 "$WORK/state.env"
+}
+
+BG_PID=0
+run_step_bg() { # <outfile> <args...> — sets BG_PID
+  local out="$1"; shift
+  env -u SCAMWALL_CA_FILE -u SCAMWALL_SECRET_FILE -u SCAMWALL_CONFIG \
+      -u SCAMWALL_FEED -u SCAMWALL_IMAGE -u SCAMWALL_EXPECTED_IMAGE_ID \
+      -u SCAMWALL_VERSION -u SCAMWALL_COMMIT -u SCAMWALL_BUILD_DATE \
+      -u PIHOLE_HOST_IP -u SCAMWALL_SECRET_GID \
+      PATH="$BIN:$PATH" FAKE_DIR="$FAKE_DIR" \
+      "$CHECKOUT/scripts/operator-handoff.sh" "$@" > "$out" 2>&1 &
+  BG_PID=$!
+}
+
+wait_for_file() { # <path> — bounded, so a broken case fails instead of hanging
+  local i=0
+  while [ ! -f "$1" ] && [ "$i" -lt 300 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -f "$1" ]
+}
+
+echo
+echo "-- FINDING-57: a terminal record is published whole, or not at all --"
+
+# The invariant, stated directly and checked against EVERY version of the state
+# file that ever existed during a real run of steps 0, A and B.
+#
+# Under the previous code the very first of those versions to carry
+# STEP_STATUS_BUILD=passed carried nothing else, because the status and the
+# bindings were separate renames. That is the defect, and this is the assertion
+# that names it.
+setup_case atomic-publication
+printf 'record' > "$FAKE_DIR/mv-mode"
+preflight_ok && {
+  run_step build --work-dir "$WORK"
+  expect_rc_zero "step A passes with the state file under observation"
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "step B passes with the state file under observation"
+
+  VERSIONS="$FAKE_DIR/state-versions"
+  NVER="$(find "$VERSIONS" -type f 2>/dev/null | wc -l)"
+  if [ "${NVER:-0}" -ge 3 ]; then
+    pass "every state-file version installed during the run was captured ($NVER)"
+  else
+    fail "every state-file version installed during the run was captured" "only ${NVER:-0} captured"
+  fi
+
+  # For each step, the keys a `passed` record of that step must carry.
+  INCOMPLETE=""
+  SAW_PASS=""
+  for v in "$VERSIONS"/*; do
+    [ -f "$v" ] || continue
+    for spec in "PREFLIGHT:STEP_COMMIT_PREFLIGHT" \
+                "BUILD:STEP_COMMIT_BUILD STEP_IMAGE_BUILD IMAGE_ID BUILD_COMMIT" \
+                "PROBE:STEP_COMMIT_PROBE STEP_IMAGE_PROBE STEP_CONFIG_PROBE"; do
+      s="${spec%%:*}"
+      grep -qx "STEP_STATUS_${s}=passed" "$v" || continue
+      SAW_PASS="$SAW_PASS $s"
+      for k in ${spec#*:}; do
+        grep -q "^${k}=." "$v" || INCOMPLETE="$INCOMPLETE $(basename "$v"):${s}:${k}"
+      done
+    done
+  done
+  if [ -z "$INCOMPLETE" ]; then
+    pass "no version of the state file ever recorded a pass without every identity it was bound to"
+  else
+    fail "no version of the state file ever recorded a pass without every identity it was bound to" \
+         "incomplete versions:$INCOMPLETE"
+  fi
+  # Without this the assertion above would also hold for a run that never
+  # recorded a pass at all.
+  case "$SAW_PASS" in
+    *PREFLIGHT*) case "$SAW_PASS" in
+                   *BUILD*) case "$SAW_PASS" in
+                              *PROBE*) pass "the assertion is not vacuous: passes for steps 0, A and B were observed being published" ;;
+                              *) fail "the assertion is not vacuous" "no PROBE pass was ever installed:$SAW_PASS" ;;
+                            esac ;;
+                   *) fail "the assertion is not vacuous" "no BUILD pass was ever installed:$SAW_PASS" ;;
+                 esac ;;
+    *) fail "the assertion is not vacuous" "no PREFLIGHT pass was ever installed:$SAW_PASS" ;;
+  esac
+}
+
+# Killed at the rename that would have published the pass. Nothing of that step
+# survives — not the status, and not the identities it staged.
+setup_case interrupted-before-publication
+preflight_ok && {
+  printf 'kill-before-pass' > "$FAKE_DIR/mv-mode"
+  printf 'STEP_STATUS_BUILD=passed' > "$FAKE_DIR/mv-key"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a build killed at the moment of publication does not report success"
+  if [ -f "$FAKE_DIR/killed-before-publication" ]; then
+    pass "the interruption was delivered at the publishing rename"
+  else
+    fail "the interruption was delivered at the publishing rename" "the publishing rename was never reached"
+  fi
+  rm -f "$FAKE_DIR/mv-mode"
+  state_lacks "no pass was persisted"                    '^STEP_STATUS_BUILD=passed$'
+  state_lacks "no image binding was persisted"           '^STEP_IMAGE_BUILD='
+  state_lacks "no commit binding was persisted"          '^STEP_COMMIT_BUILD='
+  state_lacks "no image id was published"                '^IMAGE_ID='
+  state_has   "the step is still recorded as running"    '^STEP_STATUS_BUILD=running$'
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "step B refuses to run on the interrupted step A"
+  expect_output "the refusal says the step never recorded a verdict" 'recorded as RUNNING'
+  log_lacks "no container was created for step B"  '^create'
+  log_lacks "no container was started for step B"  '^start'
+}
+
+# Killed immediately AFTER that rename. The single rename is the whole
+# publication, so what survives is the COMPLETE record — status, bindings and
+# staged results together — and step B may legitimately proceed on it.
+setup_case interrupted-after-publication
+preflight_ok && {
+  printf 'kill-after-pass' > "$FAKE_DIR/mv-mode"
+  printf 'STEP_STATUS_BUILD=passed' > "$FAKE_DIR/mv-key"
+  run_step build --work-dir "$WORK"
+  if [ -f "$FAKE_DIR/killed-after-publication" ]; then
+    pass "the interruption was delivered immediately after the publishing rename"
+  else
+    fail "the interruption was delivered immediately after the publishing rename" "it was never reached"
+  fi
+  rm -f "$FAKE_DIR/mv-mode"
+  state_has "the pass survived"              '^STEP_STATUS_BUILD=passed$'
+  state_has "so did the commit binding"      "^STEP_COMMIT_BUILD=$HEAD_SHA\$"
+  state_has "so did the image binding"       "^STEP_IMAGE_BUILD=$IMAGE_A\$"
+  state_has "so did the staged image id"     "^IMAGE_ID=$IMAGE_A\$"
+  run_step probe --work-dir "$WORK"
+  expect_rc_zero "step B proceeds on a record that was published whole"
+}
+
+# A rename that FAILS leaves the previous version in place, is reported, and
+# exits nonzero — it does not leave a half-written file or a stray temporary.
+setup_case failed-state-write
+preflight_ok && {
+  printf 'fail-on-pass' > "$FAKE_DIR/mv-mode"
+  printf 'STEP_STATUS_BUILD=passed' > "$FAKE_DIR/mv-key"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a build whose state write fails does not report success"
+  expect_output "the failure is named" 'could not be installed'
+  rm -f "$FAKE_DIR/mv-mode"
+  state_lacks "no pass was persisted by a failed write"  '^STEP_STATUS_BUILD=passed$'
+  state_lacks "no image id leaked through the failure"   '^IMAGE_ID='
+  LEFTOVER="$(find "$WORK" -maxdepth 1 -name 'state.env.*' 2>/dev/null | wc -l)"
+  if [ "${LEFTOVER:-1}" -eq 0 ]; then
+    pass "the failed write left no temporary state file behind"
+  else
+    fail "the failed write left no temporary state file behind" "$LEFTOVER remain"
+  fi
+}
+
+echo
+echo "-- FINDING-58: a pass is usable only WITH the identities it was bound to --"
+
+# The reviewer's case exactly: the commit still matches, and the image binding
+# is gone. The old rule compared the commit, found it equal, reported "step
+# build passed against exactly these identities (source commit)" and returned 0.
+setup_case passed-record-missing-image
+build_ok && {
+  state_drop STEP_IMAGE_BUILD
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "a pass whose image binding is missing is refused"
+  expect_output "the record is called incomplete" 'INCOMPLETE pass record'
+  expect_output "the missing binding is named"    'STEP_IMAGE_BUILD'
+  log_lacks "no container was created from an unbound acceptance" '^create'
+  log_lacks "no container was started from an unbound acceptance" '^start'
+}
+
+setup_case passed-record-empty-image
+build_ok && {
+  state_set STEP_IMAGE_BUILD ""
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "a pass whose image binding is recorded EMPTY is refused"
+  expect_output "empty is refused in the same words as absent" 'missing, empty or unreadable'
+  log_lacks "no container was created" '^create'
+  log_lacks "no container was started" '^start'
+}
+
+setup_case passed-record-malformed-image
+build_ok && {
+  state_set STEP_IMAGE_BUILD "sha256:not-a-digest"
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "a pass whose image binding is malformed is refused"
+  expect_output "the record is called corrupt" 'CORRUPT pass record'
+  log_lacks "no container was created" '^create'
+  log_lacks "no container was started" '^start'
+}
+
+setup_case passed-record-truncated-commit
+build_ok && {
+  state_set STEP_COMMIT_BUILD "1111111"
+  reset_log
+  run_step probe --work-dir "$WORK"
+  expect_rc_nonzero "an abbreviated commit binding is refused, not compared"
+  expect_output "the record is called corrupt" 'CORRUPT pass record'
+  log_lacks "no container was created" '^create'
+  log_lacks "no container was started" '^start'
+}
+
+# Step D is the one that authenticates, and step B's configuration binding is
+# one of the three it must be able to compare. Its absence must stop the
+# authenticated operation before anything is sent.
+setup_case probe-config-binding-missing
+secret_ok && {
+  state_drop STEP_CONFIG_PROBE
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses when step B's configuration binding is absent"
+  expect_output "the record is called incomplete" 'INCOMPLETE pass record'
+  expect_output "the missing binding is named"    'STEP_CONFIG_PROBE'
+  log_lacks "no container was created, so nothing authenticated" '^create'
+  log_lacks "no container was started, so nothing authenticated" '^start'
+}
+
+setup_case secret-image-binding-missing
+secret_ok && {
+  state_drop STEP_IMAGE_SECRET
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses when step C's image binding is absent"
+  log_lacks "no container was created, so nothing authenticated" '^create'
+  log_lacks "no container was started, so nothing authenticated" '^start'
+}
+
+echo
+echo "-- FINDING-58: a rebuild that does not finish leaves nothing usable --"
+
+setup_case rebuild-interrupted-invalidates
+secret_ok && {
+  reset_log
+  : > "$FAKE_DIR/build-interrupt"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "an interrupted rebuild does not pass"
+  rm -f "$FAKE_DIR/build-interrupt"
+  state_lacks "no image id survives an interrupted rebuild"        '^IMAGE_ID='
+  state_has   "step B's acceptance was voided before the rebuild"  '^STEP_STATUS_PROBE=not_started$'
+  state_has   "step C's acceptance was voided before the rebuild"  '^STEP_STATUS_SECRET=not_started$'
+  state_lacks "step B's image binding went with it"                '^STEP_IMAGE_PROBE='
+  state_lacks "step C's image binding went with it"                '^STEP_IMAGE_SECRET='
+  state_lacks "step B's configuration binding went with it"        '^STEP_CONFIG_PROBE='
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses after an interrupted rebuild"
+  log_lacks "no container was created after an interrupted rebuild" '^create'
+  log_lacks "no container was started after an interrupted rebuild" '^start'
+}
+
+# The same, with the rebuild killed at the publishing rename rather than
+# signalled inside the build: the invalidation is already on disk, and the
+# rebuild's own pass never reaches it.
+setup_case rebuild-killed-at-publication
+secret_ok && {
+  printf 'kill-before-pass' > "$FAKE_DIR/mv-mode"
+  printf 'STEP_STATUS_BUILD=passed' > "$FAKE_DIR/mv-key"
+  reset_log
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a rebuild killed at publication does not pass"
+  rm -f "$FAKE_DIR/mv-mode"
+  state_lacks "no image id survives it"                     '^IMAGE_ID='
+  state_lacks "no image binding survives it"                '^STEP_IMAGE_BUILD='
+  state_lacks "no commit binding survives it"               '^STEP_COMMIT_BUILD='
+  state_has   "step B's acceptance is still voided"         '^STEP_STATUS_PROBE=not_started$'
+  state_has   "step C's acceptance is still voided"         '^STEP_STATUS_SECRET=not_started$'
+  reset_log
+  run_step status --work-dir "$WORK" --authorise-authenticated-read
+  expect_rc_nonzero "step D refuses after a rebuild killed at publication"
+  log_lacks "no container was created" '^create'
+  log_lacks "no container was started" '^start'
+}
+
+echo
+echo "-- FINDING-59: one invocation at a time, per work directory --"
+
+setup_case lock-external-holder
+preflight_ok && {
+  ( flock -w 10 200 || exit 1
+    : > "$FAKE_DIR/holder-ready"
+    i=0
+    while [ ! -f "$FAKE_DIR/holder-release" ] && [ "$i" -lt 300 ]; do sleep 0.05; i=$((i + 1)); done
+  ) 200>>"$WORK/.handoff.lock" &
+  HOLDER=$!
+  if wait_for_file "$FAKE_DIR/holder-ready"; then
+    pass "another process holds the work directory's lock"
+    reset_log
+    run_step build --work-dir "$WORK"
+    expect_rc_nonzero "a step refuses to run while another invocation holds the lock"
+    expect_output "the refusal explains what would race" 'holds its lock'
+    log_lacks "no build was started while the lock was held" '^build'
+    log_lacks "no container was created while the lock was held" '^create'
+  else
+    fail "another process holds the work directory's lock" "the holder never acquired it"
+  fi
+  : > "$FAKE_DIR/holder-release"
+  wait "$HOLDER" 2>/dev/null
+  reset_log
+  run_step build --work-dir "$WORK"
+  expect_rc_zero "the step runs once the lock is released"
+}
+
+# Held for the DURATION of the step, not merely taken at its start: the
+# concurrent invocation is refused while the first is midway through its build.
+setup_case lock-held-through-step
+preflight_ok && {
+  : > "$FAKE_DIR/build-blocks"
+  BGOUT="$FAKE_DIR/bg-build.out"
+  run_step_bg "$BGOUT" build --work-dir "$WORK"
+  BGPID="$BG_PID"
+  if wait_for_file "$FAKE_DIR/build-entered"; then
+    pass "the first invocation is inside its build, holding the lock"
+    run_step probe --work-dir "$WORK"
+    expect_rc_nonzero "a second invocation is refused mid-step"
+    expect_output "the refusal names the running invocation" 'holds its lock'
+  else
+    fail "the first invocation is inside its build, holding the lock" "it never entered the fake build"
+  fi
+  : > "$FAKE_DIR/build-release"
+  wait "$BGPID"; BGRC=$?
+  if [ "$BGRC" -eq 0 ]; then
+    pass "the invocation that held the lock completed normally"
+  else
+    fail "the invocation that held the lock completed normally" "rc=$BGRC: $(tail -6 "$BGOUT" | tr '\n' '|')"
+  fi
+  state_has "and its record is complete" "^STEP_IMAGE_BUILD=$IMAGE_A\$"
+}
+
+# A lock is a file this program creates in a directory it has already
+# established only this account can write. It must still refuse to open one
+# through a symlink, or the check would be exactly the hole FINDING-56 closed
+# for the state file.
+setup_case lock-symlink
+preflight_ok && {
+  rm -f "$WORK/.handoff.lock"
+  ln -sfn "$ROOT/lock-target-$$" "$WORK/.handoff.lock"
+  run_step build --work-dir "$WORK"
+  expect_rc_nonzero "a lock file that is a symlink is refused"
+  expect_output "the refusal names it" 'work-directory lock file is a symbolic link'
+  if [ -e "$ROOT/lock-target-$$" ]; then
+    fail "nothing was created through the symlink" "the target exists"
+  else
+    pass "nothing was created through the symlink"
+  fi
 }
 echo
 echo "=============================================="
