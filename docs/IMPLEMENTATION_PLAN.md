@@ -202,21 +202,38 @@ Items 1–7 and 13 were completed in commits `36ed21b` … `2edb95a`. Items 8–
 and 14–15 were completed in later sessions.
 
 **ORDER 1: implementation complete, acceptance pending.** The code is written,
-tested and committed and the local suite passes on the clean committed tree.
-The order's acceptance also requires *applicable real-runtime evidence*, which
-needs an operator build (§6.5 step A) and a hosted run, neither of which this
-account can perform. Until both, ORDER 1 is not accepted and ORDER 2's
-dependent acceptance does not open — though ORDER 2's independent work may
-proceed, per the orders' own rule on working around an external blocker.
+tested and committed. The order's acceptance also requires *applicable
+real-runtime evidence*, which needs an operator build (§6.5 step A) and a
+hosted run, neither of which this account can perform. Until both, ORDER 1 is
+not accepted and ORDER 2's dependent acceptance does not open — though ORDER
+2's independent work may proceed, per the orders' own rule on working around
+an external blocker.
+
+**The ORDER 1 package was reviewed, and the review found three more defects.**
+They were in the step lifecycle ORDER 1 itself introduced: a terminal step
+record published in pieces rather than atomically, a prerequisite comparison
+that skipped whatever binding happened to be absent, and no exclusion between
+concurrent invocations sharing a work directory. FINDING-57, FINDING-58 and
+FINDING-59, fixed at `04e7ea4`; `docs/VERIFICATION.md` §3.18 and §4.16. That
+procedure has now carried defects at every one of four reviews, which is the
+argument for reviewing it a fifth time rather than for declaring it settled.
+
+**One local gate does not pass on the current tree**, and it is not this work:
+`go test -race ./...` fails about 8% of runs on a coincidence in
+`cmd/scamwall/e2e_test.go` that predates this session — FINDING-60. It is
+recorded and deliberately not fixed, because fixing it means changing Go source
+and demoting the Go-bound rows, which is a decision for the reviewer and not a
+side effect of a shell-script fix.
 
 **Item 5 is the one that is still open, and ORDER 1 is about its procedure.**
 SW-P1-05 is renewed by `docs/VERIFICATION.md` §6.5 step A, which the operator
-runs. That procedure has now been reviewed three times and has carried defects
-each time: nine at `6a737f3` (§4.13), two at `5af270d` (§4.14), and six at
-`76f3bfd` (§4.15). ORDER 1 covers the third set and adds an explicit step
-lifecycle so that a step's result is bound to the identities it was produced
-against, and so that a rebuild or a configuration change invalidates downstream
-acceptance rather than being inherited by it.
+runs. That procedure has now been reviewed four times and has carried defects
+every time: nine at `6a737f3` (§4.13), two at `5af270d` (§4.14), six at
+`76f3bfd` (§4.15), and three at `04e7ea4` (§4.16). ORDER 1 covers the third
+set and adds an explicit step lifecycle so that a step's result is bound to the
+identities it was produced against, and so that a rebuild or a configuration
+change invalidates downstream acceptance rather than being inherited by it. The
+fourth set is about that lifecycle itself.
 
 **None of that closes item 5.** Correcting the renewal procedure is not
 performing the renewal. SW-P1-05 closes when an operator runs step A against

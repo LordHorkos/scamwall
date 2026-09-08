@@ -1597,6 +1597,16 @@ was read or changed. Steps A, B, C and D of `§6.5` remain unexecuted.
 > Do not read "the suite passes" as "the order is accepted". The suite passing
 > is what makes the order's evidence *worth collecting*; it is not the evidence.
 
+> **SUPERSEDED IN PART BY §3.18.** "Implementation complete" above was complete
+> with respect to the ORDER 1 *items*. It was not complete with respect to the
+> step lifecycle those items introduced: a review of the package produced from
+> this session exercised the state functions directly and found three further
+> defects in that lifecycle — a terminal record published in pieces, a
+> prerequisite comparison that skipped whatever was absent, and no exclusion
+> between concurrent invocations. They are FINDING-57, FINDING-58 and
+> FINDING-59, fixed at `04e7ea4`. Read §3.18 and §4.16 with this section; the
+> candidate named below is no longer the head of this line of work.
+
 Work performed under **ORDER 1** of the consolidated phase orders, which
 directs that five defects found by a review *of* `5af270d` be addressed, that
 the step lifecycle be made explicit, and that step results be bound to the
@@ -1746,6 +1756,163 @@ created, the live Pi-hole was not contacted, and no production secret,
 certificate, `.env` or deployment resource was read or changed. **Steps A, B, C
 and D of §6.5 remain unexecuted**, and the fixes below change what those steps
 will do when an operator runs them.
+
+
+### 3.18 ORDER-1 review response — the state machine made consistent
+
+> **STATUS: IMPLEMENTATION COMPLETE; ACCEPTANCE PENDING.** Unchanged from
+> §3.17, and for the same reasons. This session did not produce operator or
+> hosted evidence and could not. What it changes is that §3.17's
+> "implementation complete" was **complete with respect to the ORDER 1 items**
+> and not with respect to the state machine those items introduced: a review
+> of the ORDER 1 package found three further defects in it. They are fixed
+> here. SW-P1-05, SW-P1-12 and SW-P1-20 are untouched by this session and stay
+> IMPLEMENTED-UNVERIFIED.
+
+The ORDER 1 review package was returned for review. The reviewer did not read
+the diff and agree with it — they **exercised the state functions from the
+package** and interrupted one. That found three defects `§4.15` had not, all in
+the step lifecycle `§4.15` introduced, and all of the same kind: a record that
+is true of one moment being read as though it were true of another.
+
+| Review item | Finding | Subject |
+| --- | --- | --- |
+| A terminal outcome, its bindings and its staged results must be one atomic replacement; an incomplete `passed` record must never exist | **FINDING-57** | `scripts/operator-handoff.sh` |
+| Required bindings must be explicit per step, and missing, empty, malformed or unreadable ones must refuse dependent execution — not be skipped | **FINDING-58** | `scripts/operator-handoff.sh` |
+| Concurrent invocations sharing a work directory must not race state updates, and the lock must not introduce a symlink hole | **FINDING-59** | `scripts/operator-handoff.sh` |
+| *(found while re-running the gates; pre-existing, unrelated, not fixed here)* | **FINDING-60** | `cmd/scamwall/e2e_test.go` |
+
+Rebuild invalidation was also named in the review as something to **preserve**,
+not to change. It is preserved, and strengthened: the invalidation is now a
+single replacement rather than eight, so a rebuild interrupted partway through
+it cannot leave some downstream acceptances voided and others standing beside a
+stale image pin. §4.16 describes each finding, the fix, and how it is tested.
+
+#### Commit identity
+
+| | |
+| --- | --- |
+| **Candidate** | `04e7ea4e8e85c39cf60d6786021ce3cc7562e904` — *fix(operator): publish a step's terminal record atomically, bind it explicitly, and serialise the work directory* |
+| Parent | `5d9d21de11f6fe194e50e48bc0276541c398425b` |
+| Previous candidate | `76f3bfd3ebc647ba21dd281fc2b5a3c48435b8d7` — the ORDER 1 fixes this review is *of* |
+| Branch | `feat/phase-1-core`, ahead of `origin/feat/phase-1-core`; **not pushed** |
+| Published commit | `72bc84c` — unchanged |
+| Files changed | `scripts/operator-handoff.sh`, `scripts/tests/operator-handoff-test.sh` |
+
+**No Go source, no Dockerfile, no Compose definition and no workflow changed by
+this candidate.** §5 of the requirements matrix demotes the script-bound rows
+again, and the suite was re-run on the clean committed tree to renew them. As
+in §3.17, that says nothing about the Go-bound rows: SW-P1-20 and SW-P1-12 have
+been IMPLEMENTED-UNVERIFIED continuously since `7e11419` and neither is renewed
+or further demoted here.
+
+#### What the fix actually changed, in one place
+
+| Before | After |
+| --- | --- |
+| `state_put` and `state_clear` each rewrote and renamed the state file; a terminal record took five or more renames | One primitive, `state_apply`, takes a whole change set and installs it with **one** `rename(2)`. `state_put` is its one-change spelling; `state_clear` is gone, its callers now expressing removal as part of the set that carries their other changes |
+| `record_step_outcome` wrote the status first, the bindings after | Status, bindings and staged results are one replacement. There is no moment at which the file says `passed` and does not say what against |
+| `begin_step` set `running` and left the previous run's bindings in place | `running` and the removal of that step's own bindings, in one replacement |
+| `invalidate_after_rebuild` performed up to eight separate writes | One replacement |
+| Bindings were whatever a step happened to establish | A stated required set per step, enforced when a pass is published **and** when one is accepted |
+| `assert_prereq_identities` compared only components both sides had | Every required component is compared; absence on either side is refused, and shape is checked wherever presence is |
+| Nothing serialised two invocations in one work directory | An exclusive `flock` taken before the first read of the state file and held for the whole step |
+
+#### Suites at the end of this session
+
+| Suite | Result | Change |
+| --- | --- | --- |
+| `go test -race -count=1 ./...` | **see FINDING-60** | no Go source changed this session; one test in `cmd/scamwall` fails about 8% of runs on a pre-existing coincidence |
+| `staticcheck ./...` | clean | — |
+| `gofmt -l .` | clean | — |
+| `shellcheck --severity=style` over the 18 tracked scripts | clean | — |
+| `scripts/tests/runtime-verify-test.sh` | **358**, 0 failed | unchanged |
+| `scripts/tests/operator-handoff-test.sh` | **393**, 0 failed | was 308; **+85** |
+| `scripts/tests/gate-diagnostics-test.sh` | **73**, 0 failed | unchanged |
+| `scripts/tests/entrypoint-mode-test.sh` | **58**, 0 failed | unchanged |
+| `scripts/gate-diagnostics.sh --self-test` | all passed | unchanged |
+
+#### Every fix was shown to discriminate
+
+Each fix was reverted in the working tree, on its own, and the suite re-run.
+The counts are what the reverted program actually produced:
+
+| Fix reverted | Failures |
+| --- | --- |
+| FINDING-57 — the terminal record written as status-then-bindings again | **5** |
+| FINDING-58 — required bindings compared only when both sides have them | **19** |
+| FINDING-59 — the work-directory lock not taken | **7** |
+| All three at once (the pre-fix script in full) | **33** |
+
+The three targeted reversions sum to 31, not 33. The difference is the two
+cases that cover `begin_step` clearing a step's own previous bindings — a
+sub-fix of FINDING-57 that the targeted reversion of `record_step_outcome`
+leaves in place and the whole-file reversion does not. It is named here rather
+than reconciled away, because the arithmetic not adding up is the sort of thing
+that hides a case counted twice.
+
+A reversion count establishes that the suite distinguishes the fixed program
+from the unfixed one on that specific change. It does not establish that the
+fix is complete.
+
+#### The gate suite, run directly on the clean committed tree
+
+Not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own.
+
+```
+$ git status --porcelain          # (no output — the tree is clean at 04e7ea4)
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 25 passed, 1 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+The gate list is **unchanged**: 28 items, the same 28 §3.17 ran — where the
+"26" quoted is the non-blocked count. This session added no gate. The two
+BLOCKED gates are the privilege boundary, unchanged and not a defect:
+
+```
+BLOCKED  docker build (docker daemon not reachable by scamwall)
+BLOCKED  container runtime verification (docker daemon not reachable by scamwall
+         — run scripts/container-runtime-verify.sh as the operator)
+```
+
+**The one failure is `go test -race ./...`, and it is FINDING-60** — a
+pre-existing coincidence in `cmd/scamwall/e2e_test.go` that this session did
+not introduce, in a file this session did not touch, and deliberately did not
+fix. It fails about 8% of runs; it passed on the working-tree run taken earlier
+the same day and failed on this one. `CHECK exit=1` is the correct outcome for
+this tree as it stands, and it is **not** the "26 passed, 0 failed" of §3.17.
+That difference is not a regression introduced here, and it is not being
+presented as a pass.
+
+Every gate this session's changes are inputs to passes: `shellcheck` over all
+18 tracked scripts, `operator-handoff regression tests` at 393/0, the secret
+scans, and the uncommitted-artifacts gate.
+
+
+#### No repeat determinism campaign
+
+The review directed that none be run, and none was. The four shell suites were
+each run once on the committed tree. `scripts/tests/operator-handoff-test.sh`
+was additionally run during development as the fix was assembled: the final
+program produced **393 tests, 0 failed** on every run of it, and the one
+intermediate run that did not — 392 tests, 1 failed — is what found the
+`begin_step` sub-fix described in §4.16, and was of a program that no longer
+exists. That is development, not a determinism campaign, and it is not offered
+as one. The determinism row (SW-P1-14) is neither advanced nor damaged by this
+session, and the five-round figure recorded in §3.17 stands as the last one
+taken.
+
+#### What this session did NOT do
+
+Nothing was pushed. No pull request was opened. `main` was not modified. No
+Docker command reached a daemon — the account has no socket, and the suites
+drive a scripted fake. No `sudo` was used, no image was built, no container was
+created, the live Pi-hole was not contacted, and no production secret,
+certificate, `.env` or deployment resource was read or changed. **Steps A, B, C
+and D of §6.5 remain unexecuted.** ORDER 2 was not started.
 
 ---
 
@@ -3342,6 +3509,302 @@ that `docker create` produces the container those arguments describe, or that
 the deployment's paths exist and are mountable. Only steps A to D can establish
 those, and they remain pending operator execution.
 
+
+### 4.16 FINDING-57 … FINDING-60 — the ORDER 1 review, at `5d9d21d`, fixed at `04e7ea4`
+
+The ORDER 1 package was reviewed, and the reviewer did what §4.15 had not: they
+**called the state functions themselves** and interrupted one. Three defects
+came out of that, and all three are the same kind of defect — a record that is
+true of one moment being read as though it were true of another. A fourth,
+unrelated and pre-existing, surfaced in the Go suite while the gates were being
+re-run; it is recorded here because it was found here, not because this session
+caused it.
+
+Every one of the first three was reproduced **without a Docker daemon**, from
+outside the program, by the cases in `scripts/tests/operator-handoff-test.sh`.
+
+#### FINDING-57 — a step's terminal record was published in pieces
+
+`record_step_outcome` was the only writer of a terminal step state, which is
+what §4.15 established and is still true. What it was not was a single write.
+It wrote
+
+```
+state_put "$(step_key STEP_STATUS "$STEP_NAME")" "$outcome"      # rename 1
+[ -n "$BIND_COMMIT" ] && state_put STEP_COMMIT_<step> ...        # rename 2
+[ -n "$BIND_IMAGE" ]  && state_put STEP_IMAGE_<step>  ...        # rename 3
+[ -n "$BIND_CONFIG" ] && state_put STEP_CONFIG_<step> ...        # rename 4
+commit_staged_results                                            # renames 5..n
+```
+
+and each `state_put` was a complete rewrite-and-rename of the state file. The
+status went in **first**. Between rename 1 and rename 2 the file said
+
+```
+STEP_STATUS_PROBE=passed
+```
+
+and said nothing whatever about the image or the resolved deployment
+configuration that step had passed against. A step that died in that window —
+the reviewer injected the interruption; a `kill`, an OOM, a power loss or a
+`^C` at the wrong instant would do it — persisted exactly that: **a pass
+carrying nothing**.
+
+That record is worse than no record. `require_step_passed` accepted it, because
+it read a status. `assert_prereq_identities` accepted it too, for the separate
+reason that is FINDING-58. So the next step ran, and created its container from
+an image the state file could not name.
+
+**The fix.** Every write to the state file now goes through one primitive,
+`state_apply`, which takes an arbitrary set of `+KEY=VALUE` and `-KEY` changes,
+builds the complete new version in one temporary file, and installs it with a
+single `rename(2)`. Whatever moment a reader looks, it sees the whole set of
+changes or none of it. `record_step_outcome` emits the status, the three
+bindings and every staged result as one such set.
+
+Two neighbouring sites were made single writes for the same reason:
+
+* `begin_step` sets `running` **and removes that step's own previous
+  bindings** in one replacement. A step that has begun has not yet passed
+  against anything, so the identities a previous run of the same step recorded
+  must not outlive the moment this one starts. This was found by the new tests
+  rather than by the reviewer: after an interrupted rebuild the state file
+  still held `STEP_COMMIT_BUILD` and `STEP_IMAGE_BUILD` from the previous,
+  successful build, beside `STEP_STATUS_BUILD=running`. Nothing could reach
+  them — `require_step_passed` refuses a `running` step — but a binding sitting
+  beside a status that does not entitle anything to read it is the precise
+  shape of the defect being fixed, and it is not left standing on the argument
+  that today's callers happen not to follow it.
+* `invalidate_after_rebuild` voids every downstream acceptance and the previous
+  image pin in one replacement rather than in eight. A rebuild interrupted
+  partway through the invalidation cannot leave some acceptances voided and
+  others standing beside a stale `IMAGE_ID`.
+
+**STATED LIMIT.** `rename(2)` is atomic against concurrent readers and against
+this process dying at any point. It is **not** a durability barrier: a host
+that loses power between the rename and the filesystem's own flush can come
+back holding the older version. That is tolerable here, because the older
+version never claims more than the newer one does, and it is not claimed to be
+more than that.
+
+**How it is tested.** Not by asserting about the source. `mv` is shadowed in
+the test harness and acts only on renames whose destination is a `state.env`,
+so the one moment the recorded state changes can be observed and interrupted
+from outside the program:
+
+* every version of the state file installed during a real run of steps 0, A and
+  B is copied out, and the suite asserts that **no version ever recorded
+  `STEP_STATUS_<step>=passed` without every key that step is required to be
+  bound to** — plus a non-vacuity check that passes for all three steps were in
+  fact observed being published;
+* the handoff is `SIGKILL`ed *at* the publishing rename: nothing of that step
+  survives, and step B then refuses on `recorded as RUNNING` without creating
+  or starting a container;
+* the handoff is `SIGKILL`ed *immediately after* it: the **complete** record
+  survives — status, both bindings and the staged `IMAGE_ID` — and step B
+  proceeds on it, which is the other half of "whole, or not at all";
+* the rename is made to **fail**: the previous version stands, the failure is
+  reported, the exit status is nonzero, and no temporary state file is left
+  behind.
+
+`SIGKILL` rather than `SIGTERM` deliberately. A signal the program can handle
+would let it tidy up, and what is being established is what survives when it
+cannot.
+
+#### FINDING-58 — a recorded pass was accepted without the identities it was bound to
+
+`assert_prereq_identities` compared a component only when **both** the recorded
+value and the current one were non-empty, and blocked only when *nothing at all*
+could be compared:
+
+```
+rec="$(state_get "$(step_key STEP_COMMIT "$step")")" || rec=""
+if [ -n "$rec" ] && [ -n "$BIND_COMMIT" ]; then ... compared="source commit"; fi
+...
+if [ -z "$compared" ]; then blocked ...; return 1; fi
+ok "step $step passed against exactly these identities ($compared)"
+```
+
+So a matching commit, on its own, was enough. With `STEP_IMAGE_BUILD` absent —
+which FINDING-57 makes an ordinary occurrence rather than a hypothetical — the
+function returned **0**, and printed
+
+```
+PASS    step build passed against exactly these identities (source commit)
+```
+
+which is a true sentence and a useless one. The acceptance was carried forward
+to a container created from an image nothing had compared. The sentence even
+says "exactly these identities", and the operator reading it has no way to know
+that the set is short.
+
+**The fix.** Each step now has a **stated, required binding set**, and it is
+enforced at both ends rather than inferred from what happens to be present:
+
+| Step | Required bindings |
+| --- | --- |
+| `preflight` | source commit |
+| `build` | source commit, image id |
+| `probe` | source commit, image id, configuration digest |
+| `secret` | source commit, image id, configuration digest |
+| `status` | source commit, image id, configuration digest |
+| `closeout` | none — it creates nothing and no step depends on it |
+
+* `record_step_outcome` will not publish `passed` unless every required binding
+  is established and well-formed; `summary_and_exit` checks the same thing
+  *before* it computes the verdict, so the exit status and the printed result
+  agree with what is recorded rather than diverging from it.
+* `require_step_passed` refuses a recorded pass whose required bindings are
+  **missing, empty, unreadable or malformed** — in those words, calling the
+  record INCOMPLETE or CORRUPT rather than treating the gap as "not
+  applicable". This is checked before the step requires Docker, creates a
+  container, or offers a credential to one.
+* `assert_prereq_identities` compares every required component. Absence on
+  either side is refused, not skipped. Components neither side is required to
+  carry are still compared when both have them, which costs nothing and catches
+  a drift the table does not model.
+
+Shape is checked wherever presence is: a commit is 40 lowercase hex, a
+configuration digest is 64, an image id is `sha256:` and 64. A truncated or
+non-hex value is refused as corrupt rather than compared and reported as
+staleness — and a merely non-empty value can no longer satisfy a presence check
+while establishing nothing.
+
+The historical case is the same case. A state file written by an earlier
+revision of this program, or left by an interruption, can hold
+`STEP_STATUS_BUILD=passed` and nothing else; that record is now refused rather
+than carried into a comparison that silently skips what is missing.
+
+**How it is tested.** Six cases edit a *legitimately produced* state file the
+way an interruption or an older revision would have left it — drop
+`STEP_IMAGE_BUILD`, record it empty, record it malformed, abbreviate
+`STEP_COMMIT_BUILD`, drop `STEP_CONFIG_PROBE`, drop `STEP_IMAGE_SECRET` — and
+assert the consequence rather than the wording: the step exits nonzero **and**
+the fake daemon's log contains no `create` and no `start`. The first of them is
+the reviewer's case exactly: the commit still matches, and the image binding is
+gone.
+
+#### FINDING-59 — nothing serialised two invocations sharing a work directory
+
+Each step is a separate invocation, and the state file is how they speak to one
+another. Nothing stopped two of them running in the same work directory at the
+same time. `rename(2)` makes each individual write atomic; it does **not** make
+a read-decide-write **sequence** atomic, and a prerequisite check is exactly
+that: read the earlier step's record, decide it is usable, act on it. Three
+concrete races followed:
+
+* step B could read `STEP_STATUS_BUILD=passed` and its bindings while a
+  concurrent `build` was midway through invalidating exactly those records;
+* two steps could each read-modify-write the invocation register
+  (`state_append_word`) and one of the two registrations would be lost —
+  leaving containers behind that step Z would never know to look for, while
+  step Z reported no leftovers;
+* `preflight` removes and recreates the state file, which another step could be
+  reading through at that moment.
+
+**The fix.** Each step takes an exclusive `flock` on `<work>/.handoff.lock`
+before the first read of the state file — inside `open_work_dir` and
+`create_work_dir`, after the directory's trust checks and before `STATE` is
+even set — and holds it for the whole step. It is released explicitly in the
+`EXIT` trap after the terminal state has been recorded, so the next invocation
+cannot begin reading until this one's verdict is on disk; and it is released by
+the kernel with the descriptor if the process is killed.
+
+It is **nonblocking**. Two steps in one work directory at once is an operator
+error, not a queue, and reporting it is more useful than silently serialising
+two runs the operator believes are independent. `flock` being absent is a
+refusal, not a warning: the alternative is racing the state file while claiming
+not to.
+
+**The lock must not become the hole it closes.** A naive `: > "$WORK/lock"`
+would reintroduce, for the lock, exactly the symlink defect FINDING-56 closed
+for the state file. So: the path is refused if it is a symlink, before and
+after creation; and after the descriptor is opened, `stat` of
+`/proc/self/fd/9` is compared against `stat` of the path, so a component
+substituted between the check and the open is caught rather than followed. The
+type is read separately and both of `stat %F`'s spellings for a regular file
+are accepted — it says `regular empty file` for a zero-length one — and the
+type is deliberately **not** part of the identity comparison, because a file's
+length can change between the two calls without the file having been
+substituted.
+
+**STATED LIMIT.** The descriptor is inherited by the commands this program
+runs. Every one of them is short-lived and waited for, so none outlives the
+step and none can hold the lock past this program's exit; a future call site
+that spawned something detached would have to close it.
+
+**How it is tested.** Three cases, all deterministic:
+
+* another process holds the lock — the step refuses, names what would race, and
+  the fake daemon's log shows **no `build` and no `create`**; the same step then
+  succeeds once the lock is released;
+* the lock is held *through* a step rather than merely taken at its start: the
+  fake `docker build` is made to block, a first invocation is left inside it, a
+  second invocation is refused while it is there, and the first then completes
+  normally with a complete record;
+* the lock path is a symlink — refused, and the target is not created.
+
+#### FINDING-60 — a Go end-to-end test fails about 8% of the time, on a coincidence
+
+Not this session's defect, not in this session's changed files, and not caused
+by anything in them. It surfaced because the gate suite was re-run.
+
+`cmd/scamwall/e2e_test.go:635`, in
+`TestDoctorNeverReportsTheCredentialLength`:
+
+```go
+if strings.Contains(stdout, strconv.Itoa(len(e.password))) {
+    t.Errorf("stdout contains the credential's length:\n%s", stdout)
+}
+```
+
+The e2e password is `"scamwall-e2e-password-"` plus 32 hex characters — **54**
+characters, always. The assertion therefore searches stdout for the two-digit
+string `54`. `stdout` legitimately contains `t.TempDir()` paths, and Go's
+`t.TempDir()` embeds a 10-digit random component:
+
+```
+ok  certificate authority  loaded and parsed:
+    /tmp/TestDoctorNeverReportsTheCredentialLength3547291038/001/pihole-ca.crt
+                                                   ^^
+```
+
+`3547291038` contains `54`, so the test failed. The probability that a random
+10-digit decimal string contains a given two-digit needle is about 8.6%, and
+measured over 25 runs of that test alone on this tree it failed **2 times**.
+
+**What it means for the evidence.** The check the test is *for* — that the
+credential's length is never disclosed — is worth having; the way it is written
+also matches unrelated digits anywhere in the output. It is a false positive,
+not a real disclosure: no credential and no length was printed in the failing
+run, and the assertion above it (`strings.Contains(stdout, "bytes")`) passed.
+Earlier sessions recorded `go test -race -count=1 ./...` as passing; those runs
+were correct **and lucky**, and the row they support is not invalidated by this
+— but it is now known to be renewed by a test that fails about one run in
+twelve for a reason unrelated to the property.
+
+**Not fixed here, deliberately.** The fix is small — compare against the length
+only in the portion of the output the credential could appear in, or assert the
+password itself and a `"<n> bytes"` shape rather than a bare integer — but it
+is a **Go source change**, and a Go source change demotes the Go-bound rows in
+`docs/REQUIREMENTS_MATRIX.md` §5. ORDER 1's review directed a state-consistency
+fix and said not to change code merely to assemble the package. Changing Go
+source to make a gate green would be exactly that. It is recorded as an open
+defect and the decision is the reviewer's.
+
+#### What these four do not establish
+
+The first three are defects in a program that has **still never met a real
+Docker daemon**. `scripts/tests/operator-handoff-test.sh` is now 393 cases
+against a scripted fake. It establishes control flow, refusals, attribution,
+cleanup, state handling, evidence separation, the order in which steps may run,
+and now the atomicity of the recorded state, the completeness of its bindings
+and the exclusion of concurrent invocations. It does not establish that a real
+daemon accepts the arguments the program builds, that `docker create` produces
+the container those arguments describe, or that the deployment's paths exist
+and are mountable. Only steps A to D can establish those, and they remain
+pending operator execution.
+
 ---
 
 ## 5. Critical Go path review (SW-P1-10)
@@ -4187,11 +4650,43 @@ step in this work directory had verified.
 `--authorise-authenticated-read` is checked **in addition to** these
 prerequisites and never instead of them. See FINDING-53.
 
+A step's terminal record — its state, the identities it passed against, and the
+values it publishes for later steps — is written by **one** replacement of
+`state.env`. Whatever moment you look at that file, it is complete: there is no
+window in which it says `passed` and does not yet say what against, and a step
+killed at that instant leaves either the whole record or none of it. Each step
+also has a **required** binding set; a recorded pass whose bindings are
+missing, empty, unreadable or malformed is refused as an INCOMPLETE or CORRUPT
+record rather than compared on whatever happens to be present. FINDING-57,
+FINDING-58.
+
+#### One step at a time, per work directory
+
+A step takes an exclusive lock on `<work>/.handoff.lock` before it reads the
+state file, and holds it until it exits. Running two steps in the same work
+directory at once is refused, immediately, in these words:
+
+```
+REFUSING another invocation of this program is running in <work> and holds its
+lock. Two steps sharing one work directory would read and write the same state
+file with no ordering between them; wait for that step to finish, or give this
+one its own work directory
+```
+
+That is not a queue. Wait for the running step to finish, or use a separate
+work directory — and note that a separate work directory means a separate
+`preflight`, because the state a later step reads is per-directory. The lock is
+released when the process exits, including when it is killed; there is nothing
+to clean up by hand. If you see this refusal and believe nothing else is
+running, check for a step still executing in another terminal or under a
+different `sudo` session before doing anything else. FINDING-59.
+
 #### The work directory
 
 | Path | What it is |
 | --- | --- |
 | `<work>/state.env` | identities and step states. Mode 600, owned by the running account, not a symlink, exactly one hard link |
+| `<work>/.handoff.lock` | the exclusive lock that keeps two invocations out of one work directory. Created by the step, refused if it is a symlink, and released by the kernel if the step is killed. Nothing to return and nothing to remove by hand |
 | `<work>/raw/` | **unsanitized** command output, exactly as the commands wrote it. It may contain credential material. **Do not share it.** Carries its own `README-DO-NOT-SHARE.txt` |
 | `<work>/evidence/` | the same output through `scripts/gate-diagnostics.sh --sanitize`. **This is what to return.** The filter is deny-by-pattern: it establishes what its patterns catch, and nothing wider |
 
