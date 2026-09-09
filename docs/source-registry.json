@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "note": "STRUCTURE ONLY. No source has been imported, researched, contacted or qualified. The 85-entry catalog named in docs/SOURCE_REGISTRY.md was supplied in the ORDER 2 text and is not present in this repository, so no record can be written without re-supplying it. An empty sources array is the honest state: every catalog entry is implicitly `unresolved`, and inventing a record would be the exact failure this registry exists to prevent. Schema and rules: docs/SOURCE_REGISTRY.md. Enforcement: internal/sourceregistry.",
+  "schema_version": 2,
+  "note": "mutation test",
   "retired_source_ids": [],
   "sources": []
 }
