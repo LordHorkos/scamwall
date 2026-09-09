@@ -2696,6 +2696,16 @@ the first time since `72bc84c`, which triggered the workflow on
 failed.** Both are recorded; a failed run that is quietly re-run until green is
 not evidence, it is selection.
 
+**A third run exists and passed, and this record stops counting there
+deliberately.** Run 34396126226, at `6456bdf` — the commit that added this
+section — reported 28 passed, 0 failed, 0 BLOCKED. Every push to this branch
+triggers a run, so recording each one produces a commit that produces a run that
+needs recording. Under §2.1's carry-forward rule a documentation-only commit
+changes no gate input, so **run 2 at `87bdfaf` is the evidence SW-P1-12 rests
+on**, and later runs are confirmations rather than new evidence. The run for the
+commit you are reading is not recorded here: its expected result is identical,
+and the branch's run list is where to check it.
+
 | | Run 1 | Run 2 |
 | --- | --- | --- |
 | ID | 34392469729 | **34394790484** |
