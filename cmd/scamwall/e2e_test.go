@@ -632,9 +632,42 @@ func TestDoctorNeverReportsTheCredentialLength(t *testing.T) {
 	if strings.Contains(stdout, "bytes") {
 		t.Errorf("stdout reports a credential length:\n%s", stdout)
 	}
-	if strings.Contains(stdout, strconv.Itoa(len(e.password))) {
+
+	// The bare decimal length must not appear either — a length printed with
+	// no unit at all is still a length. But searching the WHOLE of stdout for
+	// it is wrong, and was FINDING-60: stdout legitimately carries this test's
+	// own t.TempDir() paths, Go embeds a ten-digit random component in those,
+	// and the two-digit length collides with unrelated digits in it about 8%
+	// of the time. Measured on this tree before the fix, this test failed 2
+	// runs in 25. That is a false positive rather than a disclosure — no
+	// length was printed in the failing runs — and a check that fails one run
+	// in twelve for a reason unrelated to its property stops being read, which
+	// is worse than not having it.
+	//
+	// So the ONE source of unrelated random digits is masked first: the
+	// directory this test created, whose text the test knows verbatim. The
+	// bare-integer search then runs over everything the program itself
+	// composed. That is deliberately stricter than matching "<n> bytes"-shaped
+	// phrases would be — it still catches a length emitted with no unit, in
+	// any wording — and it narrows the haystack rather than the property.
+	if e.dir == "" {
+		t.Fatal("the environment has no directory recorded; masking it would blank stdout and hide a real disclosure")
+	}
+	composed := strings.ReplaceAll(stdout, e.dir, "<tmpdir>")
+	if strings.Contains(composed, strconv.Itoa(len(e.password))) {
 		t.Errorf("stdout contains the credential's length:\n%s", stdout)
 	}
+
+	// A guard on the guard. The length is 54 by construction — a fixed prefix
+	// plus 32 hex characters — and the check above is only meaningful while it
+	// stays long enough not to collide with the digits the program legitimately
+	// prints, such as the "N checks, N failed, N skipped" summary. A future
+	// change that shortened the token to a single digit would make this test
+	// pass or fail on the check counts instead of on the credential, silently.
+	if n := len(e.password); n < 10 {
+		t.Fatalf("the e2e password is %d characters: a length below 10 collides with the counts in the summary line, which makes the check above unreliable rather than strict", n)
+	}
+
 	e.assertNoCredentials(t, stdout, stderr)
 }
 
