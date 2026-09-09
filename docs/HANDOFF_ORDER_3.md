@@ -19,7 +19,7 @@ the evidence lives in `docs/VERIFICATION.md`, the requirement states in
 | | |
 | --- | --- |
 | Starting HEAD | `c35b1e601f2543cb666d34888c61b08406446106` |
-| Ending HEAD | `d38a072` … plus this handoff commit — see the last row of §7 |
+| Ending HEAD | `94bf97d` — *docs: record the ORDER 3 gate run and the handoff* — plus one final documentation-only commit that fills in this SHA. See §9 |
 | Branch | `feat/phase-1-core`, **33 commits ahead** of `origin/feat/phase-1-core` at session start, 0 behind |
 | Pushed | **No.** Pushing is not authorised by the order this session ran under |
 
@@ -27,7 +27,8 @@ the evidence lives in `docs/VERIFICATION.md`, the requirement states in
 | --- | --- |
 | `9bbf284` | **feat(registry): put the catalog in the repository, and qualify all 85 entries.** Adds `docs/SOURCE_CATALOG.md`; takes `docs/source-registry.json` from 0 records to 85; fixes FINDING-69 in `internal/sourceregistry`; replaces the shipped-registry authorisation test |
 | `d38a072` | **docs: reconcile the operator evidence, correct the renewal rule, make the plan actionable.** Adds VERIFICATION §3.23 and FINDING-70; corrects the matrix's renewal table; adds the first-wave proposal and adapter specification; amends the evaluation protocol |
-| *(this commit)* | **docs: record the ORDER 3 gate run and the handoff.** VERIFICATION §3.24 and this file |
+| `94bf97d` | **docs: record the ORDER 3 gate run and the handoff.** VERIFICATION §3.24 and this file |
+| *(final commit)* | **docs: name the ending SHA.** Documentation only; §9 states what it does and does not disturb |
 
 ### Files changed
 
@@ -239,3 +240,29 @@ read its mounted secret, or reach the appliance safely.
 * **Nothing was reset or discarded.** The uncommitted documentation changes
   present at session start were preserved and are part of `d38a072`; no
   `git reset --hard`, `git clean` or temporary commit was used.
+
+---
+
+## 9. The gate run and the commits after it
+
+The gate suite was run **once**, on the clean committed tree at `d38a072`, with
+nothing edited while it ran. Two commits follow it, and both are
+**documentation only**:
+
+| Commit | Changes | Effect on §3.24's results |
+| --- | --- | --- |
+| `94bf97d` | `docs/VERIFICATION.md`, `docs/HANDOFF_ORDER_3.md` | None. Changes no gate input |
+| the final commit | `docs/HANDOFF_ORDER_3.md` — this section, and the SHA above | None. Changes no gate input |
+
+`docs/REQUIREMENTS_MATRIX.md` §5's converse rule is what carries the results
+forward: *evidence is tied to the last commit that changed a gate input*, and a
+documentation-only commit changes none — otherwise writing the evidence down
+would invalidate it.
+
+**So the results in §5 above are `d38a072`'s, and they stand for the ending
+tree.** They are not a claim that `check.sh` was re-run on the final commit; it
+was not, and this section exists so that nobody has to infer that from a diff.
+
+A reader who wants the final SHA re-tested can run `bash scripts/check.sh` on
+it. The expected result is identical, and the two Docker gates will be BLOCKED
+for the same reason.
