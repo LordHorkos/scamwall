@@ -798,12 +798,17 @@ func TestTheShippedRegistryIsValid(t *testing.T) {
 	}
 }
 
-func TestTheShippedRegistryAuthorizesNothing(t *testing.T) {
-	// ORDER 2 has qualified no source. Anything enabled here, or claiming a
-	// verified-available disposition, or authorising any operation, would be a
-	// source switched on without a qualification this project has not
-	// performed. When a source is genuinely qualified, this is the test that
-	// must be deliberately changed — which is the point of writing it.
+func TestTheShippedRegistryEnablesNothingAndClaimsNoAvailability(t *testing.T) {
+	// The two properties the research pass did not change, and must not.
+	//
+	// `enabled` is the switch. Nothing may be on, because enabling is a
+	// separate decision from researching and nobody has taken it.
+	//
+	// `verified-available` requires, by §3, that access is CONFIRMED — not
+	// merely documented. The order under which every record here was written
+	// forbids fetching the data, so no record can honestly claim it, however
+	// clear its terms turned out to be. Several records say exactly that in
+	// their disposition_reason, and this is the check that keeps them honest.
 	reg, _, err := Load(shippedPath())
 	if err != nil {
 		t.Fatalf("the shipped registry did not parse: %v", err)
@@ -813,14 +818,55 @@ func TestTheShippedRegistryAuthorizesNothing(t *testing.T) {
 			t.Errorf("sources[%d] (%s) is enabled; no source has been qualified", i, s.SourceID)
 		}
 		if s.AccessStatus == "verified-available" {
-			t.Errorf("sources[%d] (%s) claims verified-available; no provider documentation has been read", i, s.SourceID)
-		}
-		for _, op := range AllOperations {
-			if ok, _ := s.Authorizes(op); ok {
-				t.Errorf("sources[%d] (%s) authorises %s", i, s.SourceID, op)
-			}
+			t.Errorf("sources[%d] (%s) claims verified-available; access has been documented, never confirmed", i, s.SourceID)
 		}
 	}
+}
+
+func TestNoAuthorisedOperationIsAlsoAnIntendedOne(t *testing.T) {
+	// THIS TEST REPLACED A STRICTER ONE, AND THE REASON MATTERS.
+	//
+	// Until the first research pass, the shipped registry authorised no
+	// operation at all, and a test asserted exactly that. It could, because the
+	// file held zero records. It cannot now: two providers — catalog 37 under
+	// CC0 and catalog 80 under CC0 — grant every operation with nothing to
+	// satisfy, and recording those as `conditional` or `unknown` to keep a test
+	// green would have been a false record. The registry's whole purpose is to
+	// stop that, so the record was written truthfully and the test was changed
+	// deliberately, which is what its predecessor's comment said should happen.
+	//
+	// What replaces it is not weaker in the way that matters. A grant says what
+	// a PROVIDER permits; `intended_operations` says what this PROJECT proposes
+	// to do. Harm needs both. So the invariant is that the two sets never meet
+	// in the shipped file: no record may declare an intended operation while
+	// its terms authorise it, until somebody deliberately edits this test.
+	//
+	// Phase E proposes operations in prose — docs/IMPLEMENTATION_PLAN.md — and
+	// writes none of them here. Moving a proposal into the registry is the act
+	// this test is positioned to catch.
+	reg, _, err := Load(shippedPath())
+	if err != nil {
+		t.Fatalf("the shipped registry did not parse: %v", err)
+	}
+	authorising := 0
+	for i, s := range reg.Sources {
+		for _, op := range AllOperations {
+			ok, _ := s.Authorizes(op)
+			if !ok {
+				continue
+			}
+			authorising++
+			if contains(s.IntendedOperations, string(op)) {
+				t.Errorf("sources[%d] (%s) both authorises %s and declares it intended; that pair is the step this test exists to make deliberate",
+					i, s.SourceID, op)
+			}
+		}
+		if len(s.IntendedOperations) != 0 {
+			t.Errorf("sources[%d] (%s) declares intended operations %v; this order proposes operations in prose and writes none into the registry",
+				i, s.SourceID, s.IntendedOperations)
+		}
+	}
+	t.Logf("authorised operations across the shipped registry: %d", authorising)
 }
 
 func TestTheShippedRegistryReportsItsOwnCoverage(t *testing.T) {
@@ -907,4 +953,38 @@ func TestTheVersionWalkAcceptsACorrectRetirementAndReissue(t *testing.T) {
 	if p := ValidateVersionChain([]*Registry{present, gone, next}, nil); len(p) != 0 {
 		t.Errorf("a retirement followed by a new id should be accepted, got:\n%s", render(p))
 	}
+}
+
+// --- FINDING-69: `unknown` in the kind and authentication vocabularies ---------
+
+func TestKindAndAuthenticationAcceptUnknown(t *testing.T) {
+	// The gap the first research pass exposed. A provider whose documentation
+	// answers HTTP 403 has a product shape and an access model; nobody has read
+	// either. docs/SOURCE_REGISTRY.md §2 says "`unknown` is a permitted value
+	// and is not the same as absent", and before FINDING-69 these two
+	// vocabularies contradicted it — leaving an author to invent a value or to
+	// write an empty string, which is refused separately. Both are worse than
+	// recording that nobody knows.
+	s := validSource()
+	s["kind"] = "unknown"
+	s["authentication"] = "unknown"
+	s["access_status"] = "unresolved"
+	s["verified_on"] = "unknown"
+	s["official_documentation"] = "unknown"
+	assertNoProblems(t, problemsFor(t, registryWith(s)))
+}
+
+func TestAnInventedKindIsStillRefused(t *testing.T) {
+	// Adding `unknown` must not be read as opening the vocabulary. Everything
+	// else outside it is still refused, which is the whole point of a closed
+	// set.
+	s := validSource()
+	s["kind"] = "threat intelligence platform"
+	assertProblem(t, problemsFor(t, registryWith(s)), "sources[0].kind", "permitted values are")
+}
+
+func TestAnInventedAuthenticationIsStillRefused(t *testing.T) {
+	s := validSource()
+	s["authentication"] = "oauth"
+	assertProblem(t, problemsFor(t, registryWith(s)), "sources[0].authentication", "permitted values are")
 }

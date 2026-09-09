@@ -136,12 +136,26 @@ var RequiredSourceFields = []string{
 // The closed vocabularies. A value outside one of these is refused rather than
 // carried: a disposition invented at the keyboard is the kind of claim this
 // registry exists to prevent.
+//
+// `kind` and `authentication` accept "unknown" — FINDING-69. They did not, and
+// the first real research pass produced records they could not express: a
+// provider whose documentation returns 403 has an access model and a product
+// shape, and nobody has read either. docs/SOURCE_REGISTRY.md §2 says plainly
+// that "`unknown` is a permitted value and is not the same as absent"; the two
+// vocabularies contradicted it, and the only ways out were to invent a value or
+// to leave the field empty, which §2 refuses separately. Adding the value makes
+// the code say what the schema always said.
+//
+// This is not a licence to shrug. `unknown` in either field forces
+// access_status to `unresolved` in practice — a disposition other than
+// `unresolved` is a claim about what documentation said — and
+// disposition_reason still has to say what was tried and what happened.
 var (
 	ValidKinds = []string{
 		"bulk feed", "lookup API", "enrichment service", "corpus",
-		"platform", "advisory source", "commercial partnership",
+		"platform", "advisory source", "commercial partnership", "unknown",
 	}
-	ValidAuthentication = []string{"none", "key", "account", "contract"}
+	ValidAuthentication = []string{"none", "key", "account", "contract", "unknown"}
 	ValidAttribution    = []string{"yes", "no", "unknown"}
 	// ValidAccessStatus is the disposition vocabulary — §3, exactly one per
 	// source.

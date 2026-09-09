@@ -1,49 +1,62 @@
-# ScamWall Source Registry — structure and enforcement
+# ScamWall Source Registry — structure, enforcement, and what is now in it
 
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-**Status: STRUCTURE AND ENFORCEMENT ONLY. No source has been imported,
-researched, contacted, or qualified. Nothing here is evidence about any
-provider.**
+**Status: RESEARCHED, NOT AUTHORISED.** All 85 catalog entries now carry a
+record. Every field in every record was read from the URL it cites, on the date
+it cites. **Nothing is enabled, no record claims `verified-available`, and no
+record declares an intended operation.** Researching a source is not qualifying
+it, and qualifying it is not switching it on.
 
-The schema below is no longer only prose. `internal/sourceregistry` loads
-`docs/source-registry.json` and refuses a record that breaks the rules this
-file states, and `go test -race ./...` — a required gate — validates the
-shipped file on every run. What that does and does not establish is §6.
-
-`docs/source-registry.json` currently holds **zero records**. That is the
-honest state, not a loading failure: every catalog entry is implicitly
-`unresolved`.
-
-ORDER 1 directs that this structure be prepared alongside the operator-safety
-work, and that bulk collection and commercial integration wait for the
-qualification ORDER 2 defines. This file is the schema and the rules. The
-registry it describes is **empty**.
+`internal/sourceregistry` loads `docs/source-registry.json` and refuses a record
+that breaks the rules this file states; `go test -race ./...` — a required gate
+— validates the shipped file on every run. What that does and does not
+establish is §6.
 
 ---
 
-## 1. What this is for
+## 1. What this is for, and where the catalog lives
 
-The catalog supplied with the orders lists 85 entries and a proposed ingestion
-order. It was present in the ORDER 2 text.
+The catalog of 85 candidates is now **in the repository**, at
+`docs/SOURCE_CATALOG.md`. That closes a blocker this file used to record: the
+list existed only in the text of an order, so a cleared conversation could erase
+the research scope, and no record could be written without reconstructing
+provider names from memory — the precise failure this registry exists to
+prevent.
 
-**It is not present in this repository, and that is now a blocker.** The
-sentence this paragraph replaces said the catalog "does not need re-supplying",
-which was true of the session that had the order text in front of it and is not
-true of any later one. The tracked tree, the untracked and ignored files, and
-the full history across all branches were searched; the catalog is in none of
-them. Until it is re-supplied, no record can be written, because the
-alternative is reconstructing provider names and licence terms from memory —
-the precise failure this registry exists to prevent.
+What the catalog is: a list of candidates. What it is not: a statement about any
+provider's current capabilities, licence terms, or access status. Those are
+researched per entry, against the provider's own current documentation, and
+recorded here with the date they were read.
 
-What the catalog is: a list of candidates and the requesting party's priority.
-What it is not: a statement of any provider's current capabilities, licence
-terms, or access status. Those are researched per entry, against the provider's
-own current documentation, and recorded with the date they were read.
+**The catalog carried no priority labels**, and so `requested_priority` reads
+`unknown` on all 85 records. That is worth stating plainly, because an earlier
+version of this project's material referred to entries marked "VERY HIGH": no
+such label reached this registry, and no selection can therefore rest on one.
 
 Entering a source here does not enable it. Enabling is a separate decision that
 requires a disposition of `verified-available` **and** rights that permit the
 intended use.
+
+### 1.1 What the first research pass found, in one table
+
+| | Records |
+| --- | --- |
+| Catalog entries represented | **85 of 85** |
+| Enabled | **0** |
+| `verified-available` | **0** — see §3.1 |
+| `credentials-required` | 14 |
+| `commercial-approval-required` | 21 |
+| `historical` | 6 |
+| `unavailable` | 3 |
+| `unresolved` | 41 |
+| Records carrying at least one operation their terms authorise | **2** (catalog 37 and 80, both CC0) |
+| Records declaring an intended operation | **0** |
+| Entries whose documentation could not be read at all | 11, each naming its blocker |
+
+The 41 `unresolved` records are not 41 unexamined ones. §3.1 explains what that
+disposition is carrying, and why the vocabulary as it stands cannot say
+anything better.
 
 ---
 
@@ -60,10 +73,10 @@ and is not the same as absent.
 | `official_name` | the provider's current name for itself |
 | `official_documentation` | URL of the documentation the record was read from |
 | `verified_on` | the date that documentation was read. A record with no date states nothing current |
-| `kind` | one of: bulk feed, lookup API, enrichment service, corpus, platform, advisory source, commercial partnership |
+| `kind` | one of: bulk feed, lookup API, enrichment service, corpus, platform, advisory source, commercial partnership, unknown. `unknown` was added by FINDING-69: eleven entries have a product shape nobody has been able to read |
 | `indicator_types` | the types it actually publishes, using the registry's own type vocabulary |
 | `classification_meaning` | what the provider's own labels mean. "Spam" from one source and "phishing" from another are not the same claim |
-| `authentication` | none, key, account, contract |
+| `authentication` | none, key, account, contract, unknown — FINDING-69 |
 | `quotas` | documented request or volume limits |
 | `update_cadence` | how often the data changes, as documented |
 | `retention` | how long the provider retains records |
@@ -161,14 +174,45 @@ Exactly one per source:
 | --- | --- |
 | `verified-available` | documentation read, access confirmed, and rights permit the intended use |
 | `credentials-required` | available in principle; needs a key or account that has not been obtained |
-| `commercial-approval-required` | needs a contract or paid tier |
+| `commercial-approval-required` | needs a contract, membership, or paid tier |
 | `historical` | the dataset exists but is not current. Usable as seed or training data if rights permit, never as live intelligence |
 | `unavailable` | the provider or dataset no longer exists, or refuses this use |
-| `unresolved` | not yet researched. **The default, and the state of all 85 entries today** |
+| `unresolved` | not yet researched, or researched with something still outstanding — §3.1 |
 
 `unresolved` and `unavailable` are not synonyms, and neither is a reason to
 guess. A source whose documentation cannot be read stays `unresolved` with the
 reason recorded.
+
+### 3.1 What `unresolved` is carrying, and the strain it is under
+
+Forty-one records carry `unresolved`, and they are not one thing. Three
+distinguishable states share the value:
+
+| State | Example | Count |
+| --- | --- | --- |
+| Documentation could not be read at all — 403, an unverifiable TLS chain, a host the fetcher cannot reach, a timeout | catalog 34, 35, 42, 47, 50, 58, 64, 65, 71, 75, 84 | 11 |
+| Documentation read; the provider states **no terms**, or points at terms on a page that was not read | catalog 4, 14, 19, 24, 32, 36, 78 | 7 |
+| Documentation read, **terms read and recorded in full**, and the only thing outstanding is access confirmation | catalog 8, 11, 12, 18, 22, 23, 37, 62, 80 among others | the rest |
+
+**The third state is the strain.** `verified-available` requires that access is
+*confirmed*, not merely documented — and the order under which this research was
+done forbids fetching the data. So a record whose licence is CC0, whose formats
+are published, and whose cadence is stated still cannot claim
+`verified-available`, and the only other honest value is `unresolved`, whose own
+definition begins "not yet researched". That is close to backwards for catalog
+37, where every rights question is answered.
+
+**This is recorded rather than fixed, deliberately.** Adding a value —
+`rights-cleared`, say, for "researched; access confirmation outstanding" —
+would be redesigning the disposition vocabulary to suit the convenience of the
+research pass that first exercised it, which is exactly what the order
+authorising this work forbids. The existing model is used, `disposition_reason`
+carries the distinction on every affected record in words, and the vocabulary
+question is put to the next order rather than answered here.
+
+What must not happen in the meantime: reading `unresolved` as "nothing is known
+about this source". On nine of these records, more is known than on several
+records carrying a definite disposition.
 
 ---
 
@@ -181,30 +225,49 @@ reason recorded.
   pages, archives and message bodies. They are parsed defensively and never
   executed.
 * **A priority label overrides nothing.** Not licensing, not access, not
-  privacy, not the evidence requirements.
+  privacy, not the evidence requirements. No priority label reached this
+  registry at all — §1.
 * **A provider report is an allegation or an observation with provenance**, not
   a verified fact, and the registry records which it is.
 * **No household URL, message, identity or file is submitted to any third
   party**, at any point, by anything this registry enables.
 
+### 4.1 Rules the first research pass turned from prose into findings
+
+Each of these was written as a caution before any research happened. Each is now
+attached to specific records, which is the difference between a principle and a
+finding.
+
+| Rule | Where it bit |
+| --- | --- |
+| **A public URL is not permission.** | Catalog 7: the OpenPhish community feed downloads without authentication, and its Terms of Use forbid "security operations, threat intelligence, detection, enrichment ... customer protection" without written consent. Availability and permission point in opposite directions on the same feed |
+| **An absent restriction is not a grant.** | Catalog 38: FakeFilter publishes daily data and no licence — the repository has no `LICENSE` file. Nothing is granted, so nothing may be used. Compare catalog 24, where a statutory, appealable, five-minute-cadence list states no reuse terms either, and is therefore equally unusable |
+| **Do not transfer one product's terms to another.** | Catalog 11 and 12: Spamhaus DROP is free with a credit requirement and no restriction on business type; the Spamhaus DNSBLs including DBL are free only for low-volume non-commercial users, with an annual subscription required for commercial use. One provider, two answers |
+| **Aggregator copies are not independent corroboration.** | Catalog 9 aggregates four other catalog entries by name. Catalog 20 says outright that "IP Lists are a property of their maintainers". Catalog 21 counts how many upstream lists name an address, which reads as confidence and is not, whenever two upstreams share a source |
+| **An aggregator's licence may not reach its content.** | Catalog 20 (GPLv2 tooling, third-party data), 21 (The Unlicense on a repository of other people's lists), 23 (a documented per-source licence table including "non-commercial with attribution") |
+| **Historical corpora are not current feeds.** | Catalog 40, 41, 43, 44, 45 and 57 are `historical`. Catalog 43 was donated in 1999. Catalog 57's front page claims daily updates and its data repository last moved in June 2022 |
+| **Scanner observations are not scam attribution.** | Catalog 25's documentation defines no maliciousness verdict; catalog 30 defines its noise flag as "observed scanning the internet in the last 90 days"; catalog 78 records that a certificate was issued |
+| **Risk signals are not blocking grounds.** | Catalog 37, 38 and 39 list disposable email domains — a fact about a mail service. Catalog 54 reports line type. Catalog 74 reports registration age. None is a finding of wrongdoing |
+| **Community reports are allegations.** | Catalog 29 requires a reporter to warrant the association and disclaims liability for false reports; catalog 55 attaches a confidence score and a verified flag to community submissions |
+| **Renames and acquisitions need evidence and a retained mapping.** | Catalog 16 (AlienVault → LevelBlue), 56 (BitcoinAbuse → merged into Chainabuse), 72 (Cybersixgill → Bitsight, evidenced by the provider's own 301), 73 (ke-la.com → kelacyber.com, likewise). Each keeps its catalog number |
+| **A platform is not a source.** | Catalog 15 (MISP, a feed directory), 10 (Spamhaus, a provider with several differently-licensed products), 74 (RDAP, a protocol whose every server sets its own terms) |
+
 ---
 
 ## 5. What has NOT been done
 
-* No entry has been imported.
-* No provider documentation has been read.
-* No provider has been contacted, and no account has been created.
-* No feed, API or dataset has been fetched, in whole or in part.
+* **No feed, API or dataset has been fetched, in whole or in part.** No
+  indicator has been retrieved. Research was documentation only.
+* No account has been created, no key requested, no terms accepted, no
+  membership taken, and no provider contacted.
 * No commercial discussion has begun.
-* No source has a disposition other than the implicit `unresolved`.
-* The 85-entry catalog is **not in this repository** and must be re-supplied
-  before any record can be written — §1.
-
-ORDER 2 opens when ORDER 1's acceptance is met and the operator has read its
-result. ORDER 1's acceptance is still pending, so what has been built here is
-the architecture half only, which the implementation plan permits while the
-dependent half waits on an external blocker. This file now describes a shape,
-enforces it, and holds no data.
+* No source is enabled, and none has a `verified-available` disposition.
+* No record declares an intended operation. Operations are proposed in prose —
+  `docs/IMPLEMENTATION_PLAN.md` — and written here only when the operator
+  approves a pilot.
+* Independence has been **claimed** for no source. `IndependenceClaimable`
+  returns true only where upstreams are `documented_complete`, and that is a
+  statement about what was recorded, not a discovery about what is true.
 
 ---
 
@@ -229,7 +292,7 @@ making it stricter.
 | Trailing content after the document, and unknown top-level keys, are refused | FINDING-67 |
 | Input over 8 MiB is refused. This file is hand-maintained; a larger one is a mistake or a hostile input, not a bigger registry | FINDING-67, §4 |
 | An empty string is refused wherever `unknown` is the available answer | §2 |
-| `kind`, `authentication`, `attribution_required`, `access_status`, grant status, condition satisfaction and upstream completeness are closed vocabularies | §2, §3, §2.1 |
+| `kind`, `authentication`, `attribution_required`, `access_status`, grant status, condition satisfaction and upstream completeness are closed vocabularies. `kind` and `authentication` accept `unknown` — FINDING-69; everything else outside a set is still refused | §2, §3, §2.1 |
 | An unsupported `schema_version` is refused **and validation stops there**, rather than emitting confident findings about a document whose field meanings are unknown | FINDING-67 |
 | `source_id` is unique within the file and cannot take an id in `retired_source_ids` | §2 |
 | Two records cannot claim the same `catalog_ref` | §2 |
@@ -243,7 +306,28 @@ making it stricter.
 | Lineage edges must name records that exist, must not be self-edges, must not repeat, and **must not form a cycle** | §2, FINDING-66 |
 | A record claiming `documented_complete` upstreams while carrying lineage edges and no upstreams is refused as self-contradictory | FINDING-66 |
 | Removing a record without retiring its id is refused, **by comparison against the previous committed version**, and retirement is permanent | FINDING-65 |
-| The shipped registry enables nothing, claims no `verified-available` disposition, and authorises no operation | ORDER 2 has qualified no source |
+| The shipped registry enables nothing and claims no `verified-available` disposition | §1, §3.1 |
+| The shipped registry declares **no intended operation**, and no record both authorises an operation and declares it intended | §2.1, and the note below |
+
+**The note on that last row, because a test was deliberately weakened and that
+should not be discoverable only by reading a diff.** Until the first research
+pass, a test asserted that the shipped registry authorised *no operation at
+all*. It could, because the file held no records. It cannot now: two providers —
+catalog 37 and catalog 80 — release their data under CC0, which grants every
+operation with no condition to satisfy. Recording those as `conditional` or
+`unknown` in order to keep a test green would have been a false record, and
+producing false records is the one thing this registry exists to prevent. So the
+record was written truthfully and the test was replaced.
+
+What replaced it guards the thing that matters. A **grant** says what a provider
+permits. `intended_operations` says what this project proposes to do. Harm needs
+both, and the shipped file now has none of the second: no record declares an
+intended operation, so no authorised operation is also a proposed one. Moving a
+proposal from `docs/IMPLEMENTATION_PLAN.md` into the registry is the act the
+replacement test is positioned to make deliberate.
+
+**This is weaker than what it replaced, and the honest summary is that the
+earlier test was only as strong as it was because the file was empty.**
 
 ### Not enforced, and not enforceable here
 
