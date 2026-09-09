@@ -2688,6 +2688,108 @@ indicator was fetched; and no operator step was run.
 
 ---
 
+### 3.25 Two hosted runs after the approved push — SW-P1-12 closes, and a test defect it exposed
+
+The operator approved a push. `feat/phase-1-core` was pushed to `origin` for
+the first time since `72bc84c`, which triggered the workflow on
+`push: branches: [main, 'feat/**']`. **Two runs happened, and the first one
+failed.** Both are recorded; a failed run that is quietly re-run until green is
+not evidence, it is selection.
+
+| | Run 1 | Run 2 |
+| --- | --- | --- |
+| ID | 34392469729 | **34394790484** |
+| URL | `https://github.com/LordHorkos/scamwall/actions/runs/34392469729` | `https://github.com/LordHorkos/scamwall/actions/runs/34394790484` |
+| Commit | `a348967` | **`87bdfafcb9f1690b567f966b677afe965c08af48`** |
+| Result | **27 passed, 1 failed, 0 BLOCKED** | **28 passed, 0 failed, 0 BLOCKED** |
+| Verdict line | `RESULT: NOT COMPLETE — required gates failed or could not run.` | `RESULT: all required gates passed.` |
+| Duration | 3m50s | 4m5s |
+
+**Both Docker gates ran on the runner and passed in both runs.** `docker build`
+and `container runtime verification` are BLOCKED locally and are not blocked in
+CI, which is the whole reason the hosted run is worth having: it is the only
+independent host this project has.
+
+**Recorded environment for run 2**, so the result is attributable:
+
+| | |
+| --- | --- |
+| runner | Ubuntu 24.04.5 LTS |
+| go | go1.26.8 linux/amd64 |
+| staticcheck | 2026.2.1 (0.8.1) |
+| govulncheck | govulncheck@v1.7.0, DB `https://vuln.go.dev` updated 2026-09-09 17:56:34 UTC |
+| shellcheck | 0.11.0 |
+| gitleaks | 8.30.0 |
+| CI-built image | `sha256:3143d6990c1dc02825b1e6ff077051054cb4b325c182b23b659b6237741c2dc7`, from source commit `87bdfaf` |
+
+#### What run 1 found — FINDING-71
+
+`operator-handoff regression tests` failed: **393 tests, 3 failed.** The same
+suite passes locally, and had passed locally on every commit since `9ebb98c`.
+The three:
+
+```
+FAIL the supplementary group is read from the real resolved configuration
+     read '1001', expected '989'
+FAIL the secret source is read from the real resolved configuration
+     read '/home/runner/work/_temp/scamwall-ci-fixtures/pihole_app_password',
+     expected '/etc/scamwall/secrets/pihole_app_password'
+FAIL the CA bind source is read from the real resolved configuration
+     read '/home/runner/work/_temp/scamwall-ci-fixtures/pihole-ca.crt',
+     expected '/etc/scamwall/certs/pihole-ca.crt'
+```
+
+**CI was right and the test was wrong.** The runner points the same Compose
+definition at throwaway fixtures with its own gid — by design, and documented in
+the workflow. The test asserted this household's deployment values as string
+literals, so it could only pass on one machine. §4.22 records the defect and the
+fix; `87bdfaf` is the fix, and run 2 is the same suite passing at **396 tests,
+0 failed** on a host that has never seen this deployment.
+
+**Why this had never been caught.** `scripts/tests/operator-handoff-test.sh`
+was added at `9ebb98c`, which is one of the 33 commits that had never reached a
+hosted run. Run 1 is the first time any runner executed it. That is not a
+failure of local discipline — the suite genuinely passes locally, every time —
+it is the specific class of defect that only a second machine can find, and it
+is the argument for SW-P1-12 existing as a requirement at all.
+
+#### SW-P1-12
+
+**Acceptance, unchanged and quoted:** *"The hosted run exists and passes, and
+its gate list matches the local suite's."*
+
+| Half | Met by |
+| --- | --- |
+| The hosted run exists and passes | Run 34394790484 at `87bdfaf`: 28 passed, 0 failed, 0 BLOCKED, `RESULT: all required gates passed` |
+| Its gate list matches the local suite's | CI executes `scripts/check.sh` itself and maintains no second list. The list is 28 entries in both places. Locally 26 pass and 2 are BLOCKED for want of a daemon; on the runner all 28 ran |
+
+**SW-P1-12 is VERIFIED at `87bdfaf`.** It had been the one open Phase 1 row
+since `7e11419`, and the gate-list mismatch that demoted it — 24 executed
+against a list that had grown to 28 — is gone: the run executed the list this
+tree defines, on this tree.
+
+**What it still does not establish**, unchanged from §3.12 and stated again
+because the row's own text records the mismatch: the workflow's fork-pull-request
+secret handling. Run 34394790484 is a branch push. A push cannot demonstrate
+what happens to a fork's pull request, and that property stays assigned to
+Phase 2 (§6.4 item 10) where it already was.
+
+**And what a passing CI run still does not do for SW-P1-05.** The runner
+resolved *CI's* deployment — gid 1001, bind sources under `RUNNER_TEMP`. That is
+the same limitation §3.12 recorded for run 34047025567, and it is why a green
+`container runtime verification` in CI has never carried that row and does not
+carry it now.
+
+#### The CI-built image at `87bdfaf`
+
+`sha256:3143d699…` was built on the runner from `87bdfaf` with both in-build
+assertions executing. It corroborates SW-P1-20 on a second, independent host at
+this commit. It is **not** a deployable artifact for this household — built from
+a clean checkout against throwaway fixtures — and it does not supersede the
+operator-built `sha256:0efff150…` for any row.
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
@@ -4988,6 +5090,79 @@ not be read as authorising — and it is no longer a description of an empty fil
 because the file is no longer empty. No new validator rule is added: a rule
 that could distinguish a real note from a plausible one would have to understand
 the note, and none can. What is added is the reason to look: this finding.
+
+---
+
+### 4.22 FINDING-71 — a regression suite that asserted one household's deployment
+
+**Found by run 34392469729**, the first hosted run ever to execute
+`scripts/tests/operator-handoff-test.sh`. Fixed at `87bdfaf`.
+
+**What was wrong.** Section 11 of that suite renders the real Compose definition
+with the real client and checks that the program's jq filters pick the right
+fields out of it. Three of its five cases compared the extracted value against
+a **string literal that was this deployment's configuration**:
+
+| Case | Literal it asserted |
+| --- | --- |
+| the supplementary group … | `989` |
+| the secret source … | `/etc/scamwall/secrets/pihole_app_password` |
+| the CA bind source … | `/etc/scamwall/certs/pihole-ca.crt` |
+
+Those three values come from `deploy/compose/.env`, which is gitignored and
+exists only on the operator's host. Anywhere else — including the runner, which
+sets `SCAMWALL_SECRET_GID`, `SCAMWALL_SECRET_FILE` and `SCAMWALL_CA_FILE` to
+throwaway fixtures on purpose — the cases fail while nothing is actually broken.
+
+**Why it is a defect and not a mis-configured CI.** The block's own header says
+what it is for: *"a drift between the fixture's shape and Compose's actual
+output is caught rather than assumed away"*. Its subject is the **filters**. The
+values were incidental, and pinning them turned a filter test into an assertion
+about the machine it ran on — the same category error this record keeps finding
+in other forms, and one the project is otherwise careful about: `docs/VERIFICATION.md`
+§3.7 and §3.22 both go out of their way to keep site-specific values out of the
+evidence, while a test file was asserting three of them.
+
+**It also came close to being worse than a false failure.** Had the runner
+happened to use gid 989, the case would have passed while testing nothing.
+
+**The fix, and why it is not circular.** The three expectations are resolved by
+the shell from the same inputs Compose uses, in Compose's own precedence order —
+exported variable, then the `--env-file`, then the `${VAR:-default}` written in
+`compose.yaml`. The program under test reaches the value through Compose's
+renderer and a jq filter; the test reaches it by reading the environment
+directly. Two different paths to the same answer, so a filter naming the wrong
+field still fails. **Verified by mutation:** repointing the `group_add` filter at
+`.user` fails the case.
+
+**A gap the fix had to close on the way.** With expectations computed, the three
+cases would still pass if Compose ignored the environment entirely and fell back
+to `compose.yaml`'s defaults — because the resolver would fall back to the same
+defaults. Two wrongs agreeing. So the definition is rendered a **second** time
+with values chosen in the test and unlike anything a deployment would use, and
+the render must show them. That runs identically everywhere, which is why the
+suite is **396 tests on every host** rather than a count that moves with the
+environment.
+
+**`user` keeps its literal**, deliberately: `65532:65532` is fixed in
+`compose.yaml`, is not site-specific, and is a value a deployment must not be
+able to move. It passed in CI, and asserting it as a constant is correct.
+
+**A process defect found at the same time, recorded because it nearly shipped.**
+The first attempt to commit this fix ran
+
+```
+bash scripts/secret-scan.sh 2>&1 | tail -2 && git commit ...
+```
+
+The scanner **refused the commit** — it reads `EXPECT_SECRET="…"` as an assigned
+credential literal — and the commit happened anyway, because the `&&` tested
+`tail`'s exit status rather than the scanner's. That is FINDING-23's shape
+exactly: *a status read through a wrapper is the wrapper's*. The commit was
+amended, the variables renamed to say what they hold (a gid and two bind
+**sources**), and the scanner left alone: the rule cannot tell a path from a
+password, and the right response is to stop writing lines that look like one
+rather than to widen the detector.
 
 ---
 

@@ -73,7 +73,8 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Previous working candidate | `6bb33bfe78374d41738416af78c76db131e6151d`. ORDER 2, architecture half: local implementation and verification only — not pushed, not built, not deployed. It adds `internal/sourceregistry` (new Go package, 80 cases) and `docs/source-registry.json`, and revises `docs/SOURCE_REGISTRY.md`. That is Go source under `internal/`, so §5 applies; no existing row's Source field lists the new file, so the demotion is SW-P1-13 alone, renewed by the gate run in `docs/VERIFICATION.md` §3.20. It is **not** on the critical Go path — nothing in `cmd/` or the credential, network or enforcement paths references it — so SW-P1-10 is untouched. No Dockerfile, Compose definition or workflow changed, and no image-bound row moves. Gate suite: 26 passed, 0 failed, 2 BLOCKED. **ORDER 2 is not accepted**: the 85-entry catalog is absent from this repository, so no source has been researched and the registry holds zero records. `docs/VERIFICATION.md` §3.20, §4.17 |
 | Previous working candidate | `e8f86834de2d9f696b37e8c4a9479d751bbe9c89`. ORDER 2 §3, the registry safety model: local implementation and verification only — not pushed, not built, not deployed. It changes `internal/sourceregistry` (five source files, two test files, 105 cases) and `docs/`, and adds `docs/EVALUATION_PROTOCOL.md`. Go source under `internal/`, so §5 applies; no existing row's Source field lists these files, so the demotion is SW-P1-13 alone, renewed by the gate run in `docs/VERIFICATION.md` §3.21. **Not on the critical Go path** — nothing in `cmd/` or the credential, network or enforcement paths references it — so SW-P1-10 is untouched. No Dockerfile, Compose definition or workflow changed; no image-bound row moves. Gate suite: 26 passed, 0 failed, 2 BLOCKED, CHECK exit=1. **ORDER 2 is not accepted**: acceptance needs all 85 catalog entries to carry a disposition and **zero do**, the catalog being absent from this repository. `docs/VERIFICATION.md` §3.21, §4.18 |
 | Previous working candidate | `c35b1e601f2543cb666d34888c61b08406446106`. Documentation only: it changes `docs/` and nothing else, so it changes no gate input and the suites of `docs/VERIFICATION.md` §3.21 are this tree's. **Not pushed. Built and verified by the operator, and not deployed** — `docs/VERIFICATION.md` §6.5 preflight, step A and close-out were run against it, producing image `sha256:0efff150…` and closing SW-P1-05 and SW-P1-20 (`docs/VERIFICATION.md` §3.22). Steps B, C and D were not run; no credential was opened and no request reached the household appliance. ORDER 2 remains not accepted, for the reason in the row above |
-| **Working candidate** | `9bbf284` — *feat(registry): put the catalog in the repository, and qualify all 85 entries* — plus the documentation commit that records it. Local implementation and research only: **not pushed, not built, not deployed.** It adds `docs/SOURCE_CATALOG.md`, takes `docs/source-registry.json` from 0 records to 85, and changes `internal/sourceregistry` (`registry.go` and `registry_test.go`). Go source under `internal/`, so §5 applies; **no existing row's Source field names those files**, so the demotion is SW-P1-13 alone, renewed by the gate run in `docs/VERIFICATION.md` §3.24. `go list -deps ./cmd/scamwall` does **not** contain `sourceregistry`, so the executable is byte-identical, **SW-P1-10 is untouched, and no image-bound row moves** — SW-P1-05 and SW-P1-20 stay VERIFIED on image `sha256:0efff150…`. No `scripts/*.sh`, Dockerfile, Compose definition or workflow changed. **ORDER 2's catalog blocker is discharged**: all 85 entries carry a record with a disposition and a research basis, 11 of them naming a specific access blocker. Nothing is enabled and no record claims `verified-available` |
+| Previous working candidate | `9bbf284` — *feat(registry): put the catalog in the repository, and qualify all 85 entries* — plus the documentation commit that records it. Local implementation and research only: **not pushed, not built, not deployed.** It adds `docs/SOURCE_CATALOG.md`, takes `docs/source-registry.json` from 0 records to 85, and changes `internal/sourceregistry` (`registry.go` and `registry_test.go`). Go source under `internal/`, so §5 applies; **no existing row's Source field names those files**, so the demotion is SW-P1-13 alone, renewed by the gate run in `docs/VERIFICATION.md` §3.24. `go list -deps ./cmd/scamwall` does **not** contain `sourceregistry`, so the executable is byte-identical, **SW-P1-10 is untouched, and no image-bound row moves** — SW-P1-05 and SW-P1-20 stay VERIFIED on image `sha256:0efff150…`. No `scripts/*.sh`, Dockerfile, Compose definition or workflow changed. **ORDER 2's catalog blocker is discharged**: all 85 entries carry a record with a disposition and a research basis, 11 of them naming a specific access blocker. Nothing is enabled and no record claims `verified-available` |
+| **Working candidate** | `87bdfafcb9f1690b567f966b677afe965c08af48` — *fix(test): stop the handoff suite asserting one household's deployment values*. **Pushed, with the operator's approval, and verified by two hosted runs.** It changes `scripts/tests/operator-handoff-test.sh` and nothing else: no Go source, no Dockerfile, no Compose definition, no workflow. §5 demotes the script-bound rows, renewed by the local gate run at this commit (26 passed, 0 failed, 2 BLOCKED) and by hosted run 34394790484 (**28 passed, 0 failed, 0 BLOCKED**). **SW-P1-12 closes here** — `docs/VERIFICATION.md` §3.25. Whether SW-P1-05 is also demoted is **contested and unresolved**: §5.1. Not built by the operator, not deployed; the CI-built image `sha256:3143d699…` is the runner's and is not a deployable artifact for this household |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -104,7 +105,7 @@ visible rather than silently absent.
 | SW-P1-09 | An independent secret detector runs alongside the project-specific scanner | VERIFIED |
 | SW-P1-10 | Critical Go paths are reviewed and the review is recorded | VERIFIED |
 | SW-P1-11 | govulncheck results are handled by content, not by exit status alone | VERIFIED |
-| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | IMPLEMENTED-UNVERIFIED |
+| SW-P1-12 | CI is reproducible, least-privilege, and records tool versions | VERIFIED |
 | SW-P1-13 | Pre-existing functional, security, race, and offline-plan tests are preserved and rerun | VERIFIED |
 | SW-P1-14 | The gate suite is deterministic: no gate passes or fails at random | VERIFIED |
 | SW-P1-15 | The CLI's read-only guarantee is covered by a test | VERIFIED |
@@ -121,11 +122,36 @@ SW-P1-05 and SW-P1-20 were the two image-bound rows, and the operator's run of
 `sha256:0efff1508ab6479fab4c2b09d2900844d8e957ed726cd6d84bbf4132a9493f06` —
 closes both. `docs/VERIFICATION.md` §3.22.
 
-**SW-P1-12 is the one open row, and one open required row is an open phase.**
-No hosted run has seen any commit since `72bc84c`; the gate list this tree runs
-is 26, and run 34047025567 executed 24. Nothing in the operator's run bears on
-it: a local build and a local verifier run say nothing about a runner. Renewal
-is an approved push followed by a hosted run.
+**All twenty rows now read VERIFIED, and this document does not therefore claim
+Phase 1 is complete.** One of the twenty turns on a question about the renewal
+rule that the session which raised it should not be the one to settle — §5.1.
+Read the next three paragraphs before reading the table above as a completion.
+
+**SW-P1-12 closed at `87bdfaf`**, on hosted run 34394790484: **28 passed, 0
+failed, 0 BLOCKED**, `RESULT: all required gates passed`, executing
+`scripts/check.sh` itself so the gate list is the local suite's by construction.
+It had been the one open row since `7e11419`. The push that made it possible was
+approved by the operator; the run before it, 34392469729, **failed** — and what
+it found is FINDING-71, a regression suite that asserted this household's own
+deployment values and could therefore only pass on one machine. Both runs are
+recorded in `docs/VERIFICATION.md` §3.25. A failed run that is quietly re-run
+until green is not evidence.
+
+**SW-P1-05 is VERIFIED and its renewal state is contested**, which is a
+different thing from being in doubt. The evidence — the 358-case suite against
+the scripted fake, and the operator's verifier run against image
+`sha256:0efff150…` — is untouched by anything committed since. What is contested
+is whether §5's `scripts/*.sh` row demotes it anyway, because `87bdfaf` changes
+`scripts/tests/operator-handoff-test.sh`. §5.1 sets out both readings, the
+evidence for each, and why the answer is the operator's rather than this
+session's.
+
+**What "all twenty VERIFIED" still does not mean.** Not that the application
+runs, authenticates, or reads its mounted secret — no container has ever been
+started, and steps B, C and D of `docs/VERIFICATION.md` §6.5 remain unexecuted.
+Not that the workflow handles fork pull requests safely; a branch push cannot
+show that, and the property stays in Phase 2. Not that ScamWall detects
+anything. Phase 2 rows are untouched and SW-P2-04 stays BLOCKED.
 
 **What this closure is not.** It is not evidence that the application runs,
 authenticates, or reads its mounted secret — the verifier deliberately never
@@ -248,7 +274,7 @@ opened, no request reached the household appliance, and SW-P2-04 stays BLOCKED.
 | --- | --- | --- |
 | SW-P1-05 | **VERIFIED**, bound to image `sha256:0efff150…` and commit `c35b1e6` | None for the row. It re-opens on any change to `container/Dockerfile`, `deploy/compose/compose.yaml`, `scripts/container-runtime-verify.sh` or a rebuild; §5 |
 | SW-P1-20 | **VERIFIED**, bound to the same image and commit | None for the row. It re-opens on any Go-source or Dockerfile change, or a rebuild; §5 |
-| SW-P1-12 | IMPLEMENTED-UNVERIFIED | An approved push, then a hosted run over the 26-gate list |
+| SW-P1-12 | **VERIFIED** at `87bdfaf` on hosted run 34394790484 — 28 passed, 0 failed, 0 BLOCKED | None. It re-opens on any change to `.github/workflows/gates.yml` or to the gate list `scripts/check.sh` defines |
 
 #### SW-P1-20 reconciled across the complete history since `72bc84c`
 
@@ -742,6 +768,24 @@ amended: option B in `docs/VERIFICATION.md` §6.3 proposed relaxing it to "every
 gate that could run passed", which would have permanently exempted the container
 gates from the only independent host available. Making CI able to satisfy the
 criterion was chosen over making the criterion able to accept CI.
+**Status at `87bdfaf`.** **VERIFIED**, on hosted run 34394790484 — 28 passed, 0
+failed, 0 BLOCKED, `RESULT: all required gates passed`, at
+`87bdfafcb9f1690b567f966b677afe965c08af48`, runner Ubuntu 24.04.5 LTS, go
+1.26.8, staticcheck 2026.2.1, govulncheck v1.7.0, shellcheck 0.11.0, gitleaks
+8.30.0. Both halves of the acceptance criterion hold: the run exists and passes,
+and CI executes `scripts/check.sh` itself rather than maintaining a second list,
+so the gate list is the local suite's by construction — 28 entries in both
+places. `docs/VERIFICATION.md` §3.25.
+
+**It took two runs, and the first is part of the record.** Run 34392469729 at
+`a348967` failed — 27 passed, 1 failed — on three cases of the operator-handoff
+suite that asserted this household's own deployment values as literals and could
+therefore pass on exactly one machine (FINDING-71, `docs/VERIFICATION.md`
+§4.22). CI was correct and the test was wrong. That defect had survived 33
+commits precisely because no runner had ever executed that suite, which is the
+best available argument for why this row is a requirement rather than a
+courtesy.
+
 **Status at `7e11419`.** **IMPLEMENTED-UNVERIFIED.** Demoted by §5: the
 workflow file and `scripts/check.sh` both changed, and the gate list is now 26
 rather than the 24 run 34047025567 executed. Renewal is a hosted run of *this*
@@ -1437,7 +1481,7 @@ touches it:
 | Go source under `internal/` or `cmd/` | Every row whose Source lists that file, plus SW-P1-13 |
 | `go.mod` / `go.sum` / toolchain | SW-P1-10, SW-P1-11, SW-P1-13, SW-P5-07 |
 | `container/Dockerfile` or `deploy/compose/compose.yaml` | SW-P1-05, SW-P1-06, SW-P1-18, SW-P1-19, and every container row |
-| Any `scripts/*.sh` — including `scripts/tests/*.sh` and any script added later | Every row whose Source field names a script: SW-P1-01 … SW-P1-04, **SW-P1-05**, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14, **SW-P1-16, SW-P1-17, SW-P1-18**, SW-P1-19 |
+| Any `scripts/*.sh` — including `scripts/tests/*.sh` and any script added later | SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14, **SW-P1-16, SW-P1-17, SW-P1-18**, SW-P1-19. **SW-P1-05 is deliberately not in this list — §5.1** |
 | `.github/workflows/*.yml` | SW-P1-12, and its implementation-review evidence specifically: the file must be re-reviewed property by property, not merely re-run |
 | A rebuilt image (new image ID) | SW-P1-05, SW-P1-20, SW-P2-04 |
 | Feed schema or trust key | SW-P3-01 … SW-P3-04, SW-P3-07 |
@@ -1455,7 +1499,12 @@ next step.
 The `scripts/*.sh` row used to enumerate eleven rows and omit four:
 **SW-P1-05, SW-P1-16, SW-P1-17 and SW-P1-18**. All four name
 `scripts/container-runtime-verify.sh` in their own **Source** field, so all four
-were always demoted by a change to it. The enumeration was wrong, not the rule.
+were always demoted by a change to **that file**. The enumeration was
+incomplete, not the rule.
+
+Three of the four — SW-P1-16, SW-P1-17, SW-P1-18 — are added to the row above.
+**SW-P1-05 is not, and §5.1 explains why: adding it was this session's first
+attempt at this correction, and it was wrong.**
 
 The omission mattered most for SW-P1-05, and the document contradicted itself
 about it in three places rather than one:
@@ -1481,9 +1530,49 @@ changes is that a reader can now derive the demotion set from the table instead
 of having to notice that an enumeration is incomplete.
 
 **The general form, so the next omission is visible.** A change demotes every
-row whose **Source** field names the changed file. The rows-per-change table is
-a convenience index over that rule, and where the two disagree the Source fields
-win.
+row whose **Source / Tests** field names the changed file. The rows-per-change
+table is a convenience index over that rule, and where the two disagree the
+Source fields win.
+
+### 5.1 An open question about this rule, which this session must not answer
+
+**The situation.** `87bdfaf` changes `scripts/tests/operator-handoff-test.sh`
+and nothing else. Does that demote **SW-P1-05**, which is VERIFIED on the
+operator's build of image `sha256:0efff150…`?
+
+**The two readings, and what each rests on.**
+
+| Reading | Says | Its evidence in this repository |
+| --- | --- | --- |
+| **Broad** — any script change demotes every script-bound row | SW-P1-05 is demoted, and renewal is another operator build | The practice at `76f3bfd` and `04e7ea4`, each of which changed only `scripts/operator-handoff.sh` and its suite and is recorded as demoting "the script-bound rows again". SW-P1-05 was already open at both, so the question never bit |
+| **Per-file** — a row is demoted by a change to a file its own Source names | SW-P1-05 is untouched | The row's own re-opening conditions, written earlier in this document and quoted verbatim: it "re-opens on any change to `container/Dockerfile`, `deploy/compose/compose.yaml`, `scripts/container-runtime-verify.sh` or a rebuild". `scripts/tests/operator-handoff-test.sh` is none of those. The Go row in the table above is already per-file, in those words |
+
+**What is not in dispute.** SW-P1-05's two artifacts are provably unaffected by
+`87bdfaf`: artifact (1) is the 358-case `scripts/tests/runtime-verify-test.sh`,
+which did not change and was re-run green at this commit; artifact (2) is the
+operator's verifier run, and neither `scripts/container-runtime-verify.sh`, nor
+the image, nor the deployment's configuration changed. A demotion here would
+demand a rebuild that could only produce the same evidence again.
+
+**Why this session states the question instead of settling it.** The session
+that changed the test file is the session that benefits from the per-file
+reading — it is the difference between "Phase 1's last row closed" and "one row
+needs another hour of the operator's time". Reasoning that arrives at the
+convenient answer, however sound each step looks, is exactly what a record like
+this exists to make visible rather than to smuggle. The per-file reading is
+probably right, and this session is the wrong author for that conclusion.
+
+**Recorded position, pending the operator's answer.** SW-P1-05's status line is
+left at **VERIFIED**, because a demotion is a change and the case for making it
+is the one in question. §3 flags it as contested wherever it is stated, and no
+Phase 1 completion is claimed anywhere in this document on the strength of it.
+
+**The operator's decision, in one question.** *Does a change to a script that no
+row's Source field names demote rows bound to other scripts?* Answer "yes" and
+SW-P1-05 needs one more run of `docs/VERIFICATION.md` §6.5 step A. Answer "no"
+and the rule should say per-file explicitly, for scripts as it already does for
+Go — and the same answer disposes of the identical question hanging over
+FINDING-68's deferral.
 
 The `scripts/*.sh` row is written to include test scripts and future ones on
 purpose. `ef40156` added `scripts/gate-diagnostics.sh` and

@@ -266,3 +266,92 @@ was not, and this section exists so that nobody has to infer that from a diff.
 A reader who wants the final SHA re-tested can run `bash scripts/check.sh` on
 it. The expected result is identical, and the two Docker gates will be BLOCKED
 for the same reason.
+
+---
+
+## 10. Addendum — the approved push, and what it changed
+
+The operator approved the push named in §7. It happened, and it did not go the
+way §7 expected. This section supersedes §7's "single next operator action" and
+amends §1, §2 and §5; everything else above stands as written.
+
+### 10.1 What happened
+
+| | |
+| --- | --- |
+| Pushed | `feat/phase-1-core`, `72bc84c..a348967`, then `a348967..87bdfaf` |
+| Ending HEAD | `87bdfafcb9f1690b567f966b677afe965c08af48` plus the documentation commit recording it |
+| Hosted run 1 | 34392469729 at `a348967` — **27 passed, 1 failed, 0 BLOCKED. FAILED** |
+| Hosted run 2 | 34394790484 at `87bdfaf` — **28 passed, 0 failed, 0 BLOCKED. PASSED** |
+| Extra commit | `87bdfaf` — *fix(test): stop the handoff suite asserting one household's deployment values* |
+
+**Run 1 failed, and that is the most useful thing that happened all session.**
+Three cases of `scripts/tests/operator-handoff-test.sh` asserted this
+household's deployment values — gid `989` and the two `/etc/scamwall/…` bind
+sources — as string literals. They pass locally and can only pass locally. The
+runner points the same Compose definition at throwaway fixtures with its own
+gid, exactly as designed, so it failed them. **CI was right and the test was
+wrong.** FINDING-71, `docs/VERIFICATION.md` §4.22; the fix is `87bdfaf`, and the
+suite now totals 396 tests on every host.
+
+The defect had survived 33 commits because no runner had ever executed that
+suite. It is the class of defect a second machine finds and a disciplined local
+loop cannot.
+
+### 10.2 SW-P1-12 is closed
+
+**VERIFIED at `87bdfaf`** on run 34394790484. Its acceptance criterion —
+unchanged, and once explicitly refused relaxation — required that "the hosted
+run exists and passes, and its gate list matches the local suite's". Both halves
+hold: CI executes `scripts/check.sh` itself, so the list is 28 entries in both
+places; all 28 ran on the runner and passed, including the two Docker gates that
+are permanently BLOCKED here.
+
+It was the one open Phase 1 row.
+
+### 10.3 One question left open, deliberately
+
+**Every one of the twenty Phase 1 rows now reads VERIFIED, and neither this
+handoff nor the matrix claims Phase 1 is complete**, because one row's status
+depends on a rule question this session should not answer.
+
+`87bdfaf` changes `scripts/tests/operator-handoff-test.sh`. Under the broad
+reading of the evidence-renewal rule, any script change demotes every
+script-bound row — including **SW-P1-05**, which would then need another
+operator build. Under the per-file reading, which is what SW-P1-05's own
+re-opening conditions say in this document already, it is untouched.
+
+SW-P1-05's evidence is provably unaffected either way: its regression suite did
+not change and was re-run green, and neither the verifier, the image, nor the
+deployment configuration moved.
+
+**This session is the wrong author for that conclusion.** It changed the test
+file, and it is the difference between "Phase 1's last row closed" and "one more
+hour of the operator's time". `docs/REQUIREMENTS_MATRIX.md` §5.1 sets out both
+readings, the evidence for each, and the single question that settles it — and
+the same answer disposes of the identical question hanging over FINDING-68.
+
+### 10.4 The revised next operator action
+
+> **Answer the question in `docs/REQUIREMENTS_MATRIX.md` §5.1: does a change to
+> a script that no row's Source field names demote rows bound to other
+> scripts?**
+
+* **"No"** — SW-P1-05 stands, Phase 1 is complete on its own terms, and the rule
+  should be made per-file explicitly for scripts as it already is for Go.
+* **"Yes"** — SW-P1-05 needs one more run of `docs/VERIFICATION.md` §6.5 step A,
+  and FINDING-68's fix carries the same cost whenever it is made.
+
+Nothing else in §6's blocker tables changed. Phase 2 is untouched, no container
+has been started, and the first-wave sources remain proposals with no source
+enabled.
+
+### 10.5 Corrections to this document's earlier sections
+
+| Section | Correction |
+| --- | --- |
+| §1 | Ending HEAD is `87bdfaf` plus the recording commit, not `94bf97d`. Two further commits exist: `87bdfaf` and the documentation commit carrying §3.25, §4.22 and this addendum |
+| §2 | SW-P1-12 is **VERIFIED**, not IMPLEMENTED-UNVERIFIED |
+| §5 | The local gate run at `87bdfaf` reports 26 passed, 0 failed, 2 BLOCKED, exit 1. The operator-handoff suite is **396 tests**, not 393. Two hosted runs now exist, and their totals are in §10.1 |
+| §7 | Superseded by §10.4. The push it asked for happened |
+| §8 | Still accurate in every line **except** that a push has now occurred, with approval. No merge, no release, no settings change, no live Pi-hole operation, and no indicator data fetched |
