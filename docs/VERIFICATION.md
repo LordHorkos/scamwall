@@ -2027,6 +2027,153 @@ temporary mutations of `cmd/scamwall/main.go` used to test discrimination were
 reverted in the working tree and never committed; `git status` was clean before
 the gate run above.
 
+### 3.20 ORDER 2, architecture half — the registry schema made enforceable
+
+> **STATUS: ARCHITECTURE HALF IMPLEMENTED. CATALOG HALF BLOCKED. ORDER 2 NOT
+> ACCEPTED.**
+>
+> ORDER 2 is *"validate the source catalog and architecture"*. The architecture
+> is now enforced rather than described. **No source has been imported,
+> researched, contacted or qualified**, no provider documentation has been
+> read, nothing has been fetched, and the registry holds zero records. ORDER 1
+> also remains unaccepted, so ORDER 2's dependent acceptance has not opened;
+> what proceeded here is its independent work, which §3.2 of the implementation
+> plan permits while an external blocker stands.
+
+#### The blocker, stated first because it bounds everything else
+
+`docs/SOURCE_REGISTRY.md` said the 85-entry catalog was *"present in the order
+text"* and *"does not need re-supplying"*. That was true of the session holding
+the order text. It is not true of this repository.
+
+Searched: the tracked tree, untracked files, ignored files, and the full commit
+history across all branches. The catalog is in none of them.
+
+It was not reconstructed. Producing 85 provider names, licence terms and access
+states from recollection would be the precise failure this registry exists to
+prevent — a guess laundered into a record — and §3 of that document forbids it
+in those words. The registry therefore ships **empty**, and `docs/SOURCE_REGISTRY.md`
+§1 and §5 now record the catalog's absence as a blocker rather than repeating
+the claim that it is available.
+
+#### What was built
+
+| | |
+| --- | --- |
+| **Candidate** | `6bb33bfe78374d41738416af78c76db131e6151d` — *feat(registry): enforce the source-registry schema instead of describing it* |
+| Parent | `0da91d4f74d13c59cc0f6c74c8618c2e85422434` |
+| Branch | `feat/phase-1-core`, ahead of `origin/feat/phase-1-core`; **not pushed** |
+| Files | `internal/sourceregistry/registry.go`, `internal/sourceregistry/registry_test.go`, `docs/source-registry.json`, `docs/SOURCE_REGISTRY.md` |
+
+`internal/sourceregistry` loads `docs/source-registry.json` and refuses a record
+that breaks the rules the prose states. The full list of what it enforces, and
+the longer list of what it cannot, is `docs/SOURCE_REGISTRY.md` §6. The two
+points worth repeating here:
+
+* **An absent field is refused even though `unknown` is accepted.** They are
+  different claims, and a decoded Go struct cannot tell them apart — a missing
+  string and a string present-and-empty are the same value. The parser
+  therefore decodes twice, once to see which keys the file carries and once to
+  read them. A refactor that decoded once would silently delete the
+  distinction, so it has its own test saying why.
+* **The validator checks that a claim is well-formed, never that it is true.**
+  `commercial_use: permitted` is checked for membership of a vocabulary;
+  whether the licence says so is a human reading a human document. This is
+  sharpest for independence: §2 offers `aggregation_dependencies` as the thing
+  that "stops three feeds being counted as three independent sources", and what
+  the validator actually does is refuse a dependency on a record that does not
+  exist. It cannot discover a shared upstream nobody recorded. Independence
+  stays a research finding, not a computed property.
+
+Two schema gaps surfaced by implementing the prose — §4.17 — and both are
+recorded in the schema table itself so the reason a field exists travels with
+the field.
+
+#### Two decisions taken, and why
+
+**No new gate in `scripts/check.sh`.** `go test -race ./...` is already a
+required gate and it validates the shipped registry on every run. A gate that
+runs the same Go test a second time makes the suite slower without making it
+stricter. The registry is protected; the protection is just not given its own
+line in the output.
+
+**`docs/source-registry.json`, not `data/source-registry.json`.** The first
+attempt put it in `data/`, which `.gitignore` excludes as runtime state — so
+the file would have been silently absent from the repository, which is the
+failure the ignore rule's own header warns about for a different reason. The
+options were a narrow `!` exception in a deny-by-default block that exists for
+credential safety, or a path that is not runtime state. The second is correct:
+the registry is a document of record and belongs beside the prose defining it.
+
+#### Discrimination
+
+A record with five defects was put into the shipped registry and the gate
+re-run. All five were reported in one pass, by path, and the tree was restored:
+
+```
+sources[0].aggregation_dependencies[0]: names "src-0002", which is not a
+    source_id in this registry
+sources[0].enabled: is true while commercial_use is "unknown"; a source is not
+    enabled on a right that is prohibited or unknown
+sources[0].verified_on: is 2027-01-01, which is in the future — documentation
+    cannot have been read on a day that has not happened
+sources[0] (src-0001) is enabled; no source has been qualified
+sources[0] (src-0001) claims verified-available; no provider documentation has
+    been read
+```
+
+The last two come from a test that exists only to pin the current state: the
+shipped registry must enable nothing and claim no `verified-available`
+disposition. When the catalog arrives and a source is genuinely qualified, that
+test is the one that must be deliberately changed, which is the point of
+writing it.
+
+#### Suites
+
+| Suite | Result | Change |
+| --- | --- | --- |
+| `go test -race -count=1 ./...` | all **9** packages ok | was 8; `internal/sourceregistry` is new, 80 cases |
+| `staticcheck ./...` | clean | — |
+| `gofmt -l .` | clean | — |
+| `shellcheck --severity=style` over the 18 tracked scripts | clean | no script changed |
+| `scripts/tests/operator-handoff-test.sh` | **393**, 0 failed | unchanged |
+| `scripts/tests/runtime-verify-test.sh` | **358**, 0 failed | unchanged |
+| `scripts/tests/gate-diagnostics-test.sh` | **73**, 0 failed | unchanged |
+| `scripts/tests/entrypoint-mode-test.sh` | **58**, 0 failed | unchanged |
+
+#### The gate suite, run directly on the clean committed tree
+
+Not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own. Nothing was edited between the run starting and finishing —
+`git status` was clean at both ends, which §3.19 records as a mistake worth not
+repeating.
+
+```
+$ git status --porcelain          # (no output — the tree is clean at 6bb33bf)
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+Zero failures. `CHECK exit=1` is correct and agrees with the printed verdict:
+the two BLOCKED gates are the Docker privilege boundary, and a BLOCKED required
+gate is not a pass. The gate list is unchanged at 28 items — this session added
+no gate, deliberately.
+
+
+#### What this session did NOT do
+
+No provider was contacted. No provider documentation was read or fetched. No
+account was created, no key requested, no commercial discussion begun. No feed,
+API or dataset was fetched in whole or in part, and nothing was submitted to
+any third party. Nothing was pushed, no pull request opened, `main` untouched.
+No Docker command reached a daemon, no `sudo` was used, the live Pi-hole was
+not contacted, and **steps A, B, C and D of §6.5 remain unexecuted**.
+
+The registry enables nothing, and a test fails if it ever does without that
+being a deliberate change.
+
 ---
 
 
@@ -3958,6 +4105,68 @@ daemon accepts the arguments the program builds, that `docker create` produces
 the container those arguments describe, or that the deployment's paths exist
 and are mountable. Only steps A to D can establish those, and they remain
 pending operator execution.
+
+### 4.17 FINDING-61 and FINDING-62 — the source-registry schema, found by implementing it
+
+Two gaps in `docs/SOURCE_REGISTRY.md`, both surfaced by writing the validator
+that enforces it. Neither is a defect in code that existed; both are places
+where the prose asked for something the schema had no room to hold, which is
+the failure mode a schema written without an implementation tends to have.
+
+#### FINDING-61 — §3 required a reason, and §2 provided nowhere to record it
+
+§3 closes with:
+
+> A source whose documentation cannot be read stays `unresolved` with the
+> reason recorded.
+
+The 26-field record schema in §2 has no field for a reason. Every field it does
+have is about the provider — its name, its documentation, its licence, its
+cadence — and none of them is about *this registry's own state of knowledge*.
+So the rule as written could not be complied with: the only places to put "the
+provider's documentation site returned 403" were fields that mean something
+else, and putting it in one of those would have made a false statement about
+the provider in order to record a true one about the research.
+
+**Fixed** by adding `disposition_reason`, required on every record like all the
+others, and validated as non-empty. It carries why the record holds the
+disposition it holds — including, for the common case, "not yet researched".
+
+The gap matters more than it looks. `unresolved` is the default and the state
+of all 85 catalog entries; a registry that cannot distinguish *nobody has
+looked* from *somebody looked and was refused* loses the difference between
+work not started and work that hit a wall.
+
+#### FINDING-62 — "never reused" cannot be checked against the current file
+
+§2 says of `source_id`:
+
+> stable internal identifier. Never reused, never renumbered
+
+A validator that sees only the current registry can enforce uniqueness *within
+that file*, and that is all. An id deleted in one commit is free for the taking
+in the next, and the rule would be silently violated by the ordinary act of
+removing a record and adding another — which is exactly when it matters, because
+anything that referenced the old id now points at a different source.
+
+**Fixed** by adding a file-level `retired_source_ids` array. Retiring an id is
+what turns the rule from an instruction into something enforceable: the
+validator refuses a record whose `source_id` appears there.
+
+**Stated limit.** This makes the rule checkable, not automatic. Nothing forces
+an author who deletes a record to retire its id, and the validator cannot know
+about an id that was removed without being retired — it never saw it. What the
+mechanism provides is a place to record the decision and a check that honours
+it; the discipline of using it remains a human one, and is now at least
+possible to follow.
+
+#### Why both are recorded rather than quietly patched
+
+Each is a change to a schema that another document, and eventually 85 records,
+depend on. A field added to `docs/SOURCE_REGISTRY.md` §2 without a note reads,
+to the next person, as though it had always been there and had always been
+thought about. Both entries in the schema table now carry the finding number,
+so the reason the field exists travels with the field.
 
 ---
 

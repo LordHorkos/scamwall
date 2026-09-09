@@ -245,6 +245,28 @@ fourth set is about that lifecycle itself.
 performing the renewal. SW-P1-05 closes when an operator runs step A against
 this deployment and returns its result, and that has not happened.
 
+**ORDER 2, architecture half: implemented. Catalog half: blocked. Not
+accepted.** The registry schema is enforced rather than described —
+`internal/sourceregistry` refuses a record that breaks the rules
+`docs/SOURCE_REGISTRY.md` states, and a required gate validates the shipped
+file on every run. Implementing the prose surfaced two gaps in it, FINDING-61
+and FINDING-62, recorded in the schema table itself.
+
+**No source has been researched, and none can be.** The 85-entry catalog was
+supplied in the ORDER 2 text and is not in this repository — tracked tree,
+untracked and ignored files, and the full history across all branches were
+searched. It was not reconstructed from recollection, because a guessed
+provider name or licence term laundered into a provenance record is the exact
+failure that registry exists to prevent. The registry ships with zero records
+and enables nothing, and a test fails if that ever changes without the change
+being deliberate. `docs/VERIFICATION.md` §3.20, §4.17.
+
+This was ORDER 2's *independent* work, which §2.2's rule on working around an
+external blocker permits while ORDER 1's acceptance is still pending. It does
+not open ORDER 2's dependent acceptance, and it does not open Phase 3 for any
+source: Phase 3 does not open for a source with no disposition, and every
+catalog entry is still implicitly `unresolved`.
+
 ### 3.2 Approach for the outstanding items
 
 **ShellCheck (SW-P1-08).** Run over every tracked shell script at
