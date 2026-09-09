@@ -1,9 +1,19 @@
-# ScamWall Source Registry — structure
+# ScamWall Source Registry — structure and enforcement
 
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-**Status: STRUCTURE ONLY. No source has been imported, researched, contacted,
-or qualified. Nothing here is evidence about any provider.**
+**Status: STRUCTURE AND ENFORCEMENT ONLY. No source has been imported,
+researched, contacted, or qualified. Nothing here is evidence about any
+provider.**
+
+The schema below is no longer only prose. `internal/sourceregistry` loads
+`docs/source-registry.json` and refuses a record that breaks the rules this
+file states, and `go test -race ./...` — a required gate — validates the
+shipped file on every run. What that does and does not establish is §6.
+
+`docs/source-registry.json` currently holds **zero records**. That is the
+honest state, not a loading failure: every catalog entry is implicitly
+`unresolved`.
 
 ORDER 1 directs that this structure be prepared alongside the operator-safety
 work, and that bulk collection and commercial integration wait for the
@@ -15,8 +25,16 @@ registry it describes is **empty**.
 ## 1. What this is for
 
 The catalog supplied with the orders lists 85 entries and a proposed ingestion
-order. **The complete catalog is present in the order text**, entries 1–85 plus
-the two recommended waves, so ORDER 2 does not need it re-supplied.
+order. It was present in the ORDER 2 text.
+
+**It is not present in this repository, and that is now a blocker.** The
+sentence this paragraph replaces said the catalog "does not need re-supplying",
+which was true of the session that had the order text in front of it and is not
+true of any later one. The tracked tree, the untracked and ignored files, and
+the full history across all branches were searched; the catalog is in none of
+them. Until it is re-supplied, no record can be written, because the
+alternative is reconstructing provider names and licence terms from memory —
+the precise failure this registry exists to prevent.
 
 What the catalog is: a list of candidates and the requesting party's priority.
 What it is not: a statement of any provider's current capabilities, licence
@@ -57,11 +75,18 @@ and is not the same as absent.
 | `derived_data_restrictions` | what the licence says about data derived from it |
 | `upstream_sources` | the sources it aggregates, where documented |
 | `aggregation_dependencies` | known shared upstreams with other registry entries. This is what stops three feeds being counted as three independent sources |
-| `access_status` | see §3 |
+| `access_status` | the disposition. Exactly one, from the vocabulary in §3 |
+| `disposition_reason` | why the record carries that disposition. **Added by the implementation — FINDING-61.** §3 requires that a source whose documentation cannot be read "stays `unresolved` with the reason recorded", and §2 as written provided nowhere to record it |
 | `privacy_implications` | what personal data it carries, and whose |
 | `intended_permitted_use` | the use this project intends, checked against the fields above |
 | `operational_cost` | only where officially published; otherwise `unknown` |
 | `enabled` | boolean. Defaults to false and stays false until qualification completes |
+
+One field belongs to the file rather than to a record:
+
+| Field | Meaning |
+| --- | --- |
+| `retired_source_ids` | identifiers that were used once and must never be used again. **Added by the implementation — FINDING-62.** §2 requires that a `source_id` is "never reused, never renumbered", and that cannot be checked against the current file alone: an id deleted in one commit is free for the taking in the next. Retiring it is what makes the rule enforceable |
 
 **Technical availability and permission to use are different fields and are
 never collapsed.** A feed that downloads without authentication may still
@@ -113,6 +138,65 @@ reason recorded.
 * No feed, API or dataset has been fetched, in whole or in part.
 * No commercial discussion has begun.
 * No source has a disposition other than the implicit `unresolved`.
+* The 85-entry catalog is **not in this repository** and must be re-supplied
+  before any record can be written — §1.
 
 ORDER 2 opens when ORDER 1's acceptance is met and the operator has read its
-result. Until then this file describes a shape and holds no data.
+result. ORDER 1's acceptance is still pending, so what has been built here is
+the architecture half only, which the implementation plan permits while the
+dependent half waits on an external blocker. This file now describes a shape,
+enforces it, and holds no data.
+
+---
+
+## 6. What the validator enforces, and what it cannot
+
+`internal/sourceregistry` is the machine-readable half of this file.
+`docs/source-registry.json` is the registry. `go test -race ./...` — already a
+required gate — validates the shipped file on every run, so a record that
+breaks a rule below cannot be committed without the gate going red. No new gate
+was added to `scripts/check.sh`: it would have run the same Go test a second
+time, and a gate that duplicates another gate makes the suite slower without
+making it stricter.
+
+### Enforced
+
+| Rule | Where it comes from |
+| --- | --- |
+| Every field is present. **An absent key is refused even though `unknown` is accepted**, because they are different claims and a decoded struct cannot tell them apart | §2 |
+| A misspelled field name is refused, by path, rather than silently dropped | §2 |
+| An empty string is refused wherever `unknown` is the available answer, so that not knowing is stated rather than implied | §2 |
+| `kind`, `authentication`, the three rights fields, `attribution_required` and `access_status` are closed vocabularies | §2, §3 |
+| `source_id` is unique within the file, and cannot take an identifier listed in `retired_source_ids` | §2 |
+| Two records cannot claim the same `catalog_ref` | §2 |
+| A record whose disposition is anything but `unresolved` must carry a real, non-future `verified_on` and an `https` documentation URL | §2 — *"a record with no date states nothing current"* |
+| `unresolved` may leave both `unknown`, because it means nobody has looked | §3 |
+| `enabled: true` requires `access_status: verified-available` **and** `commercial_use`, `caching` and `redistribution` each `permitted` or `conditional` — never `prohibited`, never `unknown` | §1 |
+| `aggregation_dependencies` must name records that exist, and not the record's own id | §2 |
+| The shipped registry enables nothing and claims no `verified-available` disposition | ORDER 2 has qualified no source |
+
+### Not enforced, and not enforceable here
+
+* **Whether any field is true.** `commercial_use: permitted` is checked to be a
+  member of the vocabulary. Whether the provider's licence actually permits
+  commercial use is a human reading a human document, and no validator can do
+  it. The same holds for every other field a person types.
+* **Whether `official_documentation` belongs to the provider.** It is checked to
+  be an absolute `https` URL. Nothing checks whose.
+* **Whether `upstream_sources` is complete**, and therefore **whether two
+  sources are independent**. `aggregation_dependencies` is checked for dangling
+  references; it cannot discover a shared upstream nobody recorded. Independence
+  remains a research finding, not a computed property. This is the limit that
+  matters most, because §2 offers that field as the thing that "stops three
+  feeds being counted as three independent sources" — it stops three *recorded*
+  dependencies being ignored, which is a smaller claim.
+* **Whether a `conditional` right's condition is met.** `conditional` is
+  accepted for an enabled source deliberately: the condition may well be
+  satisfied, and where that judgement lives is `derived_data_restrictions` and
+  `intended_permitted_use`. The validator checks that the judgement was made
+  against a *stated* right, not that it was made correctly.
+
+So the validator makes a false record harder to write **by accident**. It does
+not make one impossible to write **on purpose**, and it is not evidence about
+any provider.
+
