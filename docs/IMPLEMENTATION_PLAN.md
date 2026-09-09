@@ -94,11 +94,14 @@ such.
 | **10** | Read-only pilot and controlled enforcement | Phase 5, §7 **and** Phase 6, §8 | **Merges two phases into one order, and does not merge their gates.** The order preserves the separation: the pilot must be accepted before enforcement is implemented, enforcement is implemented only in disposable environments, and live household enforcement still needs its own approval of a concrete deployment and rollback plan |
 
 **What the crosswalk does not do.** It does not renumber a requirement, reopen
-a closed row, or move an item's evidence. `SW-P1-20` is `VERIFIED` at `72bc84c`
-and stays so; `SW-P1-05` is `IMPLEMENTED-UNVERIFIED` and stays so until an
-operator runs §6.5 step A. An order that widens a phase widens what that phase
-must eventually prove — it does not retroactively invalidate what an earlier
-commit's evidence established about a narrower claim.
+a closed row, or move an item's evidence. When this was written, `SW-P1-20` was
+`VERIFIED` at `72bc84c` and `SW-P1-05` was `IMPLEMENTED-UNVERIFIED` pending an
+operator run of §6.5 step A. That run has since happened: both rows are now
+`VERIFIED` at `c35b1e6`, bound to image `sha256:0efff150…`
+(`docs/VERIFICATION.md` §3.22). The point stands unchanged — a row moves on
+evidence, not on a crosswalk. An order that widens a phase widens what that
+phase must eventually prove; it does not retroactively invalidate what an
+earlier commit's evidence established about a narrower claim.
 
 **Phase 2 is untouched by the renumbering.** Order 1 finishes Phase 1's
 operator foundation and Order 10 returns to the pilot; the verified read-only
@@ -119,10 +122,43 @@ around it — ShellCheck, an independent secret detector, content-based
 vulnerability handling, CI — plus the findings this session's own inspection
 raised.
 
-**Status now, at `b6e70f4`.** Nineteen of twenty verified — the requirement set
+**Status at `b6e70f4`, retained for the history.** Nineteen of twenty verified — the requirement set
 grew from fifteen to twenty as the work exposed classes that had no requirement
 covering them. `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative; this paragraph
 is a summary and defers to it wherever the two differ.
+
+**Status now, at `c35b1e6`. Nineteen of twenty verified; the phase does not
+close.** The operator ran `docs/VERIFICATION.md` §6.5 — preflight, step A and
+close-out — against `c35b1e601f2543cb666d34888c61b08406446106`, producing image
+`sha256:0efff1508ab6479fab4c2b09d2900844d8e957ed726cd6d84bbf4132a9493f06`.
+Preflight 9 passed, step A 22 passed, the runtime verifier 95 passed / 0 failed
+/ 0 blocked / 0 cleanup problems, close-out 7 passed; every step exit 0.
+**SW-P1-05 and SW-P1-20 are both VERIFIED at that commit and that image**, and
+for the first time since `b6b1769` they rest on the same artifact.
+`docs/VERIFICATION.md` §3.22; `docs/REQUIREMENTS_MATRIX.md` §3 is authoritative.
+
+**The open row is now SW-P1-12, and it is the only one.** No hosted run has seen
+any commit since `72bc84c`; the gate list this tree runs is 26, and run
+34047025567 executed 24. An operator build says nothing about a runner, so this
+evidence does not touch it. Renewal is an approved push followed by a hosted
+run. One open required row is an open phase — that principle has not moved, only
+the identity of the row it applies to.
+
+**What closing these two rows does not mean.** The verifier never starts the
+container, so nothing here says the application runs, authenticates, or reads
+its mounted secret. Steps B, C and D of §6.5 were not run. No credential was
+opened — the close-out compared the deployment secret's owner, group, mode, size
+and modification time against a baseline recorded before the handoff began, and
+`--verify-secret-integrity` was not used — and no request reached the household
+Pi-hole. Phase 2 is unchanged and SW-P2-04 stays BLOCKED.
+
+**A defect the run's own output exposed.** The verifier prints a note stating
+that the password file's owner, group and mode are things it "does not inspect
+and does not claim", in the same transcript as the FINDING-29 verdict that
+inspects exactly those — and which step A requires before it will report a pass.
+It is a wording defect, recorded as FINDING-68 with the tested code deliberately
+unchanged: editing emitted text is a `scripts/*.sh` change that would demote the
+rows this run has just renewed. `docs/VERIFICATION.md` §4.19.
 
 **SW-P1-05 and SW-P1-20 were closed and re-opened together; only SW-P1-20 has
 closed again.** Both closed on the operator's run at `b6b1769` against image
@@ -141,7 +177,8 @@ rule: CI's deployment differs from the operator's, but the ELF assertion runs in
 the build stage and reads no password, CA, mount or group, so no deployment
 difference can bear on it (`docs/VERIFICATION.md` §3.12).
 
-**SW-P1-05 remains `IMPLEMENTED-UNVERIFIED`,** and what is missing is nameable:
+**SW-P1-05 remained `IMPLEMENTED-UNVERIFIED` at `b6e70f4`** — closed since, at
+`c35b1e6`; see the block above. What was missing was nameable:
 four assertions that depend on the operator's own configuration — the
 prohibited-path rule over the secret source, the host-side regular-file check on
 each approved mount, the password file's world-reachability, and the
@@ -163,7 +200,11 @@ time and they passed, and it diagnosed its own single failure, which turned out
 to be FINDING-27 and FINDING-28 — both defects in this session's work. The third
 passed.
 
-**The phase still does not close.** SW-P1-05 is `IMPLEMENTED-UNVERIFIED`, and a
+**The phase did not close at `b6e70f4`, and does not close at `c35b1e6` either —
+for a different reason each time.** At `b6e70f4` SW-P1-05 was
+`IMPLEMENTED-UNVERIFIED`; at `c35b1e6` it is VERIFIED and SW-P1-12 is the open
+row. The paragraph below is the `b6e70f4` reasoning, retained because it is why
+the operator run was needed at all. SW-P1-05 was `IMPLEMENTED-UNVERIFIED`, and a
 passing CI run does not renew it: CI verified a container built on the runner,
 mounting throwaway fixtures, resolving `group_add: 65532` rather than the
 deployment's `989`. It corroborates the deployment's shape on an independent
@@ -201,13 +242,16 @@ verifier itself, found in two review rounds and none by execution (§4.7, §4.8)
 Items 1–7 and 13 were completed in commits `36ed21b` … `2edb95a`. Items 8–12
 and 14–15 were completed in later sessions.
 
-**ORDER 1: implementation complete, acceptance pending.** The code is written,
-tested and committed. The order's acceptance also requires *applicable
-real-runtime evidence*, which needs an operator build (§6.5 step A) and a
-hosted run, neither of which this account can perform. Until both, ORDER 1 is
-not accepted and ORDER 2's dependent acceptance does not open — though ORDER
-2's independent work may proceed, per the orders' own rule on working around
-an external blocker.
+**ORDER 1: implementation complete, acceptance half-evidenced.** The code is
+written, tested and committed. The order's acceptance also requires *applicable
+real-runtime evidence*, which needs an operator build (§6.5 step A) **and** a
+hosted run. **The operator build has been done** — at `c35b1e6`, closing
+SW-P1-05 and SW-P1-20 (`docs/VERIFICATION.md` §3.22). **The hosted run has
+not**, and cannot be performed from this account: no hosted run has seen any
+commit since `72bc84c`, and SW-P1-12 stays IMPLEMENTED-UNVERIFIED. Until both,
+ORDER 1 is not accepted and ORDER 2's dependent acceptance does not open —
+though ORDER 2's independent work may proceed, per the orders' own rule on
+working around an external blocker.
 
 **The ORDER 1 package was reviewed, and the review found three more defects.**
 They were in the step lifecycle ORDER 1 itself introduced: a terminal step
@@ -231,7 +275,7 @@ determinism evidence never covered the Go gate; that gap is recorded against
 the row rather than papered over.
 
 
-**Item 5 is the one that is still open, and ORDER 1 is about its procedure.**
+**Item 5 was the one still open, and ORDER 1 is about its procedure.**
 SW-P1-05 is renewed by `docs/VERIFICATION.md` §6.5 step A, which the operator
 runs. That procedure has now been reviewed four times and has carried defects
 every time: nine at `6a737f3` (§4.13), two at `5af270d` (§4.14), six at
@@ -241,9 +285,22 @@ identities it was produced against, and so that a rebuild or a configuration
 change invalidates downstream acceptance rather than being inherited by it. The
 fourth set is about that lifecycle itself.
 
-**None of that closes item 5.** Correcting the renewal procedure is not
-performing the renewal. SW-P1-05 closes when an operator runs step A against
-this deployment and returns its result, and that has not happened.
+**Item 5 is now closed, and it closed the way this paragraph said it would.**
+Correcting the renewal procedure was never performing the renewal; SW-P1-05
+closed when an operator ran step A against this deployment and returned its
+result. That happened at `c35b1e6`: preflight 9 passed, step A 22 passed,
+verifier 95 passed / 0 failed / 0 blocked / 0 cleanup problems, close-out 7
+passed, image `sha256:0efff150…`. `docs/VERIFICATION.md` §3.22.
+
+**The fifth review of that procedure was running it.** Four reading passes had
+found twenty defects in it without a daemon. This run is the first evidence
+about how it behaves *with* one, and it covers the preflight, step A and the
+close-out only — steps B, C and D were not run and nothing is established about
+them. It also produced one new finding, in the verifier rather than the handoff:
+FINDING-68, a stale note that denies an inspection the same transcript performs.
+It is a wording defect, recorded and deliberately not fixed here, because
+editing the verifier's output is a `scripts/*.sh` change that would demote the
+rows this run has just renewed. `docs/VERIFICATION.md` §4.19.
 
 **ORDER 2, architecture half: implemented. Catalog half: blocked. Not
 accepted.** The registry schema is enforced rather than described —
@@ -393,15 +450,17 @@ Phase 1 is complete when, at one commit:
 * existing deployment resources survive checker execution;
 * remaining evidence gaps are explicitly `BLOCKED`, with operator commands.
 
-Two of these are outstanding at `b6e70f4`, and neither is satisfiable from the
-service account. Both are covered by one operator run:
+Two were outstanding at `b6e70f4` and neither was satisfiable from the service
+account. The operator run at `c35b1e6` covers both. The table is updated rather
+than rewritten, so the sequence stays legible:
 
 | Outstanding | Why | Who |
 | --- | --- | --- |
-| ~~A hosted run that passes~~ | **Done** — run 34047025567 at `72bc84c`, 24 passed / 0 failed / 0 BLOCKED | — |
-| ~~The ELF assertion executes in a real build~~ | **Done** — the same run's `docker build`, uncached, producing `sha256:d7c44949…`. SW-P1-20 | — |
-| Runtime assertions tied to an image ID, against *this* deployment | The `b6b1769` image is superseded by `aa49797`'s changes to the verifier and the compose definition. CI verified `sha256:d7c44949…`, but against a different deployment — throwaway fixtures, `group_add: 65532` — so it corroborates rather than renews. Four assertions remain unevaluated here | Operator — `docs/VERIFICATION.md` §6.1 |
-| Deployment resources survive checker execution | Demonstrated against the scripted fake at `72bc84c` (336 cases) and against a real daemon in CI — where there is no coexisting deployment to survive, which is the whole point of the check. Not re-demonstrated on a host that HAS one since `b6b1769` | Same operator run |
+| ~~A hosted run that passes~~ | **Done for `72bc84c`** — run 34047025567, 24 passed / 0 failed / 0 BLOCKED. It does **not** cover this tree; see the last row | — |
+| ~~The ELF assertion executes in a real build~~ | **Done, twice.** First in the same run's `docker build`, uncached, producing `sha256:d7c44949…`; then, after the Go source moved and demoted the row, in the operator's uncached build of `c35b1e6`, producing `sha256:0efff150…`. SW-P1-20 is bound to the second | — |
+| ~~Runtime assertions tied to an image ID, against *this* deployment~~ | **Done** — §6.5 step A at `c35b1e6`, image `sha256:0efff150…`, 95 passed / 0 failed / 0 blocked / 0 cleanup problems on the deployment's own resolved configuration. The four assertions CI could not evaluate ran here. SW-P1-05 (`docs/VERIFICATION.md` §3.22) | — |
+| ~~Deployment resources survive checker execution~~ | **Done** — re-demonstrated on a host that carries a live deployment: 0 cleanup problems from the verifier, and the close-out's leftover enumeration, searching the identities step A recorded, found none. `docs/VERIFICATION.md` §3.22 | — |
+| A hosted run over the current 26-gate list | The gate list has moved from 24 to 26 and no hosted run has seen any commit since `72bc84c`. Nothing in the operator run bears on this: a local build says nothing about a runner. **This is now the only outstanding item in this list.** SW-P1-12 | Operator — an approved push, then a hosted run |
 
 ### 3.4 Previous-state validation
 
@@ -518,6 +577,294 @@ can still be entirely wrong.
 
 Rerun Phase 1–2 gates. Confirm that no feed or state change broadens the
 Pi-hole permission surface.
+
+---
+
+### 5.4 First-wave source proposal
+
+**Status: a proposal, and nothing more.** No source below is enabled, none
+declares an intended operation in `docs/source-registry.json`, and every one of
+them still needs evidence this project has not got. Selecting from a research
+record is not the same as acting on it.
+
+**What did the selecting.** The registry, and only the registry. Four filters
+were applied in this order, and each one is a field in the record rather than a
+judgement about the provider's reputation:
+
+1. **Is the output DNS-actionable?** The Phase 1 deployment target is a DNS
+   sinkhole. It cannot act on an IP netblock, a certificate fingerprint, a
+   phone number, a wallet address, a message body or an IDS rule. This filter
+   alone removes most of the catalog — 11, 13, 14, 17, 18, 19, 20, 21, 29, 30,
+   32, 33, 36, 40 … 45, 46 … 54, 55, 57, 59, 60, 61, 74, 78, 80, 85 — and it
+   removes them for a structural reason, not a quality one.
+2. **Do the recorded terms permit the operation proposed?** This removes
+   catalog 7 outright: OpenPhish's community Terms of Use name "detection" and
+   "enrichment" among prohibited commercial purposes. It removes catalog 38 and
+   57, which publish no licence at all. It removes catalog 23, whose amalgam
+   includes at least one non-commercial-with-attribution upstream that binds
+   the whole file.
+3. **Is access operationally available without an act this order forbids?**
+   This removes everything at `credentials-required` and
+   `commercial-approval-required` from the *first* wave — catalog 1, 2, 6, 16,
+   25, 26, 28 among them — not because they are unsuitable but because reaching
+   them means registering an account or opening a commercial conversation, and
+   both are operator decisions.
+4. **Is it independent, or is it a copy?** Catalog 9 aggregates four other
+   catalog entries by name, so selecting it would be selecting them badly.
+
+**No priority label played any part**, because none exists: the catalog as
+supplied to this project carried entry numbers and nothing else, and
+`requested_priority` reads `unknown` on all 85 records. Nothing here was chosen
+because it was once described as "VERY HIGH".
+
+#### The four proposed, and what each still needs
+
+**Four, not five.** A fifth would have meant reaching past the filters above.
+
+| | src-0062 · catalog 62 · Scam Sniffer open database |
+| --- | --- |
+| **Operation proposed** | `retrieval` of `blacklist/domains.json` from the public repository, then `local_storage` of a derived manifest. Nothing else. Not `redistribution`, not `derived_output`, not `model_training` |
+| **Access required** | None. A public repository file. No key, no account, no terms to accept |
+| **Unresolved conditions** | Two, both recorded in the registry as unsatisfied. (a) GPL-3.0 requires notices to be preserved, and no mechanism here carries an upstream notice. (b) ScamWall is AGPL-3.0-only and the effect of combining a GPL-3.0 data set into that distribution has not been assessed. The second is a question for the operator, not for an engineer |
+| **Adapter input format** | JSON, described in the repository README as a list of phishing domains. **The file itself has not been read** — fetching indicators is outside the order this research was done under — so §5.5's parser is written against a described shape and must fail closed when the real file differs |
+| **Typed output** | `feed.Manifest` carrying `feed.Record{Action: block, Confidence: medium}` per accepted domain, signed locally and consumed through the existing verified feed path. No new trust path |
+| **Provenance** | Per record: the source_id, the upstream path, the commit or ETag the file was fetched at, and the fetch time. `feed.Record` has no field for this today — §5.5 states the schema change that would be needed, and it is a Phase 3 schema bump, not an adapter detail |
+| **Expiration** | The provider publishes none. Any expiry is therefore **the adapter's invention** and must be labelled as such: a manifest `expires_at` of fetch + 14 days, chosen to be shorter than any plausible staleness tolerance and longer than the fetch interval. A record that outlives its manifest is dropped by the existing loader |
+| **Correction / deletion** | Upstream: not documented. A domain leaves by disappearing from the next build, so removal propagates only as fast as the fetch interval, and there is no retraction signal to act on. Locally: the operator exception list is the remedy, and it must be applied after the feed rather than merged into it |
+| **Overlap with the others** | Low. Web3 and crypto phishing is a distinct population from the general phishing lists at catalog 8 and 22 |
+| **Evidence still needed before enabling** | (1) the actual file, read once, to confirm the shape §5.5 assumes; (2) an operator decision on the AGPL/GPL combination; (3) a measurement of what the documented **seven-day delay** costs — for phishing domains, whose useful life is often hours, a seven-day-old list may be almost entirely spent, and that is a measurement, not a guess in either direction |
+
+| | src-0008 · catalog 8 · Phishing.Database |
+| --- | --- |
+| **Operation proposed** | `retrieval` and `local_storage` of the active-domain list |
+| **Access required** | None. Public repository files |
+| **Unresolved conditions** | One: MIT requires the notice to accompany copies, and nothing here carries it yet. That is satisfiable by building the mechanism — the cleanest rights position of the four |
+| **Adapter input format** | Newline-delimited domain lists. Not read; same caveat as above |
+| **Typed output** | As src-0062 |
+| **Provenance** | As src-0062. The project separates active, inactive and invalid lists, so which list was taken is itself provenance and must be recorded |
+| **Expiration** | None published. The adapter's own, as above |
+| **Correction / deletion** | No documented retraction or appeal process. The project's own retesting moves a domain between lists, which is a reachability judgement rather than a correction |
+| **Overlap with the others** | **Expected to be high with src-0022**, and unmeasurable in advance: neither enumerates its upstreams, so both may be drawing from the same community reports. Treating agreement between them as corroboration would be the aggregator error, and this pairing is where it would happen |
+| **Evidence still needed before enabling** | (1) the file shapes; (2) an overlap measurement against src-0022 before either is treated as adding coverage; (3) `IndependenceClaimable` returns **false** for this record — upstreams are undocumented — so nothing may describe it as an independent source |
+
+| | src-0022 · catalog 22 · HaGeZi, **the TIF list only** |
+| --- | --- |
+| **Operation proposed** | `retrieval` and `local_storage` of the Threat Intelligence Feeds list. **Not the Light/Normal/Pro/Pro++/Ultimate tiers** |
+| **Access required** | None |
+| **Unresolved conditions** | GPL-3.0 notice and copyleft, as for src-0062 |
+| **Adapter input format** | Domain list. Not read |
+| **Typed output** | As above |
+| **Provenance** | Which list and which mirror. The mirror matters here: the repository publishes one build per day and the build mirror "roughly every 4 to 8 hours", so two consumers of "HaGeZi" can hold materially different data |
+| **Expiration** | None published. The adapter's own |
+| **Correction / deletion** | Documented and honest: "Review and removal requests are handled on a best-effort basis, with no guaranteed response time." Better than most of the catalog, and still not a guarantee |
+| **Overlap with the others** | High with src-0008, as above |
+| **Evidence still needed before enabling** | (1) confirmation that the TIF list can be consumed separately from the tiers; (2) the overlap measurement; (3) an explicit decision that the ad-and-tracking tiers stay out — mixing them in would make any false-positive number meaningless, because a blocked tracker is not a false positive and not a scam detection either |
+
+| | src-0024 · catalog 24 · CERT Polska Warning List |
+| --- | --- |
+| **Operation proposed** | `retrieval` and `local_storage` of `domains.txt` or the RPZ export |
+| **Access required** | None technically |
+| **Unresolved conditions** | **One, and it is decisive: no reuse terms are published anywhere this project could find.** Neither the description page nor the data directory states a licence. An absent restriction is not a grant, so this source is proposed *conditionally on getting an answer*, and cannot be enabled without one |
+| **Adapter input format** | Published in txt, csv, json, xml, adblock, hosts, MikroTik, RPZ and uBlock. Not read |
+| **Typed output** | As above |
+| **Provenance** | The best available anywhere in the catalog: a statutory basis, and a published actions log recording listing and delisting events |
+| **Expiration** | **The provider's own, and real**: domains remain listed for six months maximum. The only source in the first wave that supplies its own expiry rather than borrowing one from the adapter |
+| **Correction / deletion** | A statutory appeal to the Polish communications authority, available to the domain holder. Nothing else in the catalog offers a route with legal force |
+| **Overlap with the others** | Low, and for an unhelpful reason: it is scoped to domains defrauding Polish internet users |
+| **Evidence still needed before enabling** | (1) **a written answer on reuse terms** — this is the single highest-value question in the whole first wave, because everything else about this source is already better than its alternatives; (2) a measurement of how much of it a non-Polish household would ever resolve, which may be close to none |
+
+#### What the four do not add up to
+
+* **They are all domain lists.** The first wave tests one indicator type against
+  one enforcement mechanism. It says nothing about email, phone, wallet,
+  message or social indicators, and no result from it may be reported as if it
+  did.
+* **Two of the four cannot claim independence.** `IndependenceClaimable`
+  returns true only for src-0024 and src-0062, and only because their upstreams
+  are recorded as `documented_complete`. That is a statement about what was
+  recorded.
+* **Two of the four are narrow by construction** — one Polish, one web3 — and
+  the two broad ones are the two most likely to be copies of each other.
+* **The honest expected outcome is small.** A household already running a
+  general blocklist may see very little incremental detection from these four,
+  and `docs/EVALUATION_PROTOCOL.md` is written so that finding that out counts
+  as a result rather than as a failure.
+
+#### Explicitly rejected, with the reason
+
+| Not proposed | Reason, from the record |
+| --- | --- |
+| Catalog 7 OpenPhish | Terms prohibit detection and enrichment as commercial purposes without written consent; redistribution and derivative works prohibited outright |
+| Catalog 9 Phishing Army | Aggregates four other catalog entries; CC BY-NC; and it redistributes OpenPhish data whose own terms forbid redistribution — a conflict this project would inherit |
+| Catalog 23 StevenBlack | Mixed upstream licences including non-commercial-with-attribution; overwhelmingly advertising and tracking rather than scams |
+| Catalog 12 Spamhaus DBL | A live DNSBL query discloses every looked-up domain to the provider. That is household browsing leaving the house, which §4 of the registry forbids |
+| Catalog 1 URLhaus, 2 ThreatFox, 6 PhishTank, 25 urlscan.io, 26 Safe Browsing, 28 VirusTotal | All require an account or key. Registering is an operator decision, not an engineering one |
+| Catalog 38 FakeFilter, 57 CryptoScamDB | No licence published. Nothing is granted |
+| Everything at `commercial-approval-required` | 21 records. Each needs a contract, a membership or a paid tier |
+
+### 5.5 Adapter specification — src-0062, the best-supported first source
+
+**Scope.** This specifies a **parser and a converter**. It specifies no network
+code: fetching is a separate work item behind an operator decision, and this
+document does not authorise it. It also specifies **no threat score.** There is
+no universal confidence number to compute, and inventing one would erase the
+only thing the registry has established — that a given provider said a given
+thing about a given name.
+
+**Why src-0062 and not the source with the best data.** src-0024 has better
+provenance, a real expiry and a statutory appeal route, and it cannot be
+specified against because its reuse terms are unknown. src-0062 is the
+best-*supported*: licence read from the repository's own `LICENSE` file, formats
+named in its README, cadence published, delay published, and
+`IndependenceClaimable` true. Best-supported and best are different, and the
+difference is worth a sentence rather than a silence.
+
+#### Placement in the existing trust path
+
+The adapter does **not** introduce a second way for data to reach policy. It
+produces a `feed.Manifest`, which is signed with the local operator key and then
+loaded by `feed.LoadFile` exactly as today's fixture is. Everything the existing
+path enforces — signature over the raw payload bytes, schema version, record
+limits, expiry, `domain.Normalize` — applies unchanged.
+
+```
+upstream file  ->  adapter (this spec)  ->  unsigned Manifest
+               ->  operator signing     ->  signed feed file
+               ->  feed.LoadFile        ->  []feed.Indicator  ->  policy
+```
+
+The consequence worth stating: **an upstream domain that
+`domain.Normalize` rejects never reaches policy**, and the adapter must not work
+around that. It records the rejection and drops the record.
+
+#### Input, as described rather than as observed
+
+The README describes `blacklist/domains.json` as a list of phishing domains.
+**The file has not been read.** So the parser is specified to accept exactly one
+shape and to refuse everything else, including shapes that would be reasonable:
+
+```json
+["example-phish.invalid", "another-phish.invalid"]
+```
+
+| Rule | Behaviour |
+| --- | --- |
+| Top level is not a JSON array | Refuse the whole file. No partial import |
+| An element is not a string | Refuse the whole file, naming the index |
+| Duplicate keys, trailing content, or a byte-order mark | Refuse the whole file |
+| File over 32 MiB | Refuse. A hand-checkable bound, an order of magnitude above the plausible size |
+| More than 500,000 elements | Refuse. The published list is a fraction of this |
+| Empty array | Accept, and produce a manifest with zero records — which the operator must be able to tell apart from a fetch failure. A zero-record manifest is a **result**, not an error, and the count is reported |
+
+Refusing the file rather than skipping the element is deliberate: a shape this
+project has never seen is a signal that the upstream changed, and the right
+response to that is to stop and be looked at, not to import whatever survived.
+
+#### Per-element handling
+
+| Input | Outcome | Why |
+| --- | --- | --- |
+| `"example-phish.invalid"` | Accepted → `Record{Domain: "example-phish.invalid", Action: block, Confidence: medium}` | The ordinary case |
+| `"EXAMPLE-PHISH.INVALID"` | Accepted, normalised by `domain.Normalize` | Case is not meaningful in DNS |
+| `"  example-phish.invalid  "` | Accepted after trimming | Whitespace is a formatting artefact |
+| `""` | Dropped, counted as `empty` | Not a domain |
+| `"not a domain"` | Dropped, counted as `unparseable`, with the reason from `Normalize` | |
+| `"еxample.invalid"` (Cyrillic е) | **Dropped today**, counted as `unparseable` — and this is the defect Phase 3 item 5 already names. Once validity and classification are separated, this becomes an accepted record carrying a homograph **signal**, which is what it actually is | The registry's own rule: a signal is not a verdict |
+| `"*.example.invalid"` | Dropped, counted as `wildcard_unsupported` | Wildcard semantics are a Phase 3 policy decision, not an adapter decision |
+| `"192.0.2.1"` | Dropped, counted as `not_a_domain` | A DNS sinkhole blocks names |
+| A domain appearing twice | Kept once, second occurrence counted as `duplicate` | Deterministic output |
+| A domain on the operator's exception list | **Kept in the manifest, excluded at policy** | The feed records what the provider said. Local exceptions are a policy decision applied afterwards, and merging them here would destroy the record of what was published |
+
+Every drop is counted by reason and reported. A run that drops 80% of its input
+must look different from one that drops none.
+
+#### Confidence, and why it is a constant
+
+Every record is emitted at `Confidence: medium`, for the whole feed, always.
+The provider publishes no per-entry confidence, so any variation would be this
+project's invention presented as the provider's judgement. `medium` is a
+placeholder for "one source said so", and the moment a second source is enabled
+the right change is a policy rule about agreement between named sources — not a
+number computed here.
+
+#### Provenance, and the schema change it needs
+
+`feed.Record` today carries `Domain`, `Action`, `Confidence`, `Category`,
+`Reference` and `ExpiresAt`. It has **no field naming the source**, and the
+first wave cannot ship without one: a decision that cannot name which provider
+caused it is not auditable, and `docs/REQUIREMENTS_MATRIX.md`'s Phase 3 rows
+require reason codes and source conflict handling that this field is a
+precondition for.
+
+The change belongs in Phase 3's schema work, not in an adapter:
+
+| Field | Value for this adapter |
+| --- | --- |
+| `source_id` | `src-0062` — the registry identifier, never the display name |
+| `source_ref` | the upstream path, and the commit or ETag the file was fetched at |
+| `observed_at` | the fetch time |
+
+Until those exist, the adapter writes the same information into `Category` and
+`Reference` as a documented stopgap, and the stopgap is recorded here so it
+cannot become the design by inattention.
+
+#### Manifest fields
+
+| Field | Value | Note |
+| --- | --- | --- |
+| `manifest_version` | the fetch timestamp in RFC 3339 | |
+| `feed_id` | `scamwall.local/src-0062` | Local, because this manifest is this project's rendering of the upstream, not the upstream itself |
+| `issued_at` | the fetch time | |
+| `expires_at` | fetch + 14 days | **This project's invention.** The provider publishes no expiry. It bounds staleness; it does not reflect anything the provider said, and no report may present it as if it did |
+
+#### Expected validation behaviour, as test cases
+
+These are the cases a test suite must cover before the adapter is written —
+written first, as the project's other suites were:
+
+| Case | Expected |
+| --- | --- |
+| The two-element example above | 2 records, 0 drops, manifest expiry = fetch + 14 days |
+| `{}` at top level | Whole-file refusal naming the top-level type |
+| `["a.invalid", 7]` | Whole-file refusal naming index 1 |
+| `["a.invalid", "a.invalid"]` | 1 record, 1 duplicate counted |
+| `["", "   "]` | 0 records, 2 empty counted, manifest still produced |
+| `[]` | 0 records, manifest produced, zero-count reported distinctly from a failure |
+| A 500,001-element array | Whole-file refusal on the record bound |
+| A 33 MiB file | Whole-file refusal on the size bound, **before parsing** |
+| A file with a duplicate JSON key inside any object form | Refusal — the same rule `internal/sourceregistry` already applies, and for the same reason: the reviewer reads the first value and the program uses the second |
+| Output fed to `feed.LoadFile` after local signing | Loads clean; indicator count matches the record count minus expiries |
+| Output with one byte flipped after signing | `feed.LoadFile` refuses. The adapter must not become a way around the signature check |
+
+#### What this adapter must never do
+
+* Fetch any URL the data names. Collecting a domain is not visiting it.
+* Merge sources. One adapter, one source, one manifest — because a merged
+  manifest cannot answer "which provider said this".
+* Compute a cross-source score.
+* Apply operator exceptions. Those are policy, applied after.
+* Silently skip a malformed file. The upstream changing shape is news.
+
+### 5.6 Everything else stays in the roadmap, with its dependency named
+
+The catalog's indicator scope is far wider than a DNS pilot, and the widening is
+gated on access, not on effort. Each line below names what must be obtained
+before the work is even schedulable.
+
+| Expansion | Blocked on | Nearest catalog evidence |
+| --- | --- | --- |
+| **Email indicators** | An enforcement point. This project has no mail path, so an email indicator has nowhere to act. Corpora at catalog 40, 41, 43, 44, 45 are historical and, in one case, published by someone who states he does not hold the rights | Registry records for 40 … 45 |
+| **Disposable-email domains** | Nothing technical — catalog 37 is CC0 — but a *product* decision: blocking a disposable-mail domain at a household resolver stops a household member using one, which is not this product's purpose | Registry record for 37 |
+| **Phone numbers** | A commercial arrangement with a carrier-facing provider, plus a delivery path that does not exist. Every candidate — 46, 48, 49, 51, 52, 54 — is `commercial-approval-required` or unreadable, and a DNS resolver cannot act on a number in any case | Registry records for 46 … 54 |
+| **Crypto addresses** | The three analytics vendors are all `commercial-approval-required`; the community sources are one merged (56), one stale since 2022 (57), one unreachable (58). Catalog 55 needs an API key and partner vetting for the useful fields | Registry records for 55 … 62 |
+| **Message classification** | Historical corpora only, with a privacy question on the best of them: catalog 45's later mailboxes are not anonymised. Nothing current, nothing licensed for training except under attribution and an unanswered privacy assessment | Registry records for 40 … 45 |
+| **Social handles** | No source in the catalog supplies them outside a commercial digital-risk product (70, 71) | Registry records for 70, 71 |
+| **Registration and DNS observations** | RDAP (74) is a protocol whose every server sets its own terms; the commercial providers (75, 76, 77) are unread or contract-gated. And domain youth is a risk signal, never a blocking ground | Registry records for 74 … 78 |
+| **Campaign relationships** | The one source modelling them for this problem is catalog 79, gated behind APWG membership and a Data Sharing Agreement | Registry record for 79 |
+
+**The rule that governs all of it:** a DNS pilot result may never be reported as
+evidence about email, phone, wallet or message detection.
+`docs/EVALUATION_PROTOCOL.md` holds that boundary.
 
 ---
 

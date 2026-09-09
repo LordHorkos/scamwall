@@ -42,7 +42,10 @@ Three rules govern what may appear here.
 | Session start | `2edb95a07567f4ebf9d6bc1bcb6c1ff01f5decc8` (tree `546ad23`) |
 | Evidence commit | `aa49797` — *fix(ci): supply the deployment's fixtures, and check the mount sources*. The last commit that changes a gate input |
 | Previous evidence commit | `b6b1769151501d89d7f8550d2c8f3378d0e73c3d` — *fix(verify): check list processing, name scope, mounts, numbers and fields*. Retained where cited; superseded for every row §5 of the matrix demotes |
-| Verified image | `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built by the operator from `b6b1769` — §3.7. **No image has been built from `aa49797`**, so the image-bound rows are open; §6.1 |
+| Verified image | `sha256:0efff1508ab6479fab4c2b09d2900844d8e957ed726cd6d84bbf4132a9493f06`, built by the operator from `c35b1e601f2543cb666d34888c61b08406446106` — **§3.22**, the §6.5 step A run. Build exit 0 with both in-build assertions executed uncached, verifier 95 passed / 0 failed / 0 blocked / 0 cleanup problems, closeout clean. It carries SW-P1-05 **and** SW-P1-20 |
+| Superseded verified image | `sha256:b95cc07ca564b115f8bf2d49d642efafc99ae8ff4ae7746caaa7d2ff5e00516b`, built by the operator from `b6b1769` — §3.7. Lapsed at `aa49797`; retained as an identity on record and as the evidence §3.7 describes. Not superseded as *history*, only as the current artifact |
+| Superseded CI-built image | `sha256:d7c44949d56d4f609b3f184464521a2d95c6b34e628f69fd5b145ad6104bba07`, built on the runner from `72bc84c` — §3.12. It carried SW-P1-20 between `72bc84c` and `7e11419`; §3.22 rebinds that row to the operator-built image above, and §3.12 keeps its own evidence intact |
+| Latest local candidate | `9bbf284` — *feat(registry): put the catalog in the repository, and qualify all 85 entries*. Go source under `internal/` and a 0-to-85 record change to `docs/source-registry.json`. `go list -deps ./cmd/scamwall` does not contain `sourceregistry`, so the executable is byte-identical and no image-bound row moves; the demotion is SW-P1-13 alone. §3.24 |
 | Superseded evidence commit | `0b083cb` — *fix(verify): attribute resources and complete the runtime assertions*. Retained where cited; **not** carried forward for the rows §5 of the matrix demotes |
 
 Commits between the two:
@@ -88,13 +91,18 @@ regression suite grew from 237 cases to 319 over the same commit.
 `.github/workflows/gates.yml`, and add three scripts. That demotes the same set
 of rows again, so the suite was re-run at `aa49797` and that run is now §3.0.
 The image-bound rows (SW-P1-05, SW-P1-20) cannot be renewed from here at all —
-they need the operator, §6.1.
+they need the operator, §6.1. **They have since been renewed**: the operator ran
+§6.5 step A against `c35b1e6` and returned its result, which is §3.22. The
+sentence above is kept as written, because it was true of this session and the
+route it names is the one eventually taken.
 
 **Later sessions carry their own identity blocks**, because rewriting this
 table each time would lose the commit each observation was actually made at.
 `§3.14` covers `f94214a`…`7e11419`; `§3.15` covers the handoff-correction
 session and names the commit that supersedes `7e11419` as the candidate. Both
-say explicitly which earlier evidence does and does not carry forward.
+say explicitly which earlier evidence does and does not carry forward. `§3.22`
+is the operator's own block: it covers the §6.5 run at `c35b1e6` and names the
+image it produced.
 
 The rule is worth stating rather than assuming: **evidence is tied to the last commit that changed a gate input.** A
 documentation-only commit changes none, so the record carries forward. Any
@@ -2315,6 +2323,288 @@ unexecuted**. Enforcement remains not compiled in.
 ---
 
 
+### 3.22 Operator handoff executed — steps 0, A and Z against a real daemon (SW-P1-05, SW-P1-20)
+
+This is the evidence §6.5 step A was written to obtain, and the first time
+`scripts/operator-handoff.sh` has run against a real Docker daemon. It was
+produced by the operator, on the operator's account, because the service
+account cannot reach the daemon and — by standing decision — will not be given
+access to it.
+
+**Identity.** Without these values the run below would be an anecdote.
+
+| | |
+| --- | --- |
+| Source commit | `c35b1e601f2543cb666d34888c61b08406446106` |
+| Image ID | `sha256:0efff1508ab6479fab4c2b09d2900844d8e957ed726cd6d84bbf4132a9493f06` |
+| Procedure | `scripts/operator-handoff.sh` at that commit — `preflight`, `build`, `closeout` |
+| Verifier | `scripts/container-runtime-verify.sh` at that commit, invoked by step A |
+| Pin | `SCAMWALL_IMAGE` and `SCAMWALL_EXPECTED_IMAGE_ID` both set by step A to the ID it resolved, so a tag moving between the two programs is a refusal rather than a silent substitution |
+
+**What the tree was.** `c35b1e6` is a documentation-only commit on top of
+`e8f8683`. Under §2.1's carry-forward rule it changes no gate input, so the
+suites recorded in §3.21 — including the 358-case
+`scripts/tests/runtime-verify-test.sh` and the `internal/buildcheck/elfcheck`
+controls — are this tree's suites, and the build below is a build of the same
+source they were run against.
+
+**Results, as reported.**
+
+| Step | Verdict |
+| --- | --- |
+| 0 — preflight | **9 passed**, 0 failed, 0 blocked |
+| A — build, artifact interrogation, runtime verification | **22 passed**, 0 failed, 0 blocked |
+| A — `scripts/container-runtime-verify.sh` | **95 passed, 0 failed, 0 blocked, 0 cleanup problems** |
+| Z — closeout | **7 passed**, 0 failed, 0 blocked |
+
+Every step reported zero failures, zero blocks and zero cleanup problems, with a
+**direct exit status of 0** — captured from the command itself rather than
+through `tee`, a pipeline or a monitor. §6.5 requires that property because a
+status read through a wrapper is the wrapper's, and FINDING-23 began as exactly
+that substitution.
+
+`0 blocked` carries as much weight here as `0 failed`. Both programs report
+"could not run" separately from "failed", and a run with no failures but several
+unrun checks would satisfy the letter of SW-P1-05's acceptance criterion while
+proving much less than it appears to. Neither category occurred at any step.
+
+**The build.**
+
+| Observation | Result |
+| --- | --- |
+| `docker build`, `--no-cache --pull`, explicit `VERSION`/`COMMIT`/`BUILD_DATE` build arguments | exit 0 |
+| ELF linkage assertion, executed inside the build | executed, **not restored from cache** |
+| Enforcement-absent assertion, executed inside the build | executed, **not restored from cache** |
+| The artifact asked directly — a container created from the resolved image ID with no network, no mounts and no credential, running `scamwall version` | reported the **expected commit** and **enforcement absent** |
+
+Both assertions are `RUN` steps, so a build exit of 0 does not merely coexist
+with their having passed: the build could not have reached that status
+otherwise. Step A checks them **per build step** rather than by searching the
+log for their text — the text is in the Dockerfile and appears whether the step
+ran or was reused — and a `CACHED` step fails it, as does a step that never
+reported `DONE`. That is what "executed without caching" means here, and it is
+the half of SW-P1-20 that the controls in §3.6 cannot supply.
+
+The binary's own report is a separate fact from the build's, and it should be
+read for exactly what it is. The commit it prints is the value passed as
+`--build-arg COMMIT`; reading it back **out of the image** establishes that the
+value reached the executable, which is the gap FINDING-39 named — the superseded
+procedure passed no metadata at all and produced images carrying
+`commit=unknown`. It is not independent proof that the source was that commit;
+the preflight's `HEAD`-equals-expected check on a clean tree is what establishes
+that, and the two together are why the image can be tied to a source at all. The
+`enforcement compiled in false` half corroborates the `Enforcement` row of §2
+against the built executable rather than against the source alone.
+
+**What the verifier's count means, and what it does not.** 95 passed is five
+more than the 90 of §3.7, which was the last verifier run against this
+deployment. The assertions added since — the prohibited-path rule extended over
+the secret source, the host-side regular-file check on each approved mount, the
+password file's world-reachability (§4.10), and the FINDING-29 readability
+judgement with its user-namespace check (§4.12) — are an increase of that order.
+The evidence returned is counts rather than a per-assertion listing, so that
+correspondence is recorded as **consistent** rather than asserted item by item.
+What the counts establish without inference is that no check failed and **no
+check went unrun**.
+
+**That the configuration verified was the deployment's rests on a refusal
+rather than on an assurance.** Step 0 refuses to proceed if any of `SCAMWALL_CA_FILE`,
+`SCAMWALL_SECRET_FILE`, `SCAMWALL_CONFIG`, `SCAMWALL_FEED`, `SCAMWALL_IMAGE`,
+`SCAMWALL_EXPECTED_IMAGE_ID`, `SCAMWALL_VERSION`, `SCAMWALL_COMMIT`,
+`SCAMWALL_BUILD_DATE`, `PIHOLE_HOST_IP` or `SCAMWALL_SECRET_GID` is exported,
+because Compose gives the shell environment precedence over `--env-file` and one
+of those still set would redirect a bind **source**, so that every assertion
+below would verify a fixture while reporting the deployment. Step 0 passed, so
+no such redirection was in place; the verifier resolved the deployment's own
+configuration, on the deployment's own host. That is the difference between this
+run and the CI run at `72bc84c` (§3.12), and it is the whole of what SW-P1-05
+was waiting for.
+
+**The FINDING-29 line.** Step A refuses to report a pass unless the verifier's
+output contains the line beginning `the application password would be readable
+by the container identity` (§6.5 step A, item 10). Step A reported a pass, so
+the line was produced. Its `uid=`, `gid=` and `mode=` values are **not**
+reproduced here: they were not returned with this evidence, and they are
+site-specific in the sense §3.7 sets out. What is recorded is that the check ran
+and that its verdict was the passing one — a statement about host metadata and
+about nothing else. See the boundary table below.
+
+**Closeout.**
+
+| Observation | Result |
+| --- | --- |
+| Leftovers of the steps that actually ran, enumerated by the invocation and project identities **those steps recorded** | none found for step A's recorded invocation |
+| The deployment secret's owner, group, mode, size and modification time, against the baseline step 0 recorded before any step ran | unchanged |
+| `--verify-secret-integrity` | **not used.** No credential was opened |
+
+The leftover enumeration means something here only because FINDING-55 was fixed:
+until `76f3bfd`, step Z generated a fresh invocation identifier and then searched
+for resources carrying it, so the query could not return anything and printed a
+pass for every closeout that had ever run. This run searched for the identities
+step A recorded, and the register was not empty — step A ran and recorded one.
+
+The metadata comparison means something only because FINDING-50 was fixed: step
+Z used to take its own baseline when it found none and report `ok`, so on a
+single pass — which is the whole procedure — the comparison never happened. Step
+0 recorded the baseline here, before the build.
+
+**What "unchanged secret metadata" does and does not say.** It says owner,
+group, mode, size and modification time match the values recorded before the
+handoff began. It does **not** say the content is unchanged: a same-length
+rewrite with a restored mtime would pass it, which is why
+`--verify-secret-integrity` exists and why it is opt-in. It was not used, and no
+step of this run opened the credential.
+
+**What this establishes, and what it does not.**
+
+| | |
+| --- | --- |
+| Established | An image built by the operator from `c35b1e6` satisfies every runtime hardening assertion the current verifier makes, against the operator's own resolved configuration: image identity against the pin, the exact mount set with its sources on this host, tmpfs and logging bounds, hostname pinning, the supplementary group, capabilities and privilege settings, and created-not-running. 95 passed, 0 failed, 0 blocked, 0 cleanup problems. **SW-P1-05** |
+| Established | The shipped binary carries no dynamic linking apparatus — the static controls pass (§3.6) **and** the assertion executed as an uncached `RUN` step inside the build that produced this image. Both halves now rest on one artifact and one commit, for the first time since `b6b1769`. **SW-P1-20** |
+| Established | Enforcement is not compiled into this build: asserted inside the build, and confirmed afterwards by running the artifact |
+| Established | `scripts/operator-handoff.sh` completes steps 0, A and Z, with A and Z reaching a real Docker daemon — the arguments step A constructs are accepted, `docker create` produces the container they describe, the deployment's paths exist and are mountable, and step Z's label queries return. That was the genuine residual behind §7's "pending operator testing" row, and it is now discharged for the three steps that ran and for no others |
+| Established | Attribution and cleanup behave against a real daemon **on a host that carries a live deployment**: 0 cleanup problems from the verifier, and no leftover attributable to step A's recorded invocation |
+| **Not** established | That the container identity can *read* the mounted password. No container was started, so no process opened it. The FINDING-29 line is a judgement on host metadata: it says the permission check would grant a read, not that a read occurred. SW-P2-04 stays open, and §6.5 step C is unexecuted |
+| **Not** established | That ScamWall can authenticate to a Pi-hole, or that anything is reachable through the `pi.hole` pin. Nothing was sent to any appliance. Steps B, C and D were not run |
+| **Not** established | That the deployment secret's *contents* are unchanged — metadata only, as above |
+| **Not** established | Anything about a hosted runner. **SW-P1-12 is untouched by this run** and stays IMPLEMENTED-UNVERIFIED: the gate list this tree runs is not the list run 34047025567 executed, and no hosted run has seen any commit since `72bc84c` |
+| **Not** established | Anything about detection accuracy, which is Phase 4 and has not begun |
+
+**A defect this run's own output exposes.** Step A's required FINDING-29 line
+and the verifier's mount-section note contradict one another inside the same
+transcript: the note tells the operator that the host file's owner, group and
+mode are something "this program does not inspect and does not claim", and the
+required line is that inspection's verdict. It is a wording defect rather than a
+behavioural one, and it is recorded as **FINDING-68** (§4.19) with the tested
+code deliberately left unchanged. No assertion's verdict depends on it, so it
+qualifies neither row above.
+
+**Form of the evidence, stated plainly.** What is recorded here is the
+operator's report of the run — the identities, the exit statuses and the verdict
+counts — not an archived transcript. This record's rule that a conversational
+report is history rather than evidence is not waived; it is met the way §3.7
+meets it. Every value above is an *identity or a status*, each reproducible by
+re-running §6.5 against the same commit, and the image ID ties them to an
+artifact that still exists. The stronger form remains the work directory's
+sanitized `evidence/` output, and attaching it — or its hash — would remove the
+last step of trust.
+
+**Site-specific values are deliberately absent**, as in §3.7. No address, no
+supplementary group id, no deployment path, no host identity and no
+`uid=`/`gid=`/`mode=` triple appears here. The verifier asserts these against
+values resolved from the operator's own configuration; this record states that
+the assertions held, not what they held against.
+
+**Renewal.** Both rows are tied to *this image ID and this commit*. Any change
+to Go source, `container/Dockerfile`, the compose definition or `scripts/*.sh`
+invalidates them, and any rebuild — including a rebuild from this same commit —
+produces an image that has not been verified, however confident one is that it
+is equivalent. `docs/REQUIREMENTS_MATRIX.md` §5; the procedure is §6.5 step A.
+
+### 3.23 The operator evidence, re-described — transcripts exist, and this account cannot read them
+
+§3.22 says the evidence returned "is the operator's report of the run — the
+identities, the exit statuses and the verdict counts — not an archived
+transcript", and that "the evidence returned is counts rather than a
+per-assertion listing". **That was wrong when it was written, and this section
+corrects it rather than editing the sentence away.** Sanitized transcripts exist
+in the operator's work directory, and their content has since been relayed. The
+correction changes what is on record about the *form* of the evidence. It does
+not change a single verdict.
+
+#### What could and could not be read, stated exactly
+
+| | |
+| --- | --- |
+| Files named | `/tmp/tmp.4mtoNEjwv3/evidence/verify.log`, `/tmp/tmp.4mtoNEjwv3/evidence/version.log`, `/tmp/tmp.4mtoNEjwv3/evidence/build.log` |
+| Attempted | `ls` and `head` on the directory and on each file, as the service account |
+| Result | `Permission denied` on all four. The work directory is `root:root` mode `0700`; this account is uid 1000 and is not in any group that reaches it |
+| Not attempted | `sudo`, any permission or ownership change, and any read of `raw/`. The order forbids all four, and a transcript obtained by escalating to root would be evidence about this account's privileges rather than about the run |
+
+**So no file was inspected. Nothing below rests on this session having read
+one.** That distinction is the whole point of this section, and it is the
+distinction §3.22's "form of the evidence" paragraph existed to make and got
+wrong in one direction: it understated what the operator holds, while correctly
+stating what this account had seen.
+
+#### Three grades of evidence, kept apart
+
+The record now carries three kinds of statement about this run, and they are not
+interchangeable:
+
+| Grade | What it is | Where it came from |
+| --- | --- | --- |
+| **(A) Direct inspection** | Something this session read for itself | **Nothing about this run.** The transcripts are unreadable from this account |
+| **(B) Operator-supplied transcript evidence** | Specific observations the operator reports as present *in* the sanitized transcripts | Relayed in the order text that opened this session, from files this session could not open |
+| **(C) Operator-reported terminal results** | Step totals and exit statuses, reported at the end of a run | §3.22, as before |
+
+Grade (B) is stronger than (C) — it names individual observations rather than
+aggregating them — and weaker than (A), because it is still a report of a file's
+contents rather than the file. **It is a relay, and a relay has a length.**
+The transcripts were not supplied in this session; the statements about them
+were.
+
+#### What grade (B) adds, item by item
+
+Each line below is an observation the operator reports as present in the named
+transcript. None was read here.
+
+| Observation, as relayed | Transcript | What it upgrades |
+| --- | --- | --- |
+| The verifier ran against image identity `sha256:0efff1508ab6479fab4c2b09d2900844d8e957ed726cd6d84bbf4132a9493f06` | verify.log | Confirms the pin from §3.22 appeared in the verifier's own output, not only in the step's report |
+| The four approved mount sources existed as **regular files** on the host | verify.log | **This is the substantive upgrade.** §3.22 could only say the host-side regular-file check was among the checks that ran, because that followed from the assertion being unconditional. The transcript reports its result |
+| The password-permission judgement used `uid=0`, `gid=989`, `mode=0640`, with **no extended ACL reported** | verify.log | §3.22 deliberately withheld the `uid=`/`gid=`/`mode=` triple as not returned. It has now been returned, and the values are recorded because none of the three is site-identifying in the sense §3.7 protects: `989` already appears in this repository as the deployment's supplementary group, and `0`/`0640` are the ordinary root-owned, group-readable case |
+| The configured supplementary group was `989` | verify.log | Confirms the verifier resolved the deployment's value rather than the `65532` default CI used (§3.12) — the difference SW-P1-05 turns on |
+| The daemon reported **no user-namespace remapping** | verify.log | The FINDING-29 readability judgement is only sound if the container's uid/gid mean on the host what they mean in the container. The check ran and its answer was the one that makes the judgement valid |
+| The deployment inspection container was **created and never started** | verify.log | Confirms the safety property directly, rather than by inference from a passing assertion |
+| The version report named the exact tested commit | version.log | As §3.22 recorded, with the same caveat: it establishes the build argument reached the executable, not that the source was that commit |
+| Enforcement was reported as **not compiled in** | version.log | Corroborates §2's Enforcement row against the built artifact |
+| Build **step #13** executed the ELF checks and reported no dynamic interpreter and no dependencies | build.log | SW-P1-20's second half, named by step number and by result rather than by the step having exited 0 |
+| Build **step #14** executed the enforcement-absent assertion | build.log | As above |
+| **Neither assertion step was cached** | build.log | The property step A checks per-step; the transcript reports it per step too |
+| Close-out reported unchanged owner, group, mode, size and mtime, and no resources remaining for the recorded build invocation | closeout, as reported | As §3.22 recorded |
+
+#### What this does not change
+
+* **No requirement status moves.** SW-P1-05 and SW-P1-20 were VERIFIED at
+  `c35b1e6` on the evidence in §3.22, and they are VERIFIED on the same evidence
+  now. Grade (B) strengthens the record's *detail*; the acceptance criteria were
+  met on the counts, and §3.22's reconciliation says so on its own terms.
+* **The qualification in `docs/REQUIREMENTS_MATRIX.md` is narrowed, not
+  removed.** That document says the four previously-unevaluated assertions are
+  established "by counts rather than by a per-assertion listing". For two of the
+  four — the host-side regular-file check and the password permission judgement
+  — a per-observation report now exists at grade (B). For the prohibited-path
+  rule over the secret source and for the supplementary group, the relayed
+  observations bear on them (the group value is reported directly) without
+  reproducing each assertion's line.
+* **Nothing about the container's behaviour.** No process ran. The permission
+  triple is host metadata; `uid=0, gid=989, mode=0640` means a process in group
+  989 *would* be granted a read. SW-P2-04 stays BLOCKED.
+* **Nothing about a hosted runner.** SW-P1-12 is untouched.
+
+#### What the operator must supply to reach grade (A)
+
+Exactly three files, sanitized, from the work directory of the recorded run:
+
+| File | Why it is the one that matters |
+| --- | --- |
+| `evidence/verify.log` | Carries the 95 assertion lines. It is the only artefact that turns "no check failed and none went unrun" into a per-assertion record, and the only one that can show the four SW-P1-05 assertions by name |
+| `evidence/build.log` | Carries build steps #13 and #14 with their per-step status. It is what makes "executed, uncached" checkable rather than reported |
+| `evidence/version.log` | Carries the artefact's own report of commit and enforcement state |
+
+A hash of each file, published alongside the report, would be worth having even
+if the contents are not: it would let a later reader confirm that the transcript
+being read is the one this record describes. **`raw/` is not requested and must
+not be supplied** — it holds unsanitized captures, and asking for it would
+undo the sanitisation the procedure performs on purpose.
+
+Until those three files are readable by whoever is auditing this record, the run
+stands at grade (B): specific, detailed, consistent with the counts, and
+relayed.
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
@@ -4453,6 +4743,171 @@ document whose field meanings it does not know.
 
 ---
 
+### 4.19 FINDING-68 — the verifier says it does not inspect what it has just inspected
+
+**Recorded as a pending wording correction. The code is deliberately unchanged
+in this session**; the reason is at the end of this subsection.
+
+**Where.** `scripts/container-runtime-verify.sh`, in the mount section,
+printed immediately after the prohibited-mount assertion:
+
+```
+A read-only mount at /run/secrets/pihole_app_password does NOT prove the
+container identity can read it. That depends on the host file's owner,
+group and mode, which this program does not inspect and does not claim.
+```
+
+**What is wrong.** The final clause, and only that. The program inspects
+exactly those three values some three hundred lines earlier:
+`secret_identity_read` stats the secret source, reads its owner, group and
+mode, normalises the mode to four octal digits so the positional extraction is
+exact, and evaluates it against the container's uid and both of its gids;
+`secret_acl_verdict` then checks for an extended ACL whose mask strips read from
+the group class; and the daemon is asked about user-namespace remapping, because
+remapping would invalidate the judgement. The result is printed as a verdict
+beginning `the application password would be readable by the container
+identity`, carrying `uid=`, `gid=` and `mode=`. That is an inspection, and it is
+a claim.
+
+**Why it surfaces now.** §6.5 step A **requires** that verdict line before it
+will report a pass (step A, item 10). Every execution of step A therefore emits
+both paragraphs, and the operator run in §3.22 did: a transcript stating that
+the program does not inspect the file's ownership, beside the ownership
+inspection the step was required to produce. This is no longer a latent
+inconsistency in the source; it is in the operator evidence.
+
+**Why it happened.** The note predates the readability judgement. It was true
+when it was written — the verifier really did stop at the mount table — and
+FINDING-29 added the inspection without revisiting the sentence that denied it.
+That is the ordinary shape of a stale comment, with the unusual feature that the
+stale text is *output*: it reaches the operator, not merely the next reader of
+the source.
+
+**What it is not.** It is a `note`, which the verifier does not count as a
+check, so no assertion's verdict depends on it and neither row's acceptance
+criteria refer to it. It did not affect the counts in §3.22. The two sentences
+preceding the false clause are correct and load-bearing, and must survive any
+correction: a mount is not a read, and this program never starts the container.
+
+**The correction, when it is made.** Replace the third sentence so that it
+points at the judgement instead of denying it — the mount table does not
+establish readability; the host-metadata judgement printed earlier in the run is
+what speaks to it, and that judgement is about metadata rather than an observed
+read. Both statements the note exists to make are then preserved, and both are
+true. The wording is left to the session that makes the change, so that this
+record does not become a second specification of the same line.
+
+**Why the tested code is preserved for now.** The note is emitted text, and
+`scripts/tests/runtime-verify-test.sh` asserts against the verifier's output
+across 358 cases. Changing an emitted line is a `scripts/*.sh` change: under
+`docs/REQUIREMENTS_MATRIX.md` §5 that demotes the script-bound rows, and — as §3
+of the matrix has applied it since `aa49797`, the verifier being SW-P1-05's own
+Source — it demotes SW-P1-05, whose renewal has just cost the operator a build,
+a verifier run and a closeout. Spending that on three lines of prose, in the
+same session that recorded it, is a poor trade. The fix belongs in a session
+that is already moving those rows, can re-run the suite, and can hand the
+operator a rebuild.
+
+*A smaller observation, recorded and not acted on at the time — since acted
+on.* `docs/REQUIREMENTS_MATRIX.md` §5's `scripts/*.sh` row enumerated
+`SW-P1-01 … SW-P1-04, SW-P1-06 … SW-P1-09, SW-P1-11, SW-P1-14, SW-P1-19` and did
+not name SW-P1-05 — yet §3 has demoted SW-P1-05 on a verifier change since
+`aa49797`, and SW-P1-05's Source field is that file. The practice was stricter
+than the table said, and the argument for deferring FINDING-68's fix rests on
+the practice rather than on the table.
+
+**The table is now corrected**, together with three further omissions the same
+check found: SW-P1-16, SW-P1-17 and SW-P1-18 also name
+`scripts/container-runtime-verify.sh` in their Source fields and were also
+absent from the row. `docs/REQUIREMENTS_MATRIX.md` §5 now states the rule — every
+row whose Source names the changed file — and enumerates it, so the two cannot
+drift apart silently again. No acceptance criterion moved and no row's status
+changed: the three added rows ride on the same
+`scripts/tests/runtime-verify-test.sh` transcript that renews SW-P1-01 …
+SW-P1-04, so every run that renewed those renewed these.
+
+---
+
+### 4.20 FINDING-69 — the schema said `unknown` was always allowed; two vocabularies disagreed
+
+**Found by populating the registry**, which is the only way this could have been
+found: with zero records, no field ever had to express "nobody has read this".
+
+`docs/SOURCE_REGISTRY.md` §2 states the rule without qualification: *"Every
+field is required; `unknown` is a permitted value and is not the same as
+absent."* Two closed vocabularies in `internal/sourceregistry` did not honour it:
+
+| Field | Vocabulary before | Could express "not established"? |
+| --- | --- | --- |
+| `kind` | bulk feed, lookup API, enrichment service, corpus, platform, advisory source, commercial partnership | **No** |
+| `authentication` | none, key, account, contract | **No** |
+| `attribution_required` | yes, no, **unknown** | Yes |
+| `access_status` | …, **unresolved** | Yes, by its own value |
+
+**Where it bites.** Eleven of the eighty-five catalog entries could not be
+researched because the provider's own documentation was unreachable — HTTP 403,
+a TLS chain that would not verify, a fetcher the host refuses, a timeout. For
+those, the product shape and the access model are exactly what nobody knows. The
+vocabularies left three options and all three were wrong:
+
+* invent a value — `kind: "lookup API"` for a service nobody has read is a
+  fabricated finding, and fabricated findings are what this registry exists to
+  prevent;
+* write an empty string — refused separately, and correctly, as an author who
+  stopped typing;
+* leave the field out — refused as absent, and rightly, since absent and
+  unknown are different claims.
+
+**Fix.** `unknown` is added to both vocabularies, with the reasoning in the
+declaration's own comment. This is the code being brought into line with the
+schema, not the schema being relaxed: §2 always said this.
+
+**What it does not open.** Everything else outside the sets is still refused —
+`TestAnInventedKindIsStillRefused` and `TestAnInventedAuthenticationIsStillRefused`
+hold that line. And `unknown` in either field is not a shrug that costs nothing:
+a record that does not know its provider's access model cannot honestly carry a
+disposition other than `unresolved` (a disposition other than `unresolved` is a
+claim about what documentation said, and the validator already requires a real
+`verified_on` and an `https` documentation URL for one), and `disposition_reason`
+must still say what was attempted and what happened. In the shipped registry
+every such record names its blocker: the URL tried, the response, and the date.
+
+**Tests.** `TestKindAndAuthenticationAcceptUnknown` for the accepted case, and
+the two refusal tests above for the boundary.
+
+### 4.21 FINDING-70 — a mutation test left its fixture in the shipped registry
+
+**A defect committed at `e8f8683` and found by reading the file this session was
+about to replace.** `docs/source-registry.json`'s `note` field read, in full:
+
+> `"note": "mutation test"`
+
+The value it replaced was the paragraph explaining that the file was structure
+only, that no source had been imported, researched, contacted or qualified, and
+that the 85-entry catalog was absent from the repository and therefore blocking.
+That paragraph was the file's own account of what it was, and it was overwritten
+by a two-word fixture — evidently while checking that the validator noticed a
+changed `note`, and then committed.
+
+**Why it is worth a finding rather than a silent fix.** Nothing failed. Every
+gate stayed green, because `note` is a free-text field with no rule attached to
+it: the validator checks it is present and is a string, which "mutation test"
+is. So a document of record shipped for two commits describing itself as a test
+fixture, and the mechanism that would have caught it does not exist — a
+provenance file's prose is exactly the part a validator cannot check.
+
+**It also shows the limit of the shipped-file tests as they stood.** Three tests
+read `docs/source-registry.json` on every run. None of them reads `note`,
+because none of them could say what a correct `note` is.
+
+**Fix.** The `note` now states what the file is, what it is not, and what it may
+not be read as authorising — and it is no longer a description of an empty file,
+because the file is no longer empty. No new validator rule is added: a rule
+that could distinguish a real note from a plausible one would have to understand
+the note, and none can. What is added is the reason to look: this finding.
+
+---
+
 ## 5. Critical Go path review (SW-P1-10)
 
 Review of the areas SW-P1-10 names. Each entry states what was checked and what
@@ -5216,13 +5671,22 @@ is recorded here so the gap is not lost when SW-P1-12 goes green.
 a pull request, tagging, creating a release, publishing an image, or changing
 any repository setting.
 
-### 6.4 Phase 2 work order — **DRAFT, opens when SW-P1-05 closes**
+### 6.4 Phase 2 work order — **DRAFT. The SW-P1-05 precondition is now met; the phase is not thereby open**
 
 Registered now so that Phase 1 evidence links forward and so that the scope is
 fixed before implementation. Nothing here is authorised to run yet. Two
 standing constraints apply to every item: **no household blocking state is
 changed**, and **no live authenticated command runs until its own operator
 procedure has been reviewed and recorded here**, on the model of §6.1.
+
+**On the entry condition.** SW-P1-05 closed at `c35b1e6` (§3.22), so the row
+this section was waiting on is no longer open. That removes a blocker; it does
+not open the phase. `docs/REQUIREMENTS_MATRIX.md` §4.1 sets entry as *Phase 1
+verification accepted for the relevant source and artifacts*, and acceptance is
+the operator's, not this record's. SW-P1-12 also remains
+IMPLEMENTED-UNVERIFIED — no hosted run has seen any commit since `72bc84c` — so
+one required Phase 1 row is still open, and an open required row is an open
+phase. Nothing here is authorised to run, and no live Pi-hole evidence exists.
 
 | # | Work | Acceptance it must produce |
 | --- | --- | --- |
@@ -5241,13 +5705,20 @@ Item 5 and item 6 are the two that require a live Pi-hole. Both stay pending a
 reviewed operator procedure; neither is started by this session or by the
 Phase 1 closure.
 
-### 6.5 Operator handoff — **PENDING REVIEW AND EXECUTION**
+### 6.5 Operator handoff — **STEP A EXECUTED; B, C AND D PENDING REVIEW AND EXECUTION**
 
-Four steps, A to D, in order, plus a preflight and a close-out. **A is the
-renewal SW-P1-05 has been waiting for.** B, C and D are Phase 2 evidence and
-are *pending operator review and execution*: reading them is not authorisation
+Four steps, A to D, in order, plus a preflight and a close-out. **A was the
+renewal SW-P1-05 had been waiting for, and it has now been run**: the operator
+executed the preflight, step A and the close-out against `c35b1e6`, and the
+result is §3.22. B, C and D are Phase 2 evidence, remain *pending operator
+review and execution*, and were **not** run: reading them is not authorisation
 to run them, and none may be run until the operator has read what each does and
 decided to. D additionally refuses to run without an explicit flag.
+
+**Executing step A does not authorise the rest.** The state machine below will
+accept B on a `passed` step A with matching identities, which is a
+*precondition*, not a permission. Nothing in this record asks for B, C or D to
+be run.
 
 #### The procedure is a program, and the program is tested
 
@@ -5432,7 +5903,15 @@ UNPROVEN instead of inventing a baseline. See FINDING-50.
 
 ---
 
-#### A — complete the pending Phase 1 deployment verification (SW-P1-05)
+#### A — complete the pending Phase 1 deployment verification (SW-P1-05) — **EXECUTED**
+
+> **Run at `c35b1e6`, producing image `sha256:0efff150…`.** Preflight 9 passed,
+> step A 22 passed, the runtime verifier 95 passed / 0 failed / 0 blocked / 0
+> cleanup problems, close-out 7 passed; every step exit 0. The result is
+> recorded in §3.22, and it closes SW-P1-05 and SW-P1-20 at that commit and that
+> image. The description below is retained unchanged as the specification of
+> what the step does, because a procedure that has been run once is the
+> procedure that renews these rows the next time the source moves.
 
 ```
 sudo scripts/operator-handoff.sh build --work-dir <work>
@@ -5883,6 +6362,21 @@ established claims are listed alongside the outstanding ones, because a table
 of only the gaps invites the reader to assume everything absent from it is
 settled.
 
+**Established at `c35b1e6`, by the operator's run of §6.5 (§3.22).** This is the
+only block below produced against a real Docker daemon on the deployment's own
+host since `b6b1769`. Its scope is the three steps that ran — preflight, A and
+close-out — and nothing else.
+
+| Claim | Basis |
+| --- | --- |
+| An image built by the operator from this source satisfies the runtime hardening assertions, against **this deployment's** resolved configuration | Image `sha256:0efff150…`: 95 passed, 0 failed, **0 blocked**, 0 cleanup problems, step exit 0, pinned by `SCAMWALL_EXPECTED_IMAGE_ID`. The preflight refuses any exported `SCAMWALL_*`/`PIHOLE_HOST_IP` override, so the configuration resolved was the deployment's rather than a fixture's. §3.22. **SW-P1-05** |
+| The shipped binary carries no dynamic linking apparatus | The static controls pass (§3.6, re-run at `e8f8683`) **and** the ELF assertion executed as an uncached `RUN` step inside the build that produced this image. Both halves on one commit and one artifact. §3.22. **SW-P1-20** |
+| Enforcement is not compiled into this build | Asserted inside the build, and separately confirmed by running the artifact: a container created from the resolved image ID with no network, no mounts and no credential reported the expected commit and `enforcement compiled in false`. §3.22 |
+| The image the operator would deploy is tied to this source | Two facts together: the preflight confirmed `HEAD` equals the expected commit on a clean tree, and the built binary, run from the resolved image ID, reports that commit — so the metadata reached the executable rather than being asserted about it. FINDING-39 was the absence of exactly this. §3.22 |
+| `scripts/operator-handoff.sh` works against a real Docker daemon | For steps 0, A and Z only: the arguments it constructs are accepted, `docker create` produces the container they describe, and the deployment's paths exist and are mountable. B, C and D were not run and this says nothing about them. §3.22 |
+| Attribution and cleanup hold on a host that carries a live deployment | 0 cleanup problems from the verifier, and step Z's leftover enumeration — searching the identities step A recorded, which is only meaningful since FINDING-55 — found none. §3.22 |
+| The deployment secret's **metadata** was unchanged across the handoff | Owner, group, mode, size and mtime compared against the baseline the preflight recorded before any step ran — only meaningful since FINDING-50. It is **not** a statement about content: a same-length rewrite with a restored mtime would pass it. `--verify-secret-integrity` was not used and no credential was opened. §3.22 |
+
 **Established at `b6b1769`, and what survives at `b6e70f4`.** `ef40156` and
 `aa49797` change four gate inputs, so the image-bound rows below lapsed under
 `docs/REQUIREMENTS_MATRIX.md` §5. `72bc84c` then restored two of them by running
@@ -5982,9 +6476,9 @@ host, as `scamwall`, no daemon, no network beyond loopback. §3.16.
 | A red CI run can be diagnosed from its own log | **Established, and observed on a runner.** FINDING-23 is fixed at `ef40156`; run 34045148578 printed the failing gate's reason, its complete sanitized output inside a `::group::`, and the path of a retained artifact that uploaded successfully. §3.11. The failure it reported — FINDING-27 — was diagnosed and fixed from that log alone, and the next run passed |
 | A fork pull request receives no secret and a read-only token | **Not established.** Reviewed in §3.4, and now also asserted *lexically* by `scripts/workflow-policy-check.sh` (FINDING-30) — which establishes what the workflow SAYS, not what GitHub DOES. Demonstrating the latter needs a pull request from a fork. §6.3, §6.4 item 10 |
 | The gate suite passes on a hosted runner at `5af270d` | **Not established.** The published commit is `72bc84c`; run 34047025567 covers that tree and 24 gates. This tree has **26** gates, changed Go source, a changed Dockerfile comment, a shared script library, and three new scripts. It needs its own run after an approved push, and **the earlier run must not be relabelled as covering it.** §3.15, §3.16 |
-| An image built from `9ebb98c` satisfies the runtime hardening assertions | **Not established.** No image has been built from this source on any host. SW-P1-05 and SW-P1-20 are both demoted; §6.5 step A is the renewal, and it has not been run |
+| An image built from `9ebb98c` satisfies the runtime hardening assertions | **Not established for `9ebb98c`, and superseded.** No image was ever built from that source. It is established for its descendant `c35b1e6`: §6.5 step A was run, produced `sha256:0efff150…`, and the verifier reported 95 passed / 0 failed / 0 blocked / 0 cleanup problems against this deployment. SW-P1-05 and SW-P1-20 are VERIFIED at that commit and that image, and at no other. §3.22 |
 | The container identity can read the mounted secret | **Not established, and now closer.** The verifier judges from host metadata whether the permission check WOULD grant the read, and states three assumptions it cannot check from metadata alone (FINDING-29). An actual read still needs a started container: §6.5 step C, which is written, tested against a fake daemon, and **unexecuted** |
-| The operator handoff behaves correctly against a REAL Docker daemon | **Not established — and this row has now carried EIGHT defects that had nothing to do with a daemon.** FINDING-49 and FINDING-50 were fixed at `5af270d` (§4.14). FINDING-51 to FINDING-56 were found and fixed in the Order-1 session (§4.15): a failed isolation assertion did not prevent the start, a step published its identities before it had a verdict, the authorisation flag was accepted as proof of the prerequisites, the "sanitized logs" were the raw captures, step Z's leftover check was a tautology that passed every time, and the privileged work directory and state file were not validated. All eight were found by reading the program and reproduced without a daemon. **The pattern is the finding:** "pending operator testing against a real daemon" was standing in for defects that never needed one, and it should not be read as a queue of things only a daemon can settle. The **residual** is genuine runtime evidence: 308 cases against a scripted fake establish control flow, refusals, attribution, cleanup, state handling, evidence separation and step ordering. They do not establish that the arguments the program constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they are pending operator execution |
+| The operator handoff behaves correctly against a REAL Docker daemon | **Partly established — for steps 0, A and Z only — and this row has carried EIGHT defects that had nothing to do with a daemon.** FINDING-49 and FINDING-50 were fixed at `5af270d` (§4.14). FINDING-51 to FINDING-56 were found and fixed in the Order-1 session (§4.15): a failed isolation assertion did not prevent the start, a step published its identities before it had a verdict, the authorisation flag was accepted as proof of the prerequisites, the "sanitized logs" were the raw captures, step Z's leftover check was a tautology that passed every time, and the privileged work directory and state file were not validated. All eight were found by reading the program and reproduced without a daemon. **The pattern is the finding:** "pending operator testing against a real daemon" was standing in for defects that never needed one, and it should not be read as a queue of things only a daemon can settle. The **residual** is genuine runtime evidence: 308 cases against a scripted fake establish control flow, refusals, attribution, cleanup, state handling, evidence separation and step ordering. They do not establish that the arguments the program constructs are accepted by a real daemon, that `docker create` produces the container those arguments describe, or that the deployment's paths exist and are mountable. Only steps A–D can establish those, and they were pending operator execution. **Step A has since been run, with the preflight and the close-out, and the residual is now smaller and nameable**: at `c35b1e6` the arguments those three steps construct were accepted by a real daemon, `docker create` produced the container they describe, and the deployment's paths proved mountable (§3.22). Steps **B, C and D remain unexecuted**, so nothing is established about the credential-free probe, the container identity opening the mounted secret, or any authenticated operation |
 | `docker --add-host` accepts what the resolved configuration yields | **Established for the shape, not for the daemon.** The installed Compose renders `extra_hosts` as `["pi.hole=host-gateway"]`; the program normalises the `=` to the `:` form and a case cross-checks the filter against the real Compose CLI. Whether the daemon then maps the name as intended is observable only in step B |
 | A session created by ScamWall is confirmed absent from the appliance afterwards | **Not established, and no method for it is claimed.** ScamWall cannot ask: the endpoint that lists sessions is outside the permitted set. The superseded procedure named a Pi-hole UI path and a user-agent attribution that **this repository has never verified for any version**. §6.5 step D now states the limitation and proposes consulting the appliance version's own documentation, recording *"request accepted, not independently confirmed"* where no supported method exists |
 | The diagnostics filter catches every credential shape | **Not established, and the previous wording of this row was wrong.** It described a PEM's short final body line surviving the 40-character threshold as a *limitation*. It was a **leak**, reachable through the real `--report` path, and it is FINDING-48 — fixed at `5af270d` by a stateful rule that redacts a PEM's body between its markers whatever the line length, with a PRE-FIX CONTROL asserting the superseded rules leaked it. §4.14. What remains is the true limitation: the filter is deny-by-pattern, so it establishes what its patterns catch, and a credential of an unanticipated shape would pass through it. That is no longer standing in for a known leak |
@@ -6003,6 +6497,8 @@ feed proves who wrote it. It says nothing whatever about whether the contents
 are correct.
 
 The row above it is the second most easily misread. §3.7 reports `0 failed`
-against a real image, and it would be an easy step from there to "the
-deployment works". It does not say that. The verifier never starts the
-application: it establishes what the container *is*, not what it can *do*.
+against a real image, and §3.22 now reports `95 passed, 0 failed, 0 blocked`
+against another one, on this deployment. It would be an easy step from there to
+"the deployment works". Neither says that. The verifier never starts the
+application: it establishes what the container *is*, not what it can *do*. The
+larger count is a larger set of things the container *is*.
