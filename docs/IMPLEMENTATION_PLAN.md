@@ -218,12 +218,18 @@ FINDING-59, fixed at `04e7ea4`; `docs/VERIFICATION.md` §3.18 and §4.16. That
 procedure has now carried defects at every one of four reviews, which is the
 argument for reviewing it a fifth time rather than for declaring it settled.
 
-**One local gate does not pass on the current tree**, and it is not this work:
-`go test -race ./...` fails about 8% of runs on a coincidence in
-`cmd/scamwall/e2e_test.go` that predates this session — FINDING-60. It is
-recorded and deliberately not fixed, because fixing it means changing Go source
-and demoting the Go-bound rows, which is a decision for the reviewer and not a
-side effect of a shell-script fix.
+**FINDING-60 is fixed, and the gate suite has no failing gate.** `go test -race
+./...` was failing about 8% of runs on a coincidence in
+`cmd/scamwall/e2e_test.go` that predates this work — a two-digit constant
+colliding with the random component of a temporary path. It was deferred at
+`04e7ea4` because the fix changes Go source and moves rows under §5 of the
+matrix, which is not a call to make while cleaning up a package; the reviewer
+then instructed it, and it was made at `ff2e734`. The check's haystack was
+narrowed and its property was not, with mutation evidence for the difference —
+`docs/VERIFICATION.md` §3.19 and §4.16. The episode also shows that SW-P1-14's
+determinism evidence never covered the Go gate; that gap is recorded against
+the row rather than papered over.
+
 
 **Item 5 is the one that is still open, and ORDER 1 is about its procedure.**
 SW-P1-05 is renewed by `docs/VERIFICATION.md` §6.5 step A, which the operator

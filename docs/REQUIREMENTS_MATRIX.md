@@ -67,7 +67,8 @@ that rest on such claims are marked `IMPLEMENTED-UNVERIFIED` and say so.
 | Previous working candidate | `9ebb98c590fe96628c486d83b66a3b9c87608b85`. Correction and local verification only: not pushed, not built, not deployed. It changes Go source (`cmd/scamwall/main.go`, `internal/adapters/pihole/client.go`), `scripts/check.sh`, `scripts/container-runtime-verify.sh`, a new `scripts/lib/docker-resources.sh`, a new `scripts/operator-handoff.sh` and a comment in `container/Dockerfile`. `docs/VERIFICATION.md` §3.15 |
 | Previous working candidate | `5af270d8ae36b1f60832f4edf26b71df2eee4945`. Defect correction and local verification only: not pushed, not built, not deployed. It changes `scripts/check.sh`, `scripts/gate-diagnostics.sh`, `scripts/operator-handoff.sh`, the **tracked file mode** of `scripts/container-runtime-verify.sh`, two test files, and adds `scripts/tests/entrypoint-mode-test.sh`, so §5 demotes the script-bound rows again. It changes **no Go source**, so the Go-path rows established at `9ebb98c` and `7e11419` stand. It does **not** change `.github/workflows/gates.yml`. `docs/VERIFICATION.md` §3.16, §4.14 |
 | Previous working candidate | `76f3bfd3ebc647ba21dd281fc2b5a3c48435b8d7`. ORDER 1: defect correction and local verification only — not pushed, not built, not deployed. It changes `scripts/operator-handoff.sh` and `scripts/tests/operator-handoff-test.sh` and nothing else, so §5 demotes the script-bound rows again; the suite was re-run on the clean committed tree to renew them. It changes **no Go source**, no Dockerfile, no Compose definition and no workflow, so the Go-path rows established at `9ebb98c` and `7e11419` stand. `docs/VERIFICATION.md` §3.17, §4.15 |
-| **Working candidate** | `04e7ea4e8e85c39cf60d6786021ce3cc7562e904`. ORDER 1 review response: defect correction and local verification only — not pushed, not built, not deployed. It changes `scripts/operator-handoff.sh` and `scripts/tests/operator-handoff-test.sh` and nothing else, so §5 demotes the script-bound rows again; the suite was re-run on the clean committed tree to renew them. It changes **no Go source**, no Dockerfile, no Compose definition and no workflow, so the Go-path rows established at `9ebb98c` and `7e11419` stand. One gate does **not** pass on this tree: `go test -race ./...` fails about 8% of runs on a pre-existing coincidence in `cmd/scamwall/e2e_test.go` that this session did not introduce and deliberately did not fix — FINDING-60. `docs/VERIFICATION.md` §3.18, §4.16 |
+| Previous working candidate | `04e7ea4e8e85c39cf60d6786021ce3cc7562e904`. ORDER 1 review response: defect correction and local verification only — not pushed, not built, not deployed. It changes `scripts/operator-handoff.sh` and `scripts/tests/operator-handoff-test.sh` and nothing else, so §5 demotes the script-bound rows again; the suite was re-run on the clean committed tree to renew them. It changes **no Go source**, no Dockerfile, no Compose definition and no workflow, so the Go-path rows established at `9ebb98c` and `7e11419` stand. One gate does **not** pass on this tree: `go test -race ./...` fails about 8% of runs on a pre-existing coincidence in `cmd/scamwall/e2e_test.go` that this session did not introduce and deliberately did not fix at the time; it was fixed afterwards at `ff2e734` on the reviewer's instruction — FINDING-60. `docs/VERIFICATION.md` §3.18, §3.19, §4.16 |
+| **Working candidate** | `ff2e7349ad49005d9ec889d9ee276e2b358a7660`. FINDING-60: defect correction and local verification only — not pushed, not built, not deployed. It changes `cmd/scamwall/e2e_test.go` and nothing else. That is Go source under `cmd/`, so §5 applies — but it is a `_test.go` file, so it is not compiled into any binary, the executable is byte-identical to the one at `222e903`, and **no image-bound row moves**. No row's Source field lists that file, so the demotion the rule produces is SW-P1-13 alone, renewed by the gate run recorded in `docs/VERIFICATION.md` §3.19. With this the gate suite has **no failing gate** on the tree. `docs/VERIFICATION.md` §3.19, §4.16 |
 | Licence | AGPL-3.0-only |
 | Current phase | Phase 1 |
 | Enforcement | Not compiled in (`policy.EnforcementCompiledIn == false`; no `enforce` build-tag file exists) |
@@ -755,6 +756,15 @@ current commit, plus `go vet`, `gofmt`, and `staticcheck`.
 **Acceptance.** All pass; no test deleted or weakened without an explanation.
 **Status.** VERIFIED — `docs/VERIFICATION.md` §3.1.
 
+Demoted and renewed again at `ff2e734`, which changes `cmd/scamwall/e2e_test.go`.
+A test was **modified**, and this row's acceptance clause allows that only with
+an explanation, so here it is: the credential-length assertion had its haystack
+narrowed and its property left intact, demonstrated by mutating the program to
+disclose the length both with and without a unit and confirming the check fires
+in both cases. The weaker rewrite — matching `"<n> bytes"`-shaped phrases
+instead of a bare integer — was considered and rejected, and the mutation that
+tells the two apart is recorded. `docs/VERIFICATION.md` §3.19, §4.16.
+
 ### SW-P1-14 — The gate suite is deterministic
 
 **Intended behavior.** A gate reports the same result for the same inputs. A
@@ -793,6 +803,19 @@ original nondeterminism is fixed and independently guarded by
 treated as sufficient to renew rather than as re-establishing the property from
 nothing. The shortfall is recorded in `docs/VERIFICATION.md` §7 so it is visible
 rather than rounded away.
+
+**Those counts are of the SHELL suites, and this row's claim is wider than
+that.** `go test -race ./...` is a required gate in the same suite and has
+never been in any of them. It carried an 8% nondeterminism — a two-digit
+constant colliding with the ten-digit random component of a `t.TempDir()` path
+in `cmd/scamwall/e2e_test.go` — from the moment that assertion was written
+until `ff2e734` removed it. FINDING-60. None of that falsifies the
+measurements that were taken: it means this row is **under-evidenced** rather
+than wrong, and recording it here is the alternative to adjusting the status
+quietly. Closing the gap needs a recorded repeat count of the Go gate, which
+has not been taken — the standing instruction against determinism campaigns
+was not revisited for it. The status is left as it stands, for a reviewer to
+decide on. `docs/VERIFICATION.md` §3.19, §4.16.
 
 ### SW-P1-15 — The CLI read-only guarantee is tested
 

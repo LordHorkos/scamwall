@@ -1914,6 +1914,119 @@ created, the live Pi-hole was not contacted, and no production secret,
 certificate, `.env` or deployment resource was read or changed. **Steps A, B, C
 and D of §6.5 remain unexecuted.** ORDER 2 was not started.
 
+
+### 3.19 FINDING-60 fixed — the required Go gate made deterministic
+
+> **STATUS: IMPLEMENTATION COMPLETE; ACCEPTANCE PENDING.** Unchanged from
+> §3.17 and §3.18, and for the same reasons. This session produced no operator
+> and no hosted evidence and could not. SW-P1-05, SW-P1-12 and SW-P1-20 are
+> untouched and stay IMPLEMENTED-UNVERIFIED.
+
+§3.18 recorded a gate run of `25 passed, 1 failed, 2 BLOCKED` and named the one
+failure as FINDING-60, deferred because fixing it meant changing Go source. The
+reviewer instructed the fix. It is made, and the gate suite now has **no
+failing gate on this tree**.
+
+The change is confined to `cmd/scamwall/e2e_test.go`. §4.16 carries the
+reasoning, the two shapes the fix could have taken and why only one of them is
+honest, the mutation evidence that the check still catches a real disclosure,
+and what the whole episode says about SW-P1-14.
+
+#### Commit identity
+
+| | |
+| --- | --- |
+| **Candidate** | `ff2e7349ad49005d9ec889d9ee276e2b358a7660` — *fix(test): stop the credential-length check matching the test's own temp path* |
+| Parent | `222e903a042dd07ffc69bd43bd685d2d2006fab6` |
+| Previous candidate | `04e7ea4e8e85c39cf60d6786021ce3cc7562e904` — FINDING-57 … FINDING-59 |
+| Branch | `feat/phase-1-core`, ahead of `origin/feat/phase-1-core`; **not pushed** |
+| Published commit | `72bc84c` — unchanged |
+| Files changed | `cmd/scamwall/e2e_test.go` |
+
+**This changes Go source under `cmd/`, and §5 of the requirements matrix
+applies.** It is a `_test.go` file. It is not compiled into any binary, so the
+executable is byte-identical to the one at `222e903` and **no image-bound row
+moves**: SW-P1-20's image half is untouched by it, as is SW-P1-05's. No row's
+**Source** field lists `cmd/scamwall/e2e_test.go`, so the demotion the rule
+produces is SW-P1-13 alone — renewed by the run below.
+
+SW-P1-13's acceptance clause is *"All pass; no test deleted or weakened without
+an explanation."* A test **was** modified, and the explanation is §4.16: the
+haystack was narrowed and the property was not, demonstrated by mutating the
+program to disclose the length with and without a unit and confirming the check
+fires in both cases. The version that would have weakened it — matching
+`"<n> bytes"`-shaped phrases instead of a bare integer — was considered and
+rejected, and the mutation that discriminates between the two is recorded.
+
+#### The flake, before and after
+
+| | Runs | Failures | Rate |
+| --- | --- | --- | --- |
+| `TestDoctorNeverReportsTheCredentialLength` at `222e903` | 25 | 2 | ~8% |
+| the same test at `ff2e734` | 60 | 0 | — |
+
+Sixty clean runs is not proof of zero. At the measured 8% rate the probability
+of sixty clean runs by chance is about 0.7%, which is what makes this evidence
+rather than one lucky pass. The mechanism is also understood and removed rather
+than merely unobserved, and that is the stronger half of the argument: the
+collision was between a two-digit constant and a ten-digit random path
+component, and the path component is no longer in the text being searched.
+
+#### The gate suite, run directly on the clean committed tree
+
+Not through a wrapper, `tee`, a monitor or a background task, so the status is
+the script's own.
+
+```
+$ git status --porcelain          # (no output — the tree is clean at ff2e734)
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+`CHECK exit=1` with **zero failures** is the correct outcome and agrees with
+the printed verdict: the two BLOCKED gates are the privilege boundary, and a
+BLOCKED required gate is not a pass.
+
+```
+BLOCKED  docker build (docker daemon not reachable by scamwall)
+BLOCKED  container runtime verification (docker daemon not reachable by scamwall
+         — run scripts/container-runtime-verify.sh as the operator)
+```
+
+That restores the `26 passed, 0 failed` of §3.17. The gate list is unchanged at
+28 items; this session added no gate.
+
+**One run of this suite was discarded rather than reported.** It was started on
+a clean tree and the documentation for this section was edited while it ran, so
+its `working tree has uncommitted changes` gate failed against a tree that was
+clean when the run began. Every other gate in it passed, including `go test
+-race ./...`. It is named here because a run whose result was produced by the
+act of recording it is exactly the kind of thing that gets quietly rounded to a
+pass, and the run above was taken afterwards with nothing touched from start to
+finish.
+
+
+#### No repeat determinism campaign
+
+None was run, and the review's standing instruction against one has not been
+revisited. The sixty runs above are of **one test function**, are the
+measurement of a specific defect's removal, and are not offered as a
+determinism campaign or as renewal of SW-P1-14. What they establish is bounded
+by what was measured.
+
+#### What this session did NOT do
+
+Nothing was pushed. No pull request was opened. `main` was not modified. No
+Docker command reached a daemon. No `sudo` was used, no image was built, no
+container was created, the live Pi-hole was not contacted, and no production
+secret, certificate, `.env` or deployment resource was read or changed. **Steps
+A, B, C and D of §6.5 remain unexecuted.** ORDER 2 was not started. The
+temporary mutations of `cmd/scamwall/main.go` used to test discrimination were
+reverted in the working tree and never committed; `git status` was clean before
+the gate run above.
+
 ---
 
 
@@ -3510,7 +3623,7 @@ the deployment's paths exist and are mountable. Only steps A to D can establish
 those, and they remain pending operator execution.
 
 
-### 4.16 FINDING-57 … FINDING-60 — the ORDER 1 review, at `5d9d21d`, fixed at `04e7ea4`
+### 4.16 FINDING-57 … FINDING-60 — the ORDER 1 review, at `5d9d21d`; 57–59 fixed at `04e7ea4`, 60 at `ff2e734`
 
 The ORDER 1 package was reviewed, and the reviewer did what §4.15 had not: they
 **called the state functions themselves** and interrupted one. Three defects
@@ -3783,14 +3896,55 @@ were correct **and lucky**, and the row they support is not invalidated by this
 — but it is now known to be renewed by a test that fails about one run in
 twelve for a reason unrelated to the property.
 
-**Not fixed here, deliberately.** The fix is small — compare against the length
-only in the portion of the output the credential could appear in, or assert the
-password itself and a `"<n> bytes"` shape rather than a bare integer — but it
-is a **Go source change**, and a Go source change demotes the Go-bound rows in
-`docs/REQUIREMENTS_MATRIX.md` §5. ORDER 1's review directed a state-consistency
-fix and said not to change code merely to assemble the package. Changing Go
-source to make a gate green would be exactly that. It is recorded as an open
-defect and the decision is the reviewer's.
+**Deferred at `04e7ea4`, fixed at `ff2e734` on the reviewer's instruction.** It
+was deferred because the fix is a **Go source change**, which demotes rows
+under `docs/REQUIREMENTS_MATRIX.md` §5, and ORDER 1's review had directed a
+state-consistency fix and said not to change code merely to assemble a package.
+Changing Go source to turn a gate green is exactly that, and it was not a call
+to make unilaterally. The reviewer then instructed the fix, and it was made.
+
+**The fix narrows the haystack, not the property.** Two shapes were available
+and only one of them is honest:
+
+* Replace the bare-integer search with `"<n> bytes"`-shaped pattern matching.
+  This removes the false positive **and the property** — a length emitted with
+  no unit at all would stop being caught, and that is the disclosure shape the
+  bare-integer check exists for.
+* Remove the one source of unrelated random digits and keep the bare-integer
+  search over everything the program itself composed. The masked text is the
+  directory this test created, whose value the test knows verbatim.
+
+The second was taken. Two guards keep the narrowing from rotting into a
+blindfold: an empty `e.dir` is fatal rather than masking the whole of stdout,
+and a password shorter than 10 characters is fatal, because a one- or two-digit
+length would collide with the counts in the `N checks, N failed, N skipped`
+summary and reintroduce the identical class of false positive one layer down.
+
+**Shown to still discriminate.** `cmd/scamwall/main.go` was mutated in the
+working tree to disclose the length, and reverted:
+
+| Mutation | Result |
+| --- | --- |
+| `readable (%d bytes)` | both the `"bytes"` check and the bare-integer check fire |
+| `readable, %d` | the bare-integer check fires; the `"bytes"` check does **not** |
+
+The second row is the whole argument for keeping a bare-integer search. A
+pattern-matching rewrite would have passed that mutation.
+
+**Shown to be fixed.** Before: 2 failures in 25 runs of that test. After: **0
+in 60**. At the measured rate the probability of 60 clean runs by chance is
+about 0.7%, so this is evidence rather than one lucky pass — which is the
+distinction the first version of this row got wrong.
+
+**What it says about SW-P1-14.** That row is *"the gate suite is
+deterministic"*, and it is VERIFIED on repeat counts of 500 and 30 runs. Those
+counts are of the **shell** suites. `go test -race ./...` is a required gate in
+the same suite and was never in any of them, and it carried an 8%
+nondeterminism from the moment this assertion was written until `ff2e734`. The
+row's evidence is narrower than the row's claim, and the gap is not closed by
+this fix — it is only made visible by it. The status is left as it stands
+rather than being quietly adjusted; see the note added to SW-P1-14 in
+`docs/REQUIREMENTS_MATRIX.md`, and §7.
 
 #### What these four do not establish
 
