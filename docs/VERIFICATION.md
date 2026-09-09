@@ -2174,6 +2174,144 @@ not contacted, and **steps A, B, C and D of §6.5 remain unexecuted**.
 The registry enables nothing, and a test fails if it ever does without that
 being a deliberate change.
 
+### 3.21 ORDER 2 execution — registry authorization semantics, and the catalog still missing
+
+> **STATUS: ORDER 2 NOT ACCEPTED. ORDER 1 NOT ACCEPTED.**
+>
+> ORDER 2 accepts when all 85 catalog entries have a disposition. **Zero do**,
+> and none can until the catalog is re-supplied. The registry's safety model is
+> complete and enforced; the data it exists to hold does not exist. No provider
+> was contacted, no documentation fetched, nothing downloaded.
+
+#### Baseline, recorded rather than assumed
+
+| | |
+| --- | --- |
+| HEAD at session start | `17017ad2e36f7d8973434aad12b07630c74b7f89` — matches the previous report |
+| Branch | `feat/phase-1-core`, clean working tree |
+| `origin/feat/phase-1-core` | `72bc84c13f4e6914bfb015e87d46a5234e8f5234` (confirmed by `git ls-remote`, read-only) |
+| `origin/main` and local `main` | `66aff2e862fbbfc02c9d353c5d972ab53c3c58e6` — in sync, untouched |
+| Divergence from the last hosted-tested commit | **31 commits** ahead of `72bc84c` at session start; 45 files, +14781/−716 |
+
+That divergence is the reason SW-P1-12 stays IMPLEMENTED-UNVERIFIED: the gate
+list this tree runs is not the list any hosted run has executed, and no hosted
+run has seen any of these 31 commits.
+
+#### The catalog: searched again, and absent
+
+Searched the tracked tree, untracked files, ignored files, every commit on
+every branch, the stash, and dangling git objects; and outside the repository,
+this session's scratch area and the usual drop locations. The 85-entry catalog
+is in none of them.
+
+Stated once, as ORDER 2 §2 directs, and not reconstructed. §4, §5 and §6 of the
+order are blocked on it: no record can be researched, no first wave selected,
+and no adapter contract written for sources that have not been chosen.
+
+#### What was done
+
+| | |
+| --- | --- |
+| **Candidate** | `e8f86834de2d9f696b37e8c4a9479d751bbe9c89` — *feat(registry): authorize per operation, cite the evidence, and check lineage and input strictly* |
+| Parent | `17017ad2e36f7d8973434aad12b07630c74b7f89` |
+| Files | `internal/sourceregistry/{registry,authorize,lineage,baseline,strictjson}.go`, two test files, `docs/SOURCE_REGISTRY.md`, `docs/source-registry.json` |
+
+ORDER 2 §3's five items, each a defect in the registry as first written and
+each recorded in §4.18: per-operation authorization (FINDING-63), evidence for
+every rights assertion (FINDING-64), identifier retirement enforced across
+versions (FINDING-65), lineage cycles and the independence rule (FINDING-66),
+and strict input handling (FINDING-67).
+
+The schema moved from 1 to 2. There is no migration burden because the registry
+has never held a record, and a v1 file is refused outright rather than read
+under v2 meanings — a v1 record says nothing about retrieval, storage,
+enrichment or training, and reading one as though it did would authorise by
+silence the exact operations the new model exists to gate.
+
+**The acceptance criterion ORDER 2 §3 sets** — *"the registry cannot authorize
+an operation whose required access or usage conditions are unknown or
+unmet"* — is `Source.Authorizes`, and it is exercised in both directions:
+`unknown` refuses, a `conditional` grant with an unassessed condition refuses,
+one with an unsatisfied condition refuses, one with no conditions at all
+refuses, and one with every condition satisfied allows. Without that last case
+every other would pass against a validator that simply refused everything.
+
+#### Suites
+
+| Suite | Result | Change |
+| --- | --- | --- |
+| `go test -race -count=1 ./...` | all **9** packages ok | `internal/sourceregistry` now **105** cases, was 80 |
+| `staticcheck ./...`, `gofmt -l .`, `go vet ./...` | clean | — |
+| `shellcheck --severity=style`, 18 tracked scripts | clean | no script changed this session |
+| `scripts/tests/operator-handoff-test.sh` | **393**, 0 failed | unchanged |
+| `scripts/tests/runtime-verify-test.sh` | **358**, 0 failed | unchanged |
+| `scripts/tests/gate-diagnostics-test.sh` | **73**, 0 failed | unchanged |
+| `scripts/tests/entrypoint-mode-test.sh` | **58**, 0 failed | unchanged |
+
+#### The gate suite, run directly on the clean committed tree
+
+Nothing was edited between the run starting and finishing; `git status` was
+clean at both ends.
+
+```
+$ git status --porcelain          # (no output — the tree is clean at e8f8683)
+$ bash ./scripts/check.sh; echo "CHECK exit=$?"
+ 26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped
+ RESULT: NOT COMPLETE — required gates failed or could not run.
+CHECK exit=1
+```
+
+Zero failures. `CHECK exit=1` is correct: the two BLOCKED gates are the Docker
+privilege boundary, and a BLOCKED required gate is not a pass. The gate list is
+unchanged at 28 items; this session added no gate, for the reason recorded in
+§3.20.
+
+**On determinism, precisely.** This is one run of the full suite on one tree.
+The four shell suites were each run once; `go test -race` once. Nothing here
+supports a claim that the suite is deterministic, and the SW-P1-14 gap recorded
+in §3.19 — that its repeat counts never covered the Go gate — is unchanged and
+unclosed by this session.
+
+#### An error made and reverted, recorded because it touched history
+
+Testing the identifier-retirement walk, two throwaway commits were made on
+`feat/phase-1-core` to create a synthetic history, and `git reset --hard` was
+then used to remove them. The reset also discarded tracked working-tree changes
+that a `git stash` was holding; they were recovered from the stash and verified
+intact, and HEAD returned to `17017ad` with the branch again 31 ahead of
+origin. Nothing was lost and nothing was pushed.
+
+The right approach, taken afterwards, was to make the walk testable without
+git at all: `ValidateVersionChain` takes an ordered list of registry versions,
+so the loop is exercised by unit tests on synthetic sequences and the git-backed
+test only supplies real versions to it.
+
+#### Also produced
+
+`docs/EVALUATION_PROTOCOL.md` — ORDER 2 §7. A protocol written **before** any
+evaluation data exists, which is the only order in which it is worth anything.
+It fixes the comparison configuration, requires labels from outside the
+candidate source set, specifies temporal and lineage leakage controls, measures
+both additional malicious caught and additional legitimate wrongly proposed,
+treats abstentions and unlabelled destinations as first-class reported
+quantities, and defines how corrections and feed delay are measured.
+
+**It proposes no numeric thresholds.** §8 of that document states the shape of
+each threshold and its rationale and leaves the values blank, because filling
+them in before the household has said what a false block costs it would be
+inventing a requirement and then meeting it.
+
+#### What this session did NOT do
+
+No provider was contacted. No provider documentation was read or fetched. No
+account created, no key requested, no purchase, no commercial discussion. No
+feed, API or dataset fetched in whole or in part. No malware sample, message
+corpus or bulk indicator dataset downloaded. Nothing submitted to any third
+party. No household data collected. Nothing pushed, no pull request opened,
+`main` untouched. No Docker command reached a daemon, no `sudo` was used, the
+live Pi-hole was not contacted, and **steps A, B, C and D of §6.5 remain
+unexecuted**. Enforcement remains not compiled in.
+
 ---
 
 
@@ -4167,6 +4305,151 @@ depend on. A field added to `docs/SOURCE_REGISTRY.md` §2 without a note reads,
 to the next person, as though it had always been there and had always been
 thought about. Both entries in the schema table now carry the finding number,
 so the reason the field exists travels with the field.
+
+### 4.18 FINDING-63 … FINDING-67 — the source-registry safety model, at `6bb33bf`, fixed at `e8f8683`
+
+Five defects in `internal/sourceregistry` as first written, found by reviewing
+it against the full source-qualification requirements rather than against the
+prose it was implementing. The registry was empty throughout, so none of them
+had produced a wrong answer about a real provider — which is the only reason
+they are cheap to fix now.
+
+#### FINDING-63 — three rights fields and a boolean cannot express authorization
+
+Schema 1 carried `commercial_use`, `caching` and `redistribution`, each
+`permitted`/`prohibited`/`conditional`/`unknown`, and one `enabled` flag gated
+on all three being `permitted` or `conditional`. That model fails in **both**
+directions, which is what makes it worth recording rather than merely
+replacing.
+
+**It over-refuses.** A source whose terms permit querying and forbid
+republishing could never be enabled, though a purely local lookup is exactly
+what those terms permit. Requiring redistribution rights to perform a permitted
+local lookup is a category error, and it would have quietly disqualified a
+whole class of otherwise usable sources.
+
+**It under-refuses, which is worse.** `permitted` in those three fields said
+nothing about whether ScamWall could fetch the data at all, keep a local copy,
+use it to annotate other records, or train on it. Those operations were
+authorised by silence. Model training in particular is frequently prohibited by
+terms that permit everything else, and the old model had nowhere to record that
+and no way to act on it.
+
+**And `conditional` was effectively a permission.** It was accepted as
+sufficient to enable a source, on the reasoning that "the condition may well be
+met". Nothing recorded what the condition was, whether anyone had checked, or
+what they concluded.
+
+**Fixed** by making authorization per operation. Seven operations — retrieval,
+local storage, enrichment, model training, commercial use, redistribution,
+derived output — each carry a grant. An operation with no grant is refused:
+silence is not a permission. `conditional` authorises only when every
+enumerated condition is recorded satisfied **with a basis**; unsatisfied and
+unassessed both refuse, because an unmet condition and an unchecked one are the
+same thing at the moment the operation would happen. `enabled` is checked
+against `intended_operations` alone, so permission to query never becomes
+permission to publish and a local lookup never needs redistribution rights.
+
+#### FINDING-64 — rights assertions carried no evidence
+
+A record could say `commercial_use: permitted` and cite nothing. The registry's
+claim to be evidence rests entirely on assertions being traceable to a document
+and a date, and the schema provided neither.
+
+Worse, it provided no way to keep apart four things whose blurring is the usual
+route to an untrustworthy provenance record: what the provider's terms **say**,
+what the documentation says the product **can do**, this project's **reading**
+of either, and what remains **unknown**. A single free-text field would have
+let a marketing page describing a capability stand in as a term of licence,
+which ORDER 2 §4 names explicitly as a mistake not to make.
+
+**Fixed.** Every asserting grant cites `provider_terms` — an https URL, the day
+it was read, and the quote — and evidence has four separate slots, validated
+independently. `unknown` and `not_applicable` assert nothing and need no
+citation, which is the distinction that keeps the requirement honest rather
+than a box to fill.
+
+#### FINDING-65 — deleting a record without retiring its id bypassed "never reused"
+
+`retired_source_ids` was added in FINDING-62 to make "never reused" checkable.
+It did not make it enforced. Nothing required a **removal** to retire the id it
+freed, so the ordinary sequence
+
+```
+commit N     src-0007 = "Provider A"
+commit N+1   the record is deleted; src-0007 is not retired
+commit N+2   src-0007 = "Provider B"
+```
+
+produced three files that each validate, while anything referencing `src-0007`
+silently changed meaning.
+
+**Fixed** by comparing versions. `ValidateAgainstBaseline` refuses a removal
+that did not retire, refuses an id dropped from the retired list, and catches a
+same-commit swap directly. A test walks **every consecutive committed pair** of
+the file's history.
+
+**Where it bites, stated because it is easy to overclaim.** The walk flags the
+**removal**, not the later reappearance — by the time an id is taken again the
+baseline no longer mentions it and nothing at that step can tell. A test
+asserts the reappearance step is silent, so the mechanism cannot later be
+mistaken for more than it is. Three rules together give the invariant and none
+gives it alone: removal must retire, retirement is permanent, a retired id
+cannot be taken. And the walk sees only the history git can show it: nothing
+about a rewritten history, nothing about a version that never reached a commit.
+
+#### FINDING-66 — lineage had no cycle detection, and unknown upstreams read as independence
+
+Self-edges, duplicates and dangling edges were refused. **Cycles were not
+detected at all**, so `A -> B -> C -> A` validated cleanly. Lineage is
+directional — a source cannot be derived from something derived from it — so a
+cycle is a contradiction, and any future deduplication or independence
+reasoning walking that graph would not terminate or would terminate wrongly.
+
+Separately, and more consequentially: a record with **no** documented upstreams
+was indistinguishable from a record whose upstreams **nobody had established**.
+The first is a primary observer; the second is an unknown. Treating them alike
+is precisely how three feeds sharing one upstream get counted as three
+independent sources — the thing `aggregation_dependencies` is advertised as
+preventing.
+
+**Fixed.** Cycle detection is a three-colour DFS reporting each cycle once,
+canonicalised so one cycle is not reported from several entry points.
+`upstream_sources_completeness` records how much is known, and
+`IndependenceClaimable` refuses to call independence demonstrated when the
+answer is `unknown` or `documented_partial`. A record claiming
+`documented_complete` while carrying lineage edges and listing no upstreams is
+refused as self-contradictory.
+
+It remains a check on what was **recorded**. It cannot discover a shared
+upstream nobody wrote down.
+
+#### FINDING-67 — input handling was whatever the decoder happened to do
+
+Four behaviours, none of them chosen:
+
+* **Duplicate JSON keys were accepted**, with `encoding/json` keeping the last
+  occurrence silently. For a document of record that is the worst available
+  resolution: a reviewer reading the file sees the first value, the program
+  uses the second, and both are reading the same bytes. A record carrying
+  `"commercial_use": "prohibited"` followed by `"commercial_use": "permitted"`
+  decoded to `permitted` with no diagnostic anywhere.
+* **A single wrongly typed field aborted the whole document**, discarding every
+  other diagnostic. One typo made the file unreadable rather than making one
+  field wrong.
+* **There was no size cap.** "Parse whatever arrives" is how a parser becomes a
+  denial-of-service surface, and `docs/SOURCE_REGISTRY.md` §4 is explicit that
+  downloaded records are untrusted input — the registry is no more trusted than
+  the things it describes.
+* **Trailing content after the document was accepted**, so `{...}{...}` read
+  the first object and discarded the second in silence.
+
+**Fixed**, each with defined behaviour and a test: duplicates refused by a token
+walk before any value exists; wrong types reported by path and the field
+dropped so validation of everything else continues; an 8 MiB cap; trailing
+content and unknown top-level keys refused. An unsupported `schema_version` now
+refuses **and stops**, rather than going on to emit confident findings about a
+document whose field meanings it does not know.
 
 ---
 

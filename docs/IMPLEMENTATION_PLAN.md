@@ -266,6 +266,26 @@ external blocker permits while ORDER 1's acceptance is still pending. It does
 not open ORDER 2's dependent acceptance, and it does not open Phase 3 for any
 source: Phase 3 does not open for a source with no disposition, and every
 catalog entry is still implicitly `unresolved`.
+**ORDER 2 §3 complete: the registry authorization semantics.** Reviewing the
+registry against the full source-qualification requirements found five defects
+in it — FINDING-63 to FINDING-67, fixed at `e8f8683`. The consequential one is
+FINDING-63: rights were three fields and a boolean, which over-refused a source
+whose terms permit a local lookup and forbid republication, and under-refused
+by saying nothing at all about retrieval, storage, enrichment or training.
+Authorization is now per operation, `conditional` authorises nothing until
+every condition is assessed and satisfied, and `unknown` refuses.
+`docs/VERIFICATION.md` §3.21, §4.18.
+
+**ORDER 2 §7 prepared:** `docs/EVALUATION_PROTOCOL.md`, written before any
+evaluation data exists. It proposes no numeric thresholds; §8 of that document
+gives each threshold's shape and rationale and leaves the value blank for
+agreement before the held-out window opens.
+
+**ORDER 2 §§4–6 remain blocked on the catalog.** No entry can be researched, so
+no wave can be selected, so no adapter contract can be written for sources that
+have not been chosen. ORDER 2 is **not accepted**: acceptance needs all 85
+entries to carry a disposition and zero do.
+
 
 ### 3.2 Approach for the outstanding items
 
