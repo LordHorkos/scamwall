@@ -2605,6 +2605,89 @@ relayed.
 
 ---
 
+### 3.24 Gate run on the clean committed tree at `d38a072` (ORDER 3)
+
+Run once, on the tree as committed, with nothing edited during the run. The
+working tree was confirmed clean before the command started and was not touched
+until it returned.
+
+| | |
+| --- | --- |
+| Command | `bash scripts/check.sh` |
+| Commit | `d38a072` — *docs: reconcile the operator evidence, correct the renewal rule, make the plan actionable* |
+| Direct exit status | **1**, captured from the command itself, not through a pipeline |
+| Result | **26 passed, 0 failed, 2 BLOCKED, 0 optional-skipped** |
+
+**The exit status is 1 and no gate failed.** `check.sh` exits non-zero when a
+required gate could not run, on the rule that a gate which did not run has
+proven nothing. Both blocked gates are the Docker pair, and the reason is
+unchanged and unfixable from this account:
+
+| BLOCKED gate | Reason |
+| --- | --- |
+| `docker build` | docker daemon not reachable by `scamwall` |
+| `container runtime verification` | docker daemon not reachable by `scamwall` — run `scripts/container-runtime-verify.sh` as the operator |
+
+`docker version` succeeds (the client is installed); `docker ps` fails with
+`permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`. The service account is not in the `docker` group,
+by standing decision, and **no attempt was made to widen that**. These two gates
+have been BLOCKED in every local run in this record.
+
+**Per-gate results.**
+
+| Group | Gates |
+| --- | --- |
+| toolchain | toolchain matches go.mod; toolchain go1.26.8 is a currently supported release |
+| go | gofmt clean; `go build ./...`; `go vet ./...`; `go test -race ./...` |
+| static analysis | staticcheck; shellcheck (all scripts); govulncheck self-test; govulncheck (by content) |
+| repository hygiene | secret scan (tree); secret scan controls; independent secret scan self-test; independent secret scan; container security (static); workflow policy self-test; workflow policy; no SIGPIPE-decided conditions |
+| gate reporting | gate diagnostics self-test; gate diagnostics regression tests |
+| compose definition | `docker compose config`; compose definition under runner conditions |
+| runtime verifier regression tests | runtime-verify regression tests; operator-handoff regression tests; entry-point file modes |
+| container runtime | **both BLOCKED**, as above |
+| working tree | no uncommitted generated artifacts |
+
+**Suite totals, measured separately so the numbers are not inferred from a
+green line.**
+
+| Suite | Result |
+| --- | --- |
+| `go test -race -count=1 ./...` | **9 packages ok, 0 failed**, direct exit status **0** |
+| `internal/sourceregistry` | **109 top-level tests, 158 including sub-tests, 0 failed.** 105 at `e8f8683`; the four are three FINDING-69 cases and the split of the shipped-registry assertion into two tests |
+| `scripts/tests/runtime-verify-test.sh` | **358 tests, 0 failed** |
+| `scripts/tests/operator-handoff-test.sh` | **393 tests, 0 failed** |
+
+**What this run renews, and what it does not.** `9bbf284` changes Go source
+under `internal/`, so `docs/REQUIREMENTS_MATRIX.md` §5 demotes every row whose
+Source names the changed file, plus SW-P1-13. No row's Source names
+`internal/sourceregistry`, so **the demotion is SW-P1-13 alone**, and this run
+renews it. `go list -deps ./cmd/scamwall` does not contain `sourceregistry`, so
+the shipped executable is byte-identical: **SW-P1-10 is untouched and no
+image-bound row moves.** SW-P1-05 and SW-P1-20 remain VERIFIED on image
+`sha256:0efff150…`. No `scripts/*.sh`, `container/Dockerfile`,
+`deploy/compose/compose.yaml` or workflow file changed, so no other row moves in
+either direction.
+
+**SW-P1-12 is untouched and remains IMPLEMENTED-UNVERIFIED.** No hosted run has
+seen any commit since `72bc84c`. The gate list this tree runs is **28 entries**,
+reporting 26 passed and 2 BLOCKED; run 34047025567 executed 24.
+
+*A counting note, because two conventions are in use in this record.* Elsewhere
+this list is described as "26", which is the number of gates that **passed**
+rather than the number that **ran**. Both figures are correct about different
+things, and the pair — 26 passed, 2 BLOCKED — is the unambiguous form. It is
+used here for that reason, and the earlier phrasing is left where it stands
+rather than rewritten, since it is accurate about the run it describes.
+
+**What was NOT done in this session**, stated because a reader should not have
+to infer it from silence: nothing was pushed; no image was built; no container
+was started; no request reached the household Pi-hole; no credential was opened;
+no provider was contacted, registered with, or paid; no feed, dataset or
+indicator was fetched; and no operator step was run.
+
+---
+
 ## 4. Findings raised by this session
 
 ### 4.1 FINDING-01 — `pipefail` + a short-circuiting `grep -q` silently inverts a match
