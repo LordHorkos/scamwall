@@ -1253,15 +1253,95 @@ if command -v docker >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       got="$(jq -er "$2" < "$REAL_JSON" 2>/dev/null)"
       if [ "$got" = "$3" ]; then pass "$1"; else fail "$1" "read '$got', expected '$3'"; fi
     }
+    # WHY THE EXPECTATIONS BELOW ARE COMPUTED RATHER THAN WRITTEN OUT —
+    # FINDING-71.
+    #
+    # Three of these cases used to assert the operator's own deployment values
+    # as string literals: gid 989, and the two /etc/scamwall/... bind sources.
+    # That made them pass on exactly one machine. The first hosted run to
+    # execute this suite failed all three, because CI points the same
+    # definition at throwaway fixtures under RUNNER_TEMP with the runner's own
+    # gid — which is the environment behaving exactly as designed.
+    #
+    # The case was never about the VALUES. Its subject, stated in the header
+    # above, is whether the jq FILTERS pick the right fields out of what the
+    # real Compose CLI emits, so that a drift between the canned fixture's
+    # shape and Compose's actual rendering is caught. Pinning the values tested
+    # the machine instead of the filter.
+    #
+    # So the expectation is resolved independently, by the shell, from the same
+    # inputs Compose uses and in the same precedence order. That is not
+    # circular: the program under test reaches the value through Compose's
+    # renderer and a jq filter, and this reaches it by reading the environment
+    # and the env-file directly. A filter that named the wrong field, or an
+    # env-file that stopped being consulted, still fails the case.
+    #
+    # `user` keeps its literal. It is fixed in compose.yaml, is not
+    # site-specific, and is the one value here a deployment must NOT be able to
+    # move — so a literal is the correct assertion for it, and it passed in CI.
+    resolve_site_var() { # <variable name> <compose.yaml default>
+      # Reproduces `${NAME:-default}` precedence without asking the program
+      # under test: an exported variable wins, then the --env-file's value,
+      # then the default written into compose.yaml. Empty counts as unset,
+      # exactly as `:-` treats it.
+      local name="$1" default="$2" from_file=""
+      if [ -n "${!name-}" ]; then printf '%s\n' "${!name}"; return 0; fi
+      if [ -f "$CHECKOUT/deploy/compose/.env" ]; then
+        from_file="$(sed -n "s/^[[:space:]]*${name}=//p" \
+          "$CHECKOUT/deploy/compose/.env" | tail -n 1)"
+      fi
+      if [ -n "$from_file" ]; then printf '%s\n' "$from_file"; return 0; fi
+      printf '%s\n' "$default"
+    }
+
+    EXPECT_GID="$(resolve_site_var SCAMWALL_SECRET_GID 65532)"
+    EXPECT_CREDENTIAL_SOURCE="$(resolve_site_var SCAMWALL_SECRET_FILE /etc/scamwall/secrets/pihole_app_password)"
+    EXPECT_CA_SOURCE="$(resolve_site_var SCAMWALL_CA_FILE /etc/scamwall/certs/pihole-ca.crt)"
+
     check_filter "the container user is read from the real resolved configuration" \
       '.services."scamwall".user' '65532:65532'
     check_filter "the supplementary group is read from the real resolved configuration" \
-      '.services."scamwall".group_add[0] | tostring' '989'
+      '.services."scamwall".group_add[0] | tostring' "$EXPECT_GID"
     check_filter "the secret source is read from the real resolved configuration" \
-      '.secrets.pihole_app_password.file' '/etc/scamwall/secrets/pihole_app_password'
+      '.secrets.pihole_app_password.file' "$EXPECT_CREDENTIAL_SOURCE"
     check_filter "the CA bind source is read from the real resolved configuration" \
       '.services."scamwall".volumes[] | select(.target == "/etc/scamwall/certs/pihole-ca.crt") | .source' \
-      '/etc/scamwall/certs/pihole-ca.crt'
+      "$EXPECT_CA_SOURCE"
+
+    # The site variables must actually REACH the rendering. Without this, the
+    # three cases above could pass while Compose ignored the environment
+    # entirely and fell back to compose.yaml's defaults — the resolver would
+    # fall back to the same defaults, and two wrongs would agree.
+    #
+    # So the definition is rendered a SECOND time with values chosen here, and
+    # the render must show them. The values are deliberately unlike anything a
+    # deployment would use, and no file has to exist: `compose config` renders,
+    # it does not open bind sources. This runs identically on every host, so
+    # the case count does not depend on what the environment happens to set —
+    # a suite whose total moves with the machine is hard to hold to account.
+    OVERRIDE_JSON="$ROOT/real-compose-config-overridden.json"
+    if env SCAMWALL_SECRET_GID=4242 \
+           SCAMWALL_SECRET_FILE=/nonexistent/test-only/secret \
+           SCAMWALL_CA_FILE=/nonexistent/test-only/ca.crt \
+           docker compose --env-file "$CHECKOUT/deploy/compose/.env" \
+             -f "$CHECKOUT/deploy/compose/compose.yaml" config --format json \
+             > "$OVERRIDE_JSON" 2>/dev/null; then
+      check_override() { # <label> <filter> <expected>
+        local got
+        got="$(jq -er "$2" < "$OVERRIDE_JSON" 2>/dev/null)"
+        if [ "$got" = "$3" ]; then pass "$1"; else fail "$1" "read '$got', expected '$3'"; fi
+      }
+      check_override "SCAMWALL_SECRET_GID reaches the rendered definition" \
+        '.services."scamwall".group_add[0] | tostring' '4242'
+      check_override "SCAMWALL_SECRET_FILE reaches the rendered definition" \
+        '.secrets.pihole_app_password.file' '/nonexistent/test-only/secret'
+      check_override "SCAMWALL_CA_FILE reaches the rendered definition" \
+        '.services."scamwall".volumes[] | select(.target == "/etc/scamwall/certs/pihole-ca.crt") | .source' \
+        '/nonexistent/test-only/ca.crt'
+    else
+      fail "the overridden definition renders" \
+        "the real Compose CLI resolved the definition unmodified but not with overrides set"
+    fi
     # The array-vs-object rendering of extra_hosts, and the `=` separator the
     # array form uses, were both found BY THIS CASE: the canned fixture had the
     # object form and the program would have passed `pi.hole=host-gateway` to
